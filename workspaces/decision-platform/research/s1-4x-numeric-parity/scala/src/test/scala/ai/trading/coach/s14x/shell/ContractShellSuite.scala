@@ -9,6 +9,12 @@ import java.security.MessageDigest
 import munit.FunSuite
 
 final class ContractShellSuite extends FunSuite:
+  private val s1Root =
+    Path
+      .of("workspaces/decision-platform/research/s1-4x-numeric-parity")
+      .toAbsolutePath
+      .normalize()
+
   private def sha256(payload: Array[Byte]): String =
     MessageDigest
       .getInstance("SHA-256")
@@ -73,6 +79,16 @@ final class ContractShellSuite extends FunSuite:
   test("stable error registry는 19+13 exact code를 가진다"):
     assertEquals(StableError.values.length, 32)
     assertEquals(StableError.values.map(_.code).toSet.size, 32)
+
+  test("frozen canonical request는 20개 function argument contract를 모두 total lookup한다"):
+    val request =
+      Files.readString(
+        s1Root.resolve("contract/fixtures/small/canonical-inputs.v1.json")
+      )
+    assertEquals(
+      ContractDecoder.decode(request).map(_.cases.map(_.functionId).distinct),
+      Right(FunctionId.values.toVector),
+    )
 
   test("binary manifest argument identity 불일치는 transport failure다"):
     val root = Files.createTempDirectory("s14x-binary-identity")
