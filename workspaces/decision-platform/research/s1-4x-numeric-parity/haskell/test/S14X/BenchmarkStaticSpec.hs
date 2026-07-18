@@ -78,6 +78,8 @@ frozenFixtureHarness = do
           "sha256Hex payload",
           "getDoublele",
           "env",
+          "setupPreparedCase",
+          "validateBenchmarkResults",
           "nf runPrepared"
         ]
       forbidden =
