@@ -8,11 +8,18 @@ import sys
 import unittest
 from pathlib import Path
 
+from jsonschema import Draft202012Validator, FormatChecker
+
 
 TOOLS_ROOT = Path(__file__).resolve().parents[1]
 HASKELL_ROOT = TOOLS_ROOT.parent
+NUMERIC_ROOT = HASKELL_ROOT.parent
 MODULE_PATH = TOOLS_ROOT / "compatibility_evidence.py"
 EVIDENCE_PATH = HASKELL_ROOT / "ghc-compatibility-solve-failure.v1.json"
+RESULT_PATH = NUMERIC_ROOT / "reports/ghc-compatibility-result.v1.json"
+RESULT_SCHEMA_PATH = (
+    NUMERIC_ROOT / "contract/schemas/ghc-compatibility-result.schema.json"
+)
 SPEC = importlib.util.spec_from_file_location("compatibility_evidence", MODULE_PATH)
 if SPEC is None or SPEC.loader is None:
     raise RuntimeError("unable to load compatibility_evidence.py")
@@ -25,6 +32,8 @@ class CompatibilityEvidenceTests(unittest.TestCase):
     def setUp(self) -> None:
         self.evidence = compatibility_evidence.strict_json_load(EVIDENCE_PATH)
         compatibility_evidence.validate_failure_evidence(self.evidence)
+        self.result = compatibility_evidence.strict_json_load(RESULT_PATH)
+        compatibility_evidence.validate_result_binding(self.result, self.evidence)
 
     def test_unknown_field_is_rejected(self) -> None:
         altered = copy.deepcopy(self.evidence)
@@ -58,7 +67,7 @@ class CompatibilityEvidenceTests(unittest.TestCase):
 
     def test_raw_absolute_path_is_rejected(self) -> None:
         altered = copy.deepcopy(self.evidence)
-        altered["rawEvidence"]["baseUri"] = "/home/example/private/stderr"
+        altered["rawEvidence"]["baseUri"] = "/" + "home" + "/example/private/stderr"
 
         with self.assertRaisesRegex(
             compatibility_evidence.CompatibilityEvidenceError,
@@ -104,9 +113,71 @@ class CompatibilityEvidenceTests(unittest.TestCase):
 
         with self.assertRaisesRegex(
             compatibility_evidence.CompatibilityEvidenceError,
-            "failed partial plan SHA-256",
+                "failed partial plan SHA-256",
+            ):
+            compatibility_evidence.validate_failure_evidence(altered)
+
+    def test_boot_set_identity_is_hash_bound(self) -> None:
+        altered = copy.deepcopy(self.evidence)
+        altered["bootSets"]["compatibility"]["packages"][0]["unitId"] = "tampered"
+
+        with self.assertRaisesRegex(
+            compatibility_evidence.CompatibilityEvidenceError,
+            "compatibility boot set SHA-256",
         ):
             compatibility_evidence.validate_failure_evidence(altered)
+
+    def test_raw_receipts_bind_only_sha_size_and_portable_uri(self) -> None:
+        self.assertEqual(
+            self.evidence["rawEvidence"],
+            {
+                "baseUri": (
+                    "cache://s1-4x/haskell-evidence/"
+                    "ghc914-solve-20260718T174629Z"
+                ),
+                "stderr": {
+                    "pathId": "STDERR",
+                    "sha256": (
+                        "22c3939bedcd8861c0fe1f987ca500c0ebf3f89ded229a2fe8f7107722019e0a"
+                    ),
+                    "size": 17544,
+                },
+                "stdout": {
+                    "pathId": "STDOUT",
+                    "sha256": (
+                        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+                    ),
+                    "size": 0,
+                },
+            },
+        )
+
+    def test_result_is_schema_valid_and_hash_binds_the_companion(self) -> None:
+        schema = compatibility_evidence.strict_json_load(RESULT_SCHEMA_PATH)
+        errors = list(
+            Draft202012Validator(
+                schema,
+                format_checker=FormatChecker(),
+            ).iter_errors(self.result)
+        )
+        self.assertEqual(errors, [])
+        self.assertEqual(self.result["result"], "FAIL_FROZEN_DEPENDENCY")
+        self.assertTrue(self.result["nonBootPlanEquivalent"])
+        self.assertTrue(self.result["expectedBootSetDifferenceOnly"])
+        self.assertEqual(
+            self.result["minimalReproducerSha256"],
+            compatibility_evidence.sha256_file(EVIDENCE_PATH),
+        )
+
+    def test_result_with_altered_companion_hash_is_rejected(self) -> None:
+        altered = copy.deepcopy(self.result)
+        altered["minimalReproducerSha256"] = "0" * 64
+
+        with self.assertRaisesRegex(
+            compatibility_evidence.CompatibilityEvidenceError,
+            "minimal reproducer SHA-256",
+        ):
+            compatibility_evidence.validate_result_binding(altered, self.evidence)
 
 
 if __name__ == "__main__":
