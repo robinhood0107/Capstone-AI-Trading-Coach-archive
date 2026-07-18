@@ -1,0 +1,33 @@
+- arguments:
+    - -XGHC2024
+    - -XNoCPP
+    - -XNoTemplateHaskell
+    - -XNoMagicHash
+    - -XNoRebindableSyntax
+    - -XNoForeignFunctionInterface
+    - -XNoLinearTypes
+    - -XNoStrict
+    - -XNoGeneralizedNewtypeDeriving
+    - -XNoDerivingVia
+    - -XNoDeriveAnyClass
+- modules:
+    - name:
+        - Debug.Trace
+        - Foreign
+        - GHC.IO.Unsafe
+        - System.IO.Unsafe
+      within: []
+- functions:
+    - name:
+        - error
+        - head
+        - init
+        - last
+        - read
+        - tail
+        - undefined
+        - unsafeCoerce
+        - unsafeDupablePerformIO
+        - unsafeInterleaveIO
+        - unsafePerformIO
+      within: []
