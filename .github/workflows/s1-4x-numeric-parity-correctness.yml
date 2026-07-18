@@ -539,7 +539,10 @@ jobs:
           set -euo pipefail
           S1_4X="$GITHUB_WORKSPACE/workspaces/decision-platform/research/s1-4x-numeric-parity"
           RESULT_DIR="$RUNNER_TEMP/s1-4x-results"
-          CROSS="$RUNNER_TEMP/s1-4x-cross-language"
+          CROSS_ROOT="$RUNNER_TEMP/s1-4x-cross-language"
+          CROSS="$CROSS_ROOT/native"
+          COVERAGE="$CROSS_ROOT/coverage"
+          mkdir -p "$CROSS_ROOT"
           SCALA_PROFILE="$(
             jq -r '.selectedProfileId' \
               "$RESULT_DIR/scala/scala-selected-profile-result.v1.json"
@@ -566,6 +569,42 @@ jobs:
           export S1_4X_HASKELL_QUALIFICATION_ARTIFACT=\
             "$RESULT_DIR/haskell/qualification/qualification-artifact.v1.json"
 
+          uv run --frozen --project "$S1_4X/oracle" \
+            python "$S1_4X/integration/coverage_execution.py" \
+            --candidate scala \
+            --runner "$S1_4X/scala/tools/run-property-evidence.sh" \
+            --output-directory "$COVERAGE/scala" \
+            --receipt "$COVERAGE/scala-coverage-receipt.json" \
+            --property-plan "$S1_4X/contract/property-plan.v1.json" \
+            --function-registry "$S1_4X/contract/function-registry.v1.json" \
+            --error-registry "$S1_4X/contract/error-registry.v1.json"
+          uv run --frozen --project "$S1_4X/oracle" \
+            python "$S1_4X/integration/coverage_execution.py" \
+            --candidate haskell \
+            --runner "$S1_4X/haskell/tools/run-property-evidence.sh" \
+            --output-directory "$COVERAGE/haskell" \
+            --receipt "$COVERAGE/haskell-coverage-receipt.json" \
+            --property-plan "$S1_4X/contract/property-plan.v1.json" \
+            --function-registry "$S1_4X/contract/function-registry.v1.json" \
+            --error-registry "$S1_4X/contract/error-registry.v1.json"
+          uv run --frozen --project "$S1_4X/oracle" \
+            python "$S1_4X/integration/coverage_gate.py" \
+            --property-plan "$S1_4X/contract/property-plan.v1.json" \
+            --function-registry "$S1_4X/contract/function-registry.v1.json" \
+            --error-registry "$S1_4X/contract/error-registry.v1.json" \
+            --scala-property-report \
+              "$COVERAGE/scala/scala-property-report.v1.json" \
+            --scala-registry-report \
+              "$COVERAGE/scala/scala-registry-report.v1.json" \
+            --scala-execution-report \
+              "$COVERAGE/scala/scala-property-execution-evidence.v1.json" \
+            --haskell-property-report \
+              "$COVERAGE/haskell/haskell-property-report.v1.json" \
+            --haskell-registry-report \
+              "$COVERAGE/haskell/haskell-registry-report.v1.json" \
+            --haskell-execution-report \
+              "$COVERAGE/haskell/haskell-property-execution-evidence.v1.json" \
+            --output "$COVERAGE/integration-coverage.json"
           "$S1_4X/integration/tools/run-integration-correctness.sh" "$CROSS"
           uv run --frozen --project "$S1_4X/oracle" \
             python "$S1_4X/oracle/compare_results.py" \
