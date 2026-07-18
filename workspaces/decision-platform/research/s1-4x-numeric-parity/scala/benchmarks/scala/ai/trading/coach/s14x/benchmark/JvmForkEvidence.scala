@@ -27,7 +27,13 @@ object JvmForkEvidence:
     "S1_4X_BENCHMARK_RUN_MODE",
     "S1_4X_FIXTURE_ROOT",
     EvidenceDirectoryVariable,
-    MeasurementReadyMarkerVariable
+    MeasurementReadyMarkerVariable,
+    "S1_4X_SCALA_WORKSPACE",
+    "COURSIER_CACHE",
+    "COURSIER_CONFIG_DIR",
+    "SCALA_CLI_HOME",
+    "SCALA_CLI_CONFIG",
+    "XDG_CONFIG_HOME"
   )
   private val AmbientJvmOptionNames =
     Vector("JAVA_TOOL_OPTIONS", "_JAVA_OPTIONS", "JDK_JAVA_OPTIONS")

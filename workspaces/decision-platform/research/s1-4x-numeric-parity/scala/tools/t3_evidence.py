@@ -8,7 +8,9 @@ import datetime as dt
 import hashlib
 import json
 import math
+import os
 import re
+import stat
 import statistics
 import sys
 from pathlib import Path
@@ -30,6 +32,26 @@ PROFILE_CLI_ARGUMENTS = {
     profile: [f"--scalac-option={option}" for option in options]
     for profile, options in PROFILE_OPTIONS.items()
 }
+
+
+def isolated_scala_workspace(output_directory: Path) -> Path:
+    """Standalone JMH wrapper와 같은 external `.scala-build` 위치를 계산한다."""
+
+    cache_root = Path(
+        os.environ.get(
+            "S1_4X_CACHE_ROOT",
+            str(Path.home() / ".cache/s1-4x"),
+        )
+    )
+    isolation_key = hashlib.sha256(
+        str(output_directory).encode("utf-8")
+    ).hexdigest()
+    return (
+        cache_root
+        / "scala-isolation"
+        / isolation_key
+        / "scala-workspace"
+    )
 JMH_BENCHMARKS = {
     "path-transform": (
         "s1_4x.benchmarks.path_transform."
@@ -71,6 +93,222 @@ EXTRA_SEMANTIC_SYMBOLS = {
     "DisableSyntax.isInstanceOf",
     "DisableSyntax.throw",
 }
+
+
+def sha256_bytes(payload: bytes) -> str:
+    """이미 고정된 immutable bytes의 SHA-256을 계산한다."""
+
+    return hashlib.sha256(payload).hexdigest()
+
+
+class SealedArtifact:
+    """한 번 연 regular inode에서 읽은 immutable evidence bytes와 identity다."""
+
+    def __init__(
+        self,
+        *,
+        path: Path,
+        root: Path,
+        payload: bytes,
+        identity: tuple[int, int, int, int, int, int],
+        label: str,
+    ) -> None:
+        self.path = path
+        self.root = root
+        self.payload = payload
+        self.identity = identity
+        self.label = label
+        self.sha256 = sha256_bytes(payload)
+
+    def json_value(self) -> Any:
+        """Path를 재개방하지 않고 capture 당시 bytes만 strict JSON으로 해석한다."""
+
+        try:
+            text = self.payload.decode("utf-8")
+        except UnicodeError as error:
+            raise T3EvidenceError(
+                f"SEALED_EVIDENCE_UTF8_INVALID:{self.label}"
+            ) from error
+        try:
+            return json.loads(
+                text,
+                parse_constant=lambda token: (_ for _ in ()).throw(
+                    T3EvidenceError(
+                        f"NONFINITE_JSON:{self.label}:{token}"
+                    )
+                ),
+                object_pairs_hook=reject_duplicate_keys,
+            )
+        except json.JSONDecodeError as error:
+            raise T3EvidenceError(
+                f"SEALED_EVIDENCE_JSON_INVALID:{self.label}"
+            ) from error
+
+
+class SealedEvidenceSnapshot:
+    """Selector 한 번의 모든 hash/parse를 같은 captured bytes에 결속한다."""
+
+    def __init__(self) -> None:
+        self._artifacts: dict[Path, SealedArtifact] = {}
+
+    @staticmethod
+    def _canonical_root(root: Path) -> Path:
+        if not root.is_absolute() or root.is_symlink() or not root.is_dir():
+            raise T3EvidenceError("SEALED_EVIDENCE_ROOT_INVALID")
+        resolved = root.resolve(strict=True)
+        if resolved != root:
+            raise T3EvidenceError("SEALED_EVIDENCE_ROOT_NOT_CANONICAL")
+        return root
+
+    @staticmethod
+    def _identity(value: os.stat_result) -> tuple[int, int, int, int, int, int]:
+        return (
+            value.st_dev,
+            value.st_ino,
+            value.st_mode,
+            value.st_size,
+            value.st_mtime_ns,
+            value.st_ctime_ns,
+        )
+
+    @classmethod
+    def _open_lexical(
+        cls,
+        path: Path,
+        *,
+        root: Path,
+        label: str,
+    ) -> tuple[int, tuple[int, int, int, int, int, int]]:
+        canonical_root = cls._canonical_root(root)
+        if not path.is_absolute():
+            raise T3EvidenceError(f"SEALED_EVIDENCE_PATH_NOT_ABSOLUTE:{label}")
+        try:
+            relative = path.relative_to(canonical_root)
+        except ValueError as error:
+            raise T3EvidenceError(
+                f"SEALED_EVIDENCE_OUTSIDE_ROOT:{label}"
+            ) from error
+        if not relative.parts or any(part in {"", ".", ".."} for part in relative.parts):
+            raise T3EvidenceError(f"SEALED_EVIDENCE_PATH_INVALID:{label}")
+
+        directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        file_flags = os.O_RDONLY | os.O_NOFOLLOW
+        current = os.open(canonical_root, directory_flags)
+        try:
+            for component in relative.parts[:-1]:
+                next_directory = os.open(
+                    component,
+                    directory_flags,
+                    dir_fd=current,
+                )
+                os.close(current)
+                current = next_directory
+            descriptor = os.open(
+                relative.parts[-1],
+                file_flags,
+                dir_fd=current,
+            )
+        except OSError as error:
+            raise T3EvidenceError(
+                f"SEALED_EVIDENCE_OPEN_FAILED:{label}"
+            ) from error
+        finally:
+            os.close(current)
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_nlink != 1
+            or metadata.st_size < 0
+        ):
+            os.close(descriptor)
+            raise T3EvidenceError(
+                f"SEALED_EVIDENCE_NOT_SINGLE_REGULAR:{label}"
+            )
+        return descriptor, cls._identity(metadata)
+
+    def capture(
+        self,
+        path: Path,
+        *,
+        root: Path,
+        label: str,
+    ) -> SealedArtifact:
+        """O_NOFOLLOW/openat으로 연 inode를 한 번 읽고 process-local bytes로 고정한다."""
+
+        key = path
+        existing = self._artifacts.get(key)
+        if existing is not None:
+            return existing
+        descriptor, before = self._open_lexical(path, root=root, label=label)
+        try:
+            chunks: list[bytes] = []
+            while True:
+                chunk = os.read(descriptor, 1024 * 1024)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+            after = self._identity(os.fstat(descriptor))
+        finally:
+            os.close(descriptor)
+        payload = b"".join(chunks)
+        if before != after or len(payload) != before[3]:
+            raise T3EvidenceError(
+                f"SEALED_EVIDENCE_CHANGED_DURING_CAPTURE:{label}"
+            )
+        artifact = SealedArtifact(
+            path=path,
+            root=root,
+            payload=payload,
+            identity=before,
+            label=label,
+        )
+        self._artifacts[key] = artifact
+        return artifact
+
+    def sha256(self, path: Path, *, root: Path, label: str) -> str:
+        return self.capture(path, root=root, label=label).sha256
+
+    def json_value(self, path: Path, *, root: Path, label: str) -> Any:
+        return self.capture(path, root=root, label=label).json_value()
+
+    def json_object(self, path: Path, *, root: Path, label: str) -> dict[str, Any]:
+        value = self.json_value(path, root=root, label=label)
+        if not isinstance(value, dict):
+            raise T3EvidenceError(f"JSON_OBJECT_REQUIRED:{label}")
+        return value
+
+    def verify_unchanged(self) -> None:
+        """선택 종료 시 pathname이 capture inode/bytes에서 벗어나지 않았는지 확인한다."""
+
+        for path, artifact in self._artifacts.items():
+            descriptor, identity = self._open_lexical(
+                path,
+                root=self._root_for(path),
+                label=artifact.label,
+            )
+            try:
+                digest = hashlib.sha256()
+                size = 0
+                while True:
+                    chunk = os.read(descriptor, 1024 * 1024)
+                    if not chunk:
+                        break
+                    size += len(chunk)
+                    digest.update(chunk)
+            finally:
+                os.close(descriptor)
+            if (
+                identity != artifact.identity
+                or size != len(artifact.payload)
+                or digest.hexdigest() != artifact.sha256
+            ):
+                raise T3EvidenceError(
+                    f"SEALED_EVIDENCE_PATH_SUBSTITUTED:{artifact.label}"
+                )
+
+    def _root_for(self, path: Path) -> Path:
+        artifact = self._artifacts[path]
+        return artifact.root
 
 
 def sha256_file(path: Path) -> str:
@@ -333,7 +571,11 @@ def validate_correctness(correctness: dict[str, dict[str, Any]]) -> None:
         "status",
     }
     matrix_keys = {
+        "candidateResultSha256",
+        "semanticResultSha256",
         "unitTestResultSha256",
+        "unitStdoutSha256",
+        "unitStderrSha256",
         "canonicalComparisonSha256",
         "semanticComparisonSha256",
         "propertyReportSha256",
@@ -388,6 +630,193 @@ def validate_correctness(correctness: dict[str, dict[str, Any]]) -> None:
         raise T3EvidenceError("PROFILE_CORRECTNESS_TOOL_INPUT_DRIFT")
 
 
+CORRECTNESS_LOCAL_ARTIFACTS = {
+    "candidateResultSha256": ("canonical-results.json", True),
+    "semanticResultSha256": ("semantic-errors.json", True),
+    "unitTestResultSha256": (
+        "scala-profile-unit-test-result.v1.json",
+        True,
+    ),
+    "unitStdoutSha256": ("unit-test.stdout", False),
+    "unitStderrSha256": ("unit-test.stderr", False),
+    "canonicalComparisonSha256": ("canonical-comparison.json", True),
+    "semanticComparisonSha256": ("semantic-comparison.json", True),
+    "propertyReportSha256": (
+        "property/scala-property-report.v1.json",
+        True,
+    ),
+    "registryReportSha256": (
+        "property/scala-registry-report.v1.json",
+        True,
+    ),
+    "propertyExecutionEvidenceSha256": (
+        "property/scala-property-execution-evidence.v1.json",
+        True,
+    ),
+}
+CORRECTNESS_FROZEN_ARTIFACTS = {
+    "propertyPlanSha256": "contract/property-plan.v1.json",
+    "propertySeedCorpusSha256": (
+        "contract/fixtures/property/property-seeds.v1.json"
+    ),
+    "functionRegistrySha256": "contract/function-registry.v1.json",
+    "errorRegistrySha256": "contract/error-registry.v1.json",
+}
+
+
+def validate_correctness_artifact_closure(
+    *,
+    correctness: dict[str, dict[str, Any]],
+    correctness_sha256: dict[str, str],
+    correctness_root: Path,
+    scala_root: Path,
+    snapshot: SealedEvidenceSnapshot,
+) -> None:
+    """A/B/C aggregate가 가리키는 candidate/raw/log/registry bytes를 전부 다시 연다."""
+
+    if (
+        not correctness_root.is_absolute()
+        or correctness_root.is_symlink()
+        or not correctness_root.is_dir()
+    ):
+        raise T3EvidenceError("PROFILE_CORRECTNESS_ROOT_INVALID")
+    s1_root = scala_root.parent
+    for profile in SCALA_PROFILES:
+        profile_root = correctness_root / profile
+        aggregate_path = (
+            profile_root / "scala-profile-correctness-result.v1.json"
+        )
+        aggregate = snapshot.json_object(
+            aggregate_path,
+            root=correctness_root,
+            label=f"correctness.{profile}.aggregate",
+        )
+        if (
+            aggregate != correctness[profile]
+            or snapshot.sha256(
+                aggregate_path,
+                root=correctness_root,
+                label=f"correctness.{profile}.aggregate",
+            )
+            != correctness_sha256[profile]
+        ):
+            raise T3EvidenceError(
+                f"PROFILE_CORRECTNESS_AGGREGATE_BYTE_DRIFT:{profile}"
+            )
+        matrix = aggregate["matrix"]
+        for field, (relative, parse_json) in CORRECTNESS_LOCAL_ARTIFACTS.items():
+            path = profile_root / relative
+            artifact = snapshot.capture(
+                path,
+                root=correctness_root,
+                label=f"correctness.{profile}.{field}",
+            )
+            if artifact.sha256 != matrix[field]:
+                raise T3EvidenceError(
+                    f"PROFILE_CORRECTNESS_RAW_HASH_DRIFT:{profile}:{field}"
+                )
+            if parse_json:
+                value = artifact.json_value()
+                if not isinstance(value, dict):
+                    raise T3EvidenceError(
+                        f"PROFILE_CORRECTNESS_RAW_OBJECT_REQUIRED:{profile}:{field}"
+                    )
+
+        candidate = snapshot.capture(
+            profile_root / "candidate.jar",
+            root=correctness_root,
+            label=f"correctness.{profile}.candidate",
+        )
+        if candidate.sha256 != aggregate["candidateSha256"]:
+            raise T3EvidenceError(
+                f"PROFILE_CORRECTNESS_CANDIDATE_DRIFT:{profile}"
+            )
+
+        unit = snapshot.json_object(
+            profile_root / "scala-profile-unit-test-result.v1.json",
+            root=correctness_root,
+            label=f"correctness.{profile}.unit",
+        )
+        canonical_result = snapshot.json_object(
+            profile_root / "canonical-results.json",
+            root=correctness_root,
+            label=f"correctness.{profile}.canonicalResult",
+        )
+        semantic_result = snapshot.json_object(
+            profile_root / "semantic-errors.json",
+            root=correctness_root,
+            label=f"correctness.{profile}.semanticResult",
+        )
+        canonical_comparison = snapshot.json_object(
+            profile_root / "canonical-comparison.json",
+            root=correctness_root,
+            label=f"correctness.{profile}.canonicalComparison",
+        )
+        semantic_comparison = snapshot.json_object(
+            profile_root / "semantic-comparison.json",
+            root=correctness_root,
+            label=f"correctness.{profile}.semanticComparison",
+        )
+        property_report = snapshot.json_object(
+            profile_root / "property/scala-property-report.v1.json",
+            root=correctness_root,
+            label=f"correctness.{profile}.propertyReport",
+        )
+        registry_report = snapshot.json_object(
+            profile_root / "property/scala-registry-report.v1.json",
+            root=correctness_root,
+            label=f"correctness.{profile}.registryReport",
+        )
+        property_execution = snapshot.json_object(
+            profile_root
+            / "property/scala-property-execution-evidence.v1.json",
+            root=correctness_root,
+            label=f"correctness.{profile}.propertyExecution",
+        )
+        if (
+            unit.get("profileId") != profile
+            or unit.get("status") != "PASS"
+            or unit.get("exitCode") != 0
+            or unit.get("stdoutSha256") != matrix["unitStdoutSha256"]
+            or unit.get("stderrSha256") != matrix["unitStderrSha256"]
+            or canonical_result.get("implementation")
+            != "scala-3.8.4-jvm25"
+            or canonical_result.get("requestId")
+            != "s1.4x-canonical-small-v1"
+            or not isinstance(canonical_result.get("results"), list)
+            or semantic_result.get("implementation")
+            != "scala-3.8.4-jvm25"
+            or semantic_result.get("requestId")
+            != "s1.4x-semantic-errors-v1"
+            or not isinstance(semantic_result.get("results"), list)
+            or canonical_comparison.get("status") != "PASS"
+            or canonical_comparison.get("mismatchCount") != 0
+            or semantic_comparison.get("status") != "PASS"
+            or semantic_comparison.get("mismatchCount") != 0
+            or property_report.get("status") != "PASS"
+            or registry_report.get("status") != "PASS"
+            or property_execution.get("status") != "PASS"
+            or property_execution.get("toolchainProfile") != profile
+        ):
+            raise T3EvidenceError(
+                f"PROFILE_CORRECTNESS_RAW_RECEIPT_INVALID:{profile}"
+            )
+
+        for field, relative in CORRECTNESS_FROZEN_ARTIFACTS.items():
+            path = s1_root / relative
+            if (
+                snapshot.sha256(
+                    path,
+                    root=s1_root,
+                    label=f"correctness.frozen.{field}",
+                )
+                != matrix[field]
+            ):
+                raise T3EvidenceError(
+                    f"PROFILE_CORRECTNESS_FROZEN_HASH_DRIFT:{field}"
+                )
+
+
 JMH_RUN_RESULT_KEYS = {
     "schemaVersion",
     "profileId",
@@ -399,12 +828,17 @@ JMH_RUN_RESULT_KEYS = {
     "benchmarkPlanSha256",
     "sourceInputManifestSha256",
     "scalaCliBinarySha256",
+    "scalaCliExecutionPathId",
     "compilerProfilesSha256",
     "profileOptionsSha256",
     "inputPaths",
     "portableArgv",
     "portableArgvSha256",
     "runtimeArgvSha256",
+    "commandToolClosure",
+    "commandToolClosureSha256",
+    "environmentValuesSha256",
+    "scalaWorkspacePathId",
     "rawNativeJsonSha256",
     "effectiveJvmArgsSha256",
     "jvmArgumentAllowlistSha256",
@@ -416,6 +850,94 @@ JMH_RUN_RESULT_KEYS = {
     "status",
     "aggregateStatus",
 }
+SCALA_BENCHMARK_ENVIRONMENT_VALUES = {
+    "COURSIER_CACHE": "CACHE_ROOT/coursier",
+    "COURSIER_CONFIG_DIR": "SCALA_ISOLATION/coursier-config",
+    "SCALA_CLI_CONFIG": "SCALA_ISOLATION/scala-cli-home/config.json",
+    "SCALA_CLI_HOME": "SCALA_ISOLATION/scala-cli-home",
+    "S1_4X_SCALA_WORKSPACE": "SCALA_WORKSPACE",
+    "XDG_CONFIG_HOME": "SCALA_ISOLATION/xdg-config",
+}
+
+
+def command_tool_closure(
+    *,
+    scala_root: Path,
+    scala_cli: Path,
+    java_executable: Path,
+    run_mode: str,
+    snapshot: SealedEvidenceSnapshot,
+) -> list[dict[str, str]]:
+    """JMH shell이 실행하는 candidate-owned helper와 pinned JVM tool 순서를 고정한다."""
+
+    paths: list[tuple[str, Path, Path]] = [
+        ("SCALA_CLI_1_15_0", scala_cli, scala_cli.parent),
+        (
+            "TEMURIN_25_0_3_9_LTS/bin/java",
+            java_executable,
+            java_executable.parent.parent,
+        ),
+    ]
+    if run_mode == "full":
+        paths.append(
+            (
+                "SCALA_ROOT/tools/run-jmh-native-full.sh",
+                scala_root / "tools/run-jmh-native-full.sh",
+                scala_root,
+            )
+        )
+    elif run_mode not in {"smoke", "qualification"}:
+        raise T3EvidenceError("JMH_RUN_MODE_INVALID")
+    paths.extend(
+        [
+            (
+                "SCALA_ROOT/tools/run-jmh-native-smoke.sh",
+                scala_root / "tools/run-jmh-native-smoke.sh",
+                scala_root,
+            ),
+            (
+                "SCALA_ROOT/tools/compile-benchmarks.sh",
+                scala_root / "tools/compile-benchmarks.sh",
+                scala_root,
+            ),
+            (
+                "SCALA_ROOT/tools/assert-toolchain.sh",
+                scala_root / "tools/assert-toolchain.sh",
+                scala_root,
+            ),
+            (
+                "SCALA_ROOT/tools/assert-compiler-profiles.sh",
+                scala_root / "tools/assert-compiler-profiles.sh",
+                scala_root,
+            ),
+            (
+                "SCALA_ROOT/tools/check-jmh-plan-integrity.sh",
+                scala_root / "tools/check-jmh-plan-integrity.sh",
+                scala_root,
+            ),
+            (
+                "SCALA_ROOT/tools/source_input_manifest.py",
+                scala_root / "tools/source_input_manifest.py",
+                scala_root,
+            ),
+            (
+                "SCALA_ROOT/tools/t3_evidence.py",
+                scala_root / "tools/t3_evidence.py",
+                scala_root,
+            ),
+        ]
+    )
+    return [
+        {
+            "pathId": path_id,
+            "sha256": snapshot.sha256(
+                path,
+                root=root,
+                label=f"qualification.tool.{path_id}",
+            ),
+        }
+        for path_id, path, root in paths
+    ]
 HOST_VALIDITY_CHECK_IDS = {
     "disk.home-free-bytes",
     "memory.available-bytes",
@@ -448,12 +970,35 @@ def validate_measurement_ready_marker(
     expected_case_id: str,
     expected_profile: str,
     expected_run_mode: str,
+    snapshot: SealedEvidenceSnapshot | None = None,
+    artifact_root: Path | None = None,
 ) -> str:
     require_sha(
         expected_benchmark_plan_sha256,
         "measurementReady.benchmarkPlanSha256",
     )
-    marker = strict_json(path)
+    if snapshot is None:
+        marker = strict_json(path)
+        marker_sha256 = sha256_file(path)
+    else:
+        if artifact_root is None:
+            raise T3EvidenceError("MEASUREMENT_READY_ROOT_REQUIRED")
+        marker = snapshot.json_object(
+            path,
+            root=artifact_root,
+            label=(
+                "qualification.measurementReady."
+                f"{expected_profile}.{expected_case_id}"
+            ),
+        )
+        marker_sha256 = snapshot.sha256(
+            path,
+            root=artifact_root,
+            label=(
+                "qualification.measurementReady."
+                f"{expected_profile}.{expected_case_id}"
+            ),
+        )
     if (
         path.is_symlink()
         or set(marker)
@@ -478,7 +1023,7 @@ def validate_measurement_ready_marker(
         or marker.get("markerCardinality") != 1
     ):
         raise T3EvidenceError("MEASUREMENT_READY_MARKER_INVALID")
-    return sha256_file(path)
+    return marker_sha256
 
 
 def benchmark_case_contract(
@@ -525,12 +1070,17 @@ def validate_host_validity_artifact(
     profile: str,
     expected_sha256: str,
     plan: dict[str, Any],
+    snapshot: SealedEvidenceSnapshot,
 ) -> None:
     path = safe_artifact(
         artifact_root,
         Path(f"r{repetition}") / profile / "host-validity.json",
     )
-    report = strict_json(path)
+    report = snapshot.json_object(
+        path,
+        root=artifact_root,
+        label=f"qualification.host.r{repetition}.{profile}",
+    )
     policy = report.get("policy")
     checks = report.get("checks")
     frozen = plan.get("environmentValidity", {})
@@ -551,7 +1101,12 @@ def validate_host_validity_artifact(
         ),
     }
     if (
-        sha256_file(path) != expected_sha256
+        snapshot.sha256(
+            path,
+            root=artifact_root,
+            label=f"qualification.host.r{repetition}.{profile}",
+        )
+        != expected_sha256
         or set(report)
         != {
             "schemaVersion",
@@ -610,6 +1165,7 @@ def validate_qualification_case_artifacts(
     benchmark_plan_sha256: str,
     jvm_allowlist: dict[str, Any],
     jvm_allowlist_sha256: str,
+    snapshot: SealedEvidenceSnapshot,
 ) -> float:
     """선택기가 각 raw JMH/fork/log/process byte를 다시 열어 score를 재구성한다."""
 
@@ -640,9 +1196,17 @@ def validate_qualification_case_artifacts(
     stdout_path = safe_artifact(artifact_root, case_root / "jmh.stdout")
     stderr_path = safe_artifact(artifact_root, case_root / "jmh.stderr")
 
-    effective = strict_json(effective_path)
+    effective = snapshot.json_object(
+        effective_path,
+        root=artifact_root,
+        label=f"qualification.effective.r{repetition}.{profile}.{case_id}",
+    )
     recomputed_effective = validate_effective_jvm_evidence(
-        strict_json_value(fork_path),
+        snapshot.json_value(
+            fork_path,
+            root=artifact_root,
+            label=f"qualification.fork.r{repetition}.{profile}.{case_id}",
+        ),
         expected_forks=policy["forks"],
         allowlist=jvm_allowlist,
         allowlist_sha256=jvm_allowlist_sha256,
@@ -657,7 +1221,11 @@ def validate_qualification_case_artifacts(
         case_id,
     )
     recomputed_validation = validate_jmh_native_json(
-        strict_json_value(native_path),
+        snapshot.json_value(
+            native_path,
+            root=artifact_root,
+            label=f"qualification.native.r{repetition}.{profile}.{case_id}",
+        ),
         expected_benchmark=benchmark,
         expected_forks=policy["forks"],
         effective_jvm_arguments=effective["effectiveJvmArguments"],
@@ -667,7 +1235,14 @@ def validate_qualification_case_artifacts(
         expected_measurement_time=policy["measurementTime"],
         logical_operations_per_invocation=logical_operations,
     )
-    if strict_json(validation_path) != recomputed_validation:
+    if (
+        snapshot.json_object(
+            validation_path,
+            root=artifact_root,
+            label=f"qualification.validation.r{repetition}.{profile}.{case_id}",
+        )
+        != recomputed_validation
+    ):
         raise T3EvidenceError(
             f"QUALIFICATION_NATIVE_VALIDATION_DRIFT:{repetition}:{profile}:{case_id}"
         )
@@ -678,7 +1253,12 @@ def validate_qualification_case_artifacts(
     absolute_sources = [
         str(scala_root / path) for path in source_input_paths
     ]
+    runtime_workspace = isolated_scala_workspace(
+        artifact_root / case_root
+    )
     common_tail = [
+        "--workspace",
+        "SCALA_WORKSPACE",
         "--server=false",
         "--jvm",
         "system",
@@ -722,12 +1302,28 @@ def validate_qualification_case_artifacts(
         "--power",
         "run",
         *absolute_sources,
-        *common_tail,
+        "--workspace",
+        str(runtime_workspace),
+        *common_tail[2:],
         "-rff",
         str(artifact_root / case_root / "native.json"),
         include_regex,
     ]
-    run = strict_json(run_path)
+    java_home_value = os.environ.get("JAVA_HOME")
+    if not java_home_value:
+        raise T3EvidenceError("JAVA_HOME_REQUIRED")
+    expected_tool_closure = command_tool_closure(
+        scala_root=scala_root,
+        scala_cli=scala_cli,
+        java_executable=Path(java_home_value) / "bin/java",
+        run_mode="qualification",
+        snapshot=snapshot,
+    )
+    run = snapshot.json_object(
+        run_path,
+        root=artifact_root,
+        label=f"qualification.run.r{repetition}.{profile}.{case_id}",
+    )
     expected_score = recomputed_validation["rawScoreNsPerInvocation"]
     expected_normalized = recomputed_validation[
         "normalizedScoreNsPerLogicalOperation"
@@ -738,6 +1334,8 @@ def validate_qualification_case_artifacts(
         expected_case_id=case_id,
         expected_profile=profile,
         expected_run_mode="qualification",
+        snapshot=snapshot,
+        artifact_root=artifact_root,
     )
     if (
         set(run) != JMH_RUN_RESULT_KEYS
@@ -752,7 +1350,13 @@ def validate_qualification_case_artifacts(
         or run.get("benchmarkPlanSha256") != benchmark_plan_sha256
         or run.get("sourceInputManifestSha256")
         != source_manifest_sha256
-        or run.get("scalaCliBinarySha256") != sha256_file(scala_cli)
+        or run.get("scalaCliBinarySha256")
+        != snapshot.sha256(
+            scala_cli,
+            root=scala_cli.parent,
+            label="qualification.scalaCli",
+        )
+        or run.get("scalaCliExecutionPathId") != "SCALA_CLI_1_15_0"
         or run.get("compilerProfilesSha256")
         != compiler_profiles_sha256
         or run.get("profileOptionsSha256")
@@ -763,16 +1367,45 @@ def validate_qualification_case_artifacts(
         != canonical_sha256(expected_portable_argv)
         or run.get("runtimeArgvSha256")
         != canonical_sha256(expected_runtime_argv)
-        or run.get("rawNativeJsonSha256") != sha256_file(native_path)
+        or run.get("commandToolClosure") != expected_tool_closure
+        or run.get("commandToolClosureSha256")
+        != canonical_sha256(expected_tool_closure)
+        or run.get("environmentValuesSha256")
+        != canonical_sha256(SCALA_BENCHMARK_ENVIRONMENT_VALUES)
+        or run.get("scalaWorkspacePathId") != "SCALA_WORKSPACE"
+        or run.get("rawNativeJsonSha256")
+        != snapshot.sha256(
+            native_path,
+            root=artifact_root,
+            label=f"qualification.native.r{repetition}.{profile}.{case_id}",
+        )
         or run.get("effectiveJvmArgsSha256")
-        != sha256_file(effective_path)
+        != snapshot.sha256(
+            effective_path,
+            root=artifact_root,
+            label=f"qualification.effective.r{repetition}.{profile}.{case_id}",
+        )
         or run.get("jvmArgumentAllowlistSha256")
         != jvm_allowlist_sha256
         or run.get("nativeValidationSha256")
-        != sha256_file(validation_path)
+        != snapshot.sha256(
+            validation_path,
+            root=artifact_root,
+            label=f"qualification.validation.r{repetition}.{profile}.{case_id}",
+        )
         or run.get("measurementReadyMarkerSha256") != marker_sha256
-        or run.get("stdoutSha256") != sha256_file(stdout_path)
-        or run.get("stderrSha256") != sha256_file(stderr_path)
+        or run.get("stdoutSha256")
+        != snapshot.sha256(
+            stdout_path,
+            root=artifact_root,
+            label=f"qualification.stdout.r{repetition}.{profile}.{case_id}",
+        )
+        or run.get("stderrSha256")
+        != snapshot.sha256(
+            stderr_path,
+            root=artifact_root,
+            label=f"qualification.stderr.r{repetition}.{profile}.{case_id}",
+        )
         or run.get("exitCode") != 0
         or run.get("status") != "PASS"
         or run.get("aggregateStatus") != "PASS"
@@ -787,10 +1420,23 @@ def validate_qualification_case_artifacts(
     if (
         measurement.get("scoreNsPerInvocation") != expected_score
         or measurement.get("rawNativeJsonSha256")
-        != sha256_file(native_path)
+        != snapshot.sha256(
+            native_path,
+            root=artifact_root,
+            label=f"qualification.native.r{repetition}.{profile}.{case_id}",
+        )
         or measurement.get("effectiveJvmArgsSha256")
-        != sha256_file(effective_path)
-        or measurement.get("jmhRunResultSha256") != sha256_file(run_path)
+        != snapshot.sha256(
+            effective_path,
+            root=artifact_root,
+            label=f"qualification.effective.r{repetition}.{profile}.{case_id}",
+        )
+        or measurement.get("jmhRunResultSha256")
+        != snapshot.sha256(
+            run_path,
+            root=artifact_root,
+            label=f"qualification.run.r{repetition}.{profile}.{case_id}",
+        )
     ):
         raise T3EvidenceError(
             f"QUALIFICATION_MEASUREMENT_BYTE_DRIFT:{repetition}:{profile}:{case_id}"
@@ -960,6 +1606,7 @@ def select_scala_profile(
     selected_profile_source_sha256: str,
     correctness: dict[str, dict[str, Any]],
     correctness_sha256: dict[str, str],
+    correctness_artifact_root: Path,
     qualification: dict[str, Any],
     qualification_sha256: str,
     qualification_artifact_root: Path,
@@ -974,10 +1621,122 @@ def select_scala_profile(
     capability_smoke_plan_sha256: str,
     jvm_allowlist: dict[str, Any],
     jvm_allowlist_sha256: str,
+    jvm_allowlist_path: Path,
+    evidence_snapshot: SealedEvidenceSnapshot | None = None,
 ) -> dict[str, Any]:
     """Frozen Latin JMH 결과만으로 B/C를 선택하고 실패 시 proven A로 닫는다."""
 
+    snapshot = evidence_snapshot or SealedEvidenceSnapshot()
+    benchmark_plan_path = (
+        scala_root.parent / "benchmarks/benchmark-plan.v1.json"
+    )
+    compiler_profiles_path = scala_root / "compiler-profiles.v1.json"
+    selected_source_path = scala_root / "selected-profile.scala"
+    source_manifest_path = scala_root / "source-inputs.v1.json"
+    toolchain_lock_path = scala_root / "toolchain-lock.v1.json"
+    provenance_path = scala_root.parent / "contract/toolchain-provenance.v1.json"
+    capability_plan_path = (
+        scala_root.parent / "contract/capability-smoke-plan.v1.json"
+    )
+    qualification_path = (
+        qualification_artifact_root
+        / "scala-profile-qualification.v1.json"
+    )
+    if (
+        snapshot.json_object(
+            benchmark_plan_path,
+            root=scala_root.parent,
+            label="selector.benchmarkPlan",
+        )
+        != plan
+        or snapshot.sha256(
+            benchmark_plan_path,
+            root=scala_root.parent,
+            label="selector.benchmarkPlan",
+        )
+        != benchmark_plan_sha256
+        or snapshot.json_object(
+            compiler_profiles_path,
+            root=scala_root,
+            label="selector.compilerProfiles",
+        )
+        != compiler_profiles
+        or snapshot.sha256(
+            compiler_profiles_path,
+            root=scala_root,
+            label="selector.compilerProfiles",
+        )
+        != compiler_profiles_sha256
+        or snapshot.sha256(
+            selected_source_path,
+            root=scala_root,
+            label="selector.selectedProfileSource",
+        )
+        != selected_profile_source_sha256
+        or snapshot.json_object(
+            source_manifest_path,
+            root=scala_root,
+            label="selector.sourceManifest",
+        )
+        != source_manifest
+        or snapshot.sha256(
+            source_manifest_path,
+            root=scala_root,
+            label="selector.sourceManifest",
+        )
+        != source_manifest_sha256
+        or snapshot.sha256(
+            toolchain_lock_path,
+            root=scala_root,
+            label="selector.toolchainLock",
+        )
+        != toolchain_lock_sha256
+        or snapshot.sha256(
+            provenance_path,
+            root=scala_root.parent,
+            label="selector.toolchainProvenance",
+        )
+        != merged_toolchain_provenance_sha256
+        or snapshot.sha256(
+            capability_plan_path,
+            root=scala_root.parent,
+            label="selector.capabilityPlan",
+        )
+        != capability_smoke_plan_sha256
+        or snapshot.json_object(
+            qualification_path,
+            root=qualification_artifact_root,
+            label="selector.qualification",
+        )
+        != qualification
+        or snapshot.sha256(
+            qualification_path,
+            root=qualification_artifact_root,
+            label="selector.qualification",
+        )
+        != qualification_sha256
+        or snapshot.json_object(
+            jvm_allowlist_path,
+            root=jvm_allowlist_path.parent,
+            label="selector.jvmAllowlist",
+        )
+        != jvm_allowlist
+        or snapshot.sha256(
+            jvm_allowlist_path,
+            root=jvm_allowlist_path.parent,
+            label="selector.jvmAllowlist",
+        )
+        != jvm_allowlist_sha256
+    ):
+        raise T3EvidenceError("PROFILE_SELECTOR_TOP_LEVEL_BYTE_DRIFT")
     validate_correctness(correctness)
+    validate_correctness_artifact_closure(
+        correctness=correctness,
+        correctness_sha256=correctness_sha256,
+        correctness_root=correctness_artifact_root,
+        scala_root=scala_root,
+        snapshot=snapshot,
+    )
     for field, value in (
         ("benchmarkPlanSha256", benchmark_plan_sha256),
         ("compilerProfilesSha256", compiler_profiles_sha256),
@@ -1008,7 +1767,12 @@ def select_scala_profile(
         or not scala_cli.is_absolute()
         or not scala_cli.is_file()
         or scala_cli.is_symlink()
-        or sha256_file(scala_cli) != pinned_scala_cli_sha256
+        or snapshot.sha256(
+            scala_cli,
+            root=scala_cli.parent,
+            label="selector.scalaCli",
+        )
+        != pinned_scala_cli_sha256
     ):
         raise T3EvidenceError("PROFILE_SELECTOR_LOCAL_INPUT_INVALID")
     if (
@@ -1033,7 +1797,11 @@ def select_scala_profile(
         or not isinstance(profile_contract, dict)
         or tuple(profile_contract) != SCALA_PROFILES
         or compiler_profiles_sha256
-        != sha256_file(scala_root / "compiler-profiles.v1.json")
+        != snapshot.sha256(
+            scala_root / "compiler-profiles.v1.json",
+            root=scala_root,
+            label="selector.compilerProfiles",
+        )
     ):
         raise T3EvidenceError("COMPILER_PROFILE_CONTRACT_INVALID")
     profile_options = {
@@ -1311,6 +2079,7 @@ def select_scala_profile(
                 profile=profile,
                 expected_sha256=item["hostValiditySha256"],
                 plan=plan,
+                snapshot=snapshot,
             )
 
         expected_block_host = canonical_sha256(
@@ -1345,6 +2114,7 @@ def select_scala_profile(
                     benchmark_plan_sha256=benchmark_plan_sha256,
                     jvm_allowlist=jvm_allowlist,
                     jvm_allowlist_sha256=jvm_allowlist_sha256,
+                    snapshot=snapshot,
                 )
             )
     if (
@@ -1359,7 +2129,7 @@ def select_scala_profile(
         case_order=case_order,
         scores=scores,
     )
-    return {
+    result = {
         "schemaVersion": "s1.4x-scala-selected-profile-result-v1",
         "benchmarkPlanSha256": qualification["benchmarkPlanSha256"],
         "selectorConfigSha256": qualification["selectorConfigSha256"],
@@ -1387,6 +2157,8 @@ def select_scala_profile(
         "fallbackExecuted": selected == policy["fallbackProfile"],
         "selectionStatus": "PASS",
     }
+    snapshot.verify_unchanged()
+    return result
 
 
 def assemble_capability_result(
@@ -1733,6 +2505,12 @@ EXPECTED_BENCHMARK_ENVIRONMENT = {
     "S1_4X_EFFECTIVE_JVM_EVIDENCE_DIR": "SET",
     "S1_4X_FIXTURE_ROOT": "SET",
     "S1_4X_MEASUREMENT_READY_MARKER": "SET",
+    "S1_4X_SCALA_WORKSPACE": "SET",
+    "COURSIER_CACHE": "SET",
+    "COURSIER_CONFIG_DIR": "SET",
+    "SCALA_CLI_HOME": "SET",
+    "SCALA_CLI_CONFIG": "SET",
+    "XDG_CONFIG_HOME": "SET",
 }
 
 
@@ -2181,6 +2959,7 @@ def main() -> int:
                     profile: sha256_file(path)
                     for profile, path in correctness_paths.items()
                 },
+                correctness_artifact_root=arguments.correctness_root,
                 qualification=strict_json(arguments.qualification),
                 qualification_sha256=sha256_file(arguments.qualification),
                 qualification_artifact_root=(
@@ -2209,6 +2988,7 @@ def main() -> int:
                 jvm_allowlist_sha256=sha256_file(
                     arguments.jvm_allowlist
                 ),
+                jvm_allowlist_path=arguments.jvm_allowlist,
             )
         elif arguments.command == "validate-native-jmh":
             native_value = strict_json_value(arguments.native)

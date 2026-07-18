@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import hashlib
-import json
 import sys
 from pathlib import Path
 from typing import Any
@@ -569,9 +568,19 @@ def main() -> int:
             "profileRunInputPaths": expected_inputs,
             "candidateSha256": sha256_file(arguments.candidate),
             "matrix": {
+                "candidateResultSha256": sha256_file(
+                    arguments.canonical_comparison.parent
+                    / "canonical-results.json"
+                ),
+                "semanticResultSha256": sha256_file(
+                    arguments.semantic_comparison.parent
+                    / "semantic-errors.json"
+                ),
                 "unitTestResultSha256": sha256_file(
                     arguments.unit_test_result
                 ),
+                "unitStdoutSha256": unit["stdoutSha256"],
+                "unitStderrSha256": unit["stderrSha256"],
                 "canonicalComparisonSha256": sha256_file(
                     arguments.canonical_comparison
                 ),
