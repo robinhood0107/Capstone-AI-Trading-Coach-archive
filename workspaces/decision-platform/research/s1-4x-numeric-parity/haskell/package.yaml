@@ -21,6 +21,7 @@ default-extensions:
   - NoRebindableSyntax
   - NoStrict
   - NoTemplateHaskell
+  - OverloadedStrings
 
 ghc-options:
   - -Wall
@@ -44,51 +45,60 @@ ghc-options:
 library:
   source-dirs: src
   dependencies:
-    - base == 4.20.0.0
-    - deepseq == 1.5.0.0
+    # base/deepseq는 compiler boot set이므로 GHC 9.14 compatibility lane에서 exact
+    # version을 강제하지 않는다. 아래 non-boot package는 LTS 24.50 version을 고정한다.
+    - base
+    - SHA == 1.6.4.4
+    - aeson == 2.2.5.0
+    - attoparsec == 0.14.4
+    - binary
+    - bytestring
+    - containers
+    - deepseq
+    - directory
+    - filepath
     - math-functions == 0.3.4.4
+    - scientific
     - statistics == 0.16.5.0
+    - text
+    - unix
     - vector == 0.13.2.0
 
 executables:
   s1-4x-haskell:
     main: Main.hs
     source-dirs: app
-    threaded: true
-    rts-options:
-      - -N1
+    ghc-options:
+      - -threaded
+      - -rtsopts
+      - -with-rtsopts=-N1
     dependencies:
-      - SHA == 1.6.4.4
-      - aeson == 2.2.5.0
-      - attoparsec == 0.14.4
-      - base == 4.20.0.0
-      - binary == 0.8.9.3
-      - bytestring == 0.12.2.0
-      - containers == 0.7
-      - directory == 1.3.8.5
-      - filepath == 1.5.2.0
-      - scientific == 0.3.8.0
+      # compiler boot packages are intentionally unbounded; Stack's exact compiler
+      # and boot-set manifest own these versions.
+      - base
+      - bytestring
+      - containers
+      - directory
+      - filepath
       - s1-4x-haskell
-      - text == 2.1.2
 
 tests:
   s1-4x-haskell-test:
     main: Main.hs
     source-dirs: test
     dependencies:
-      - SHA == 1.6.4.4
       - QuickCheck == 2.15.0.1
       - aeson == 2.2.5.0
-      - base == 4.20.0.0
-      - bytestring == 0.12.2.0
-      - containers == 0.7
-      - directory == 1.3.8.5
-      - filepath == 1.5.2.0
+      - base
+      - bytestring
+      - directory
+      - filepath
       - s1-4x-haskell
       - tasty == 1.5.4
       - tasty-hunit == 0.10.2
       - tasty-quickcheck == 0.11.1
-      - text == 2.1.2
+      - text
+      - time
       - vector == 0.13.2.0
 
 benchmarks:
@@ -99,8 +109,10 @@ benchmarks:
       - -threaded
       - -rtsopts
     dependencies:
-      - base == 4.20.0.0
+      - aeson == 2.2.5.0
+      - base
       - criterion == 1.6.4.0
-      - deepseq == 1.5.0.0
+      - deepseq
       - s1-4x-haskell
+      - text
       - vector == 0.13.2.0
