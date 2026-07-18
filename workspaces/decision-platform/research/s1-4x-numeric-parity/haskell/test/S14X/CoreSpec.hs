@@ -15,7 +15,16 @@ import S14X.Core.AdvancedRisk
     realizedVariance,
     realizedVolatilityIntraday,
   )
-import S14X.Core.Error (StableError (..))
+import S14X.Core.Error
+  ( StableError
+      ( DenominatorZero,
+        InputTooShort,
+        MomentInvalid,
+        PricesNonPositive,
+        ResearchInputTooShort,
+        SimpleReturnBelowMinusOne
+      ),
+  )
 import S14X.Core.Models
   ( ConditionalCoverageResult (ConditionalCoverageResult),
     IndependenceResult (IndependenceResult),
@@ -70,7 +79,13 @@ advancedHandFixtures = do
   assertScalarClose 3.0 (realizedVolatilityIntraday (U.fromList [1.0, 2.0, 2.0]))
   assertScalarClose
     0.565685424949238
-    (loAdjustedSharpeRatio (U.fromList [0.0, 1.0, 0.0, 1.0]) 2 0.0)
+    (loAdjustedSharpeRatio (U.fromList [-1.0, 0.0, 1.0, 2.0]) 2 0.0)
+  assertScalarClose
+    0.4472135954999579
+    (loAdjustedSharpeRatio (U.fromList [-1.0, 0.0, 1.0, 2.0]) 1 0.0)
+  assertScalarClose
+    1.0690449676496974
+    (loAdjustedSharpeRatio (U.fromList [-1.0, 2.0, 0.0, 1.0]) 2 0.0)
   assertScalarClose
     0.5
     (probabilisticSharpeRatio 1.0 1.0 6 0.0 3.0)

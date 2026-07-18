@@ -1,13 +1,17 @@
 module S14X.ContractSpec (tests) where
 
 import Data.ByteString (ByteString)
+import Data.Version (showVersion)
+import System.Info (compilerName, fullCompilerVersion)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit ((@?=), assertBool, assertFailure, testCase)
 
 import qualified Data.ByteString.Char8 as BS8
+import qualified Data.Text as Text
 
 import S14X.Contract.Process
   ( encodeResultBatch,
+    implementationLabel,
     parseRequest,
     runRequest,
     sha256Hex,
@@ -26,6 +30,7 @@ tests =
     [ testCase "strict parser rejects duplicate decoded keys" duplicateKeys,
       testCase "exact integer token kind is preserved" integerTokenKind,
       testCase "canonical request executes in order" canonicalRequest,
+      testCase "result implementation follows the active compiler" compilerIdentity,
       testCase "recursive result encoding normalizes negative zero" negativeZero,
       testCase "pure SHA-256 has known answers" shaKnownAnswers
     ]
@@ -59,6 +64,19 @@ canonicalRequest =
       case result of
         Left transport -> assertFailure ("unexpected transport error: " <> show transport)
         Right (ResultBatch _ _ results) -> length results @?= 2
+
+compilerIdentity :: IO ()
+compilerIdentity = do
+  let expected =
+        Text.pack ("haskell-" <> compilerName <> "-" <> showVersion fullCompilerVersion)
+  implementationLabel @?= expected
+  case parseRequest smallRequest of
+    Left transport -> assertFailure ("unexpected transport error: " <> show transport)
+    Right request -> do
+      result <- runRequest "." request
+      case result of
+        Left transport -> assertFailure ("unexpected transport error: " <> show transport)
+        Right (ResultBatch _ implementation _) -> implementation @?= expected
 
 negativeZero :: IO ()
 negativeZero =

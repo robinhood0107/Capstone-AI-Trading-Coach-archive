@@ -1,6 +1,7 @@
 module S14X.StaticPolicySpec (tests) where
 
-import Data.List (isInfixOf, isSuffixOf)
+import Data.Char (isSpace)
+import Data.List (find, isInfixOf, isPrefixOf, isSuffixOf, tails)
 import System.Directory (doesDirectoryExist, listDirectory)
 import System.FilePath ((</>))
 import Test.Tasty (TestTree, testGroup)
@@ -11,7 +12,8 @@ tests =
   testGroup
     "static-policy"
     [ testCase "candidate source has no forbidden native or unsafe forms" noForbiddenForms,
-      testCase "every candidate module declares an explicit export list" explicitExports
+      testCase "every candidate module declares an explicit export list" explicitExports,
+      testCase "Stack configurations have no forbidden override keys" noStackOverrides
     ]
 
 noForbiddenForms :: IO ()
@@ -46,9 +48,39 @@ explicitExports = do
         [ file
           | (file, content) <- zip files contents,
             "module " `isInfixOf` content,
-            not (" where" `isInfixOf` content && "(" `isInfixOf` content)
+            not (hasExplicitExportList content)
         ]
   assertBool ("missing explicit export lists: " <> show missing) (null missing)
+
+hasExplicitExportList :: String -> Bool
+hasExplicitExportList content =
+  case find ("module " `isPrefixOf`) (tails content) >>= beforeMarker "where" of
+    Nothing -> False
+    Just header -> '(' `elem` header && ')' `elem` header
+
+beforeMarker :: String -> String -> Maybe String
+beforeMarker marker = go []
+  where
+    go reversedPrefix remaining
+      | marker `isPrefixOf` remaining = Just (reverse reversedPrefix)
+      | otherwise =
+          case remaining of
+            [] -> Nothing
+            character : suffix -> go (character : reversedPrefix) suffix
+
+noStackOverrides :: IO ()
+noStackOverrides = do
+  let files = ["stack.yaml", "stack-ghc-9.14.1.yaml"]
+      forbiddenKeys = ["extra-deps", "drop-packages", "allow-newer", "allow-newer-deps"]
+  contents <- traverse readFile files
+  let violations =
+        [ file <> ": " <> key
+          | (file, content) <- zip files contents,
+            line <- lines content,
+            let key = takeWhile (/= ':') (dropWhile isSpace line),
+            key `elem` forbiddenKeys
+        ]
+  assertBool ("forbidden Stack override keys: " <> show violations) (null violations)
 
 haskellSources :: FilePath -> IO [FilePath]
 haskellSources root = do
