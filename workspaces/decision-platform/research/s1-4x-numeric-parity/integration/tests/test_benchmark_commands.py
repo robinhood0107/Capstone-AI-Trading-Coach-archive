@@ -29,7 +29,11 @@ from benchmark_commands import (  # noqa: E402
     validate_manifest_file,
     write_manifest_exclusive,
 )
-from prepare_benchmark_commands import _identity  # noqa: E402
+from prepare_benchmark_commands import (  # noqa: E402
+    _assert_distinct_role_paths,
+    _identity,
+    _parse_role_paths,
+)
 
 
 class BenchmarkCommandManifestTests(TestCase):
@@ -295,6 +299,42 @@ class BenchmarkCommandManifestTests(TestCase):
         )
         self.assertIsNone(re.search(r"/home/[^/\s]+", source))
         self.assertIn('os.environ.get("HOME")', source)
+
+    def test_prepare_requires_exact_distinct_runtime_role_paths(self) -> None:
+        with tempfile.TemporaryDirectory(dir="/tmp") as directory:
+            root = Path(directory)
+            first = root / "first"
+            second = root / "second"
+            first.write_bytes(b"first")
+            second.write_bytes(b"second")
+            parsed = _parse_role_paths(
+                [f"first={first}", f"second={second}"],
+                expected_roles={"first", "second"},
+                label="test",
+            )
+            self.assertEqual(parsed, {"first": first, "second": second})
+            _assert_distinct_role_paths(
+                {"first": first},
+                {"evidence": second},
+            )
+
+            with self.assertRaisesRegex(ValueError, "role set mismatch"):
+                _parse_role_paths(
+                    [f"first={first}"],
+                    expected_roles={"first", "second"},
+                    label="test",
+                )
+            with self.assertRaisesRegex(ValueError, "role/path is invalid"):
+                _parse_role_paths(
+                    [f"first={first}", f"first={second}"],
+                    expected_roles={"first"},
+                    label="test",
+                )
+            with self.assertRaisesRegex(ValueError, "role file alias"):
+                _assert_distinct_role_paths(
+                    {"first": first},
+                    {"evidence": first},
+                )
 
     def test_manifest_requires_exact_boundary_runtime_and_evidence_roles(self) -> None:
         executable = Path(sys.executable).resolve()
