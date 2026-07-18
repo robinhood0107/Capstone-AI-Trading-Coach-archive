@@ -134,7 +134,7 @@ COMMAND_SHA256="$(awk '{print $1}' "$BENCH_PARENT/commands.sha256")"
 
 TMPDIR=/tmp TEMP=/tmp TMP=/tmp \
   uv run --frozen --project "$ORACLE" \
-  python "$S1_4X/benchmarks/run_rotated_blocks.py" run \
+  python "$S1_4X/integration/run_rotated_blocks.py" run \
   --plan "$PLAN" \
   --commands "$BENCH_PARENT/commands.json" \
   --commands-sha256 "$COMMAND_SHA256" \

@@ -1,5 +1,5 @@
 {
-  "schemaVersion": "s1.4x-integration-baseline-v1",
+  "reportFormat": "s1.4x-integration-baseline-v1",
   "issue": 26,
   "originMainBaseSha": "49921c4dbf5ef66407211b7f0f56218ab563043d",
   "originMainBaseTreeSha": "ae761f866de22a8b1a837420c65c840afeadb762",
