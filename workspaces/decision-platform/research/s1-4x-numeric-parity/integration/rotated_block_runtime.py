@@ -58,6 +58,50 @@ BOUNDARY_IDS = (
     "scala",
     "haskell",
 )
+RUNTIME_DEPENDENCY_ROLES_BY_BOUNDARY = {
+    "hostValidator": ("uv",),
+    "python-numpy-s1-4": ("uv", "benchmarkPython"),
+    "python-numpy-s1-4r": ("uv", "benchmarkPython"),
+    "python-jax-eager-s1-4r": ("uv", "benchmarkPython"),
+    "python-jax-jit-s1-4r": ("uv", "benchmarkPython"),
+    "scala": (
+        "benchmarkPython",
+        "scalaCli",
+        "java",
+        "scalafix",
+        "scalafmt",
+    ),
+    "haskell": (
+        "benchmarkPython",
+        "ghcup",
+        "stack",
+        "authoritativeGhc",
+        "compatibilityGhc",
+        "hlint",
+        "stylishHaskell",
+    ),
+}
+RUNTIME_EVIDENCE_ROLES_BY_BOUNDARY = {
+    "hostValidator": (),
+    "python-numpy-s1-4": (),
+    "python-numpy-s1-4r": (),
+    "python-jax-eager-s1-4r": (),
+    "python-jax-jit-s1-4r": (),
+    "scala": (
+        "scalafmtArchive",
+        "selectedProfileResult",
+        "profileQualificationResult",
+        "jvmAllowlistResult",
+        "correctnessA",
+        "correctnessB",
+        "correctnessC",
+    ),
+    "haskell": (
+        "baselineCorrectness",
+        "optimizedCorrectness",
+        "profileQualification",
+    ),
+}
 HOST_CHECK_IDS = {
     "disk.home-free-bytes",
     "memory.available-bytes",
@@ -309,9 +353,10 @@ def _strict_command_manifest(
         "hostValidatorCommand",
         "boundaryCommands",
         "allowedExecutables",
+        "allowedEvidenceByBoundary",
     }:
         raise ContractError("INVALID_COMMAND_MANIFEST_FIELDS")
-    if manifest["schemaVersion"] != "s1.4x-benchmark-command-manifest-v2":
+    if manifest["schemaVersion"] != "s1.4x-benchmark-command-manifest-v3":
         raise ContractError("INVALID_COMMAND_MANIFEST_VERSION")
     if (
         COMMIT_PATTERN.fullmatch(benchmark_subject_commit) is None
@@ -324,6 +369,7 @@ def _strict_command_manifest(
     host_command = manifest["hostValidatorCommand"]
     boundary_commands = manifest["boundaryCommands"]
     allowed_executables = manifest["allowedExecutables"]
+    allowed_evidence = manifest["allowedEvidenceByBoundary"]
     if (
         not isinstance(host_command, list)
         or not host_command
@@ -332,11 +378,19 @@ def _strict_command_manifest(
         or set(boundary_commands) != set(BOUNDARY_IDS)
         or not isinstance(allowed_executables, dict)
         or set(allowed_executables)
-        != {"hostValidator", "boundaries", "runtimeDependencies"}
+        != {
+            "hostValidator",
+            "boundaries",
+            "runtimeDependenciesByBoundary",
+        }
         or not isinstance(allowed_executables["boundaries"], dict)
         or set(allowed_executables["boundaries"]) != set(BOUNDARY_IDS)
-        or not isinstance(allowed_executables["runtimeDependencies"], dict)
-        or set(allowed_executables["runtimeDependencies"]) != {"uv"}
+        or not isinstance(
+            allowed_executables["runtimeDependenciesByBoundary"],
+            dict,
+        )
+        or set(allowed_executables["runtimeDependenciesByBoundary"])
+        != set(RUNTIME_DEPENDENCY_ROLES_BY_BOUNDARY)
     ):
         raise ContractError("INVALID_COMMAND_MANIFEST_COMMANDS")
     if sum(argument.count("{host_report}") for argument in host_command) != 1:
@@ -372,13 +426,47 @@ def _strict_command_manifest(
             raise ContractError(
                 f"BOUNDARY_COMMAND_TEMPLATE_MISMATCH:{boundary_id}"
             )
-    uv_identity = allowed_executables["runtimeDependencies"]["uv"]
-    uv_path = uv_identity.get("path") if isinstance(uv_identity, dict) else ""
-    _validate_executable_identity(
-        [uv_path] if isinstance(uv_path, str) else [""],
-        uv_identity,
-        role="runtimeDependency:uv",
-    )
+    for boundary_id, expected_roles in (
+        RUNTIME_DEPENDENCY_ROLES_BY_BOUNDARY.items()
+    ):
+        dependencies = allowed_executables[
+            "runtimeDependenciesByBoundary"
+        ][boundary_id]
+        if (
+            not isinstance(dependencies, dict)
+            or tuple(dependencies) != expected_roles
+        ):
+            raise ContractError("INVALID_COMMAND_MANIFEST_COMMANDS")
+        for role, identity in dependencies.items():
+            identity_path = (
+                identity.get("path") if isinstance(identity, dict) else ""
+            )
+            _validate_executable_identity(
+                [identity_path]
+                if isinstance(identity_path, str)
+                else [""],
+                identity,
+                role=f"runtimeDependency:{boundary_id}:{role}",
+            )
+    if (
+        not isinstance(allowed_evidence, dict)
+        or set(allowed_evidence) != set(RUNTIME_EVIDENCE_ROLES_BY_BOUNDARY)
+    ):
+        raise ContractError("INVALID_COMMAND_MANIFEST_EVIDENCE")
+    for boundary_id, expected_roles in (
+        RUNTIME_EVIDENCE_ROLES_BY_BOUNDARY.items()
+    ):
+        evidence = allowed_evidence[boundary_id]
+        if (
+            not isinstance(evidence, dict)
+            or tuple(evidence) != expected_roles
+        ):
+            raise ContractError("INVALID_COMMAND_MANIFEST_EVIDENCE")
+        for role, identity in evidence.items():
+            _validate_evidence_identity(
+                identity,
+                role=f"runtimeEvidence:{boundary_id}:{role}",
+            )
     return manifest
 
 
@@ -399,6 +487,19 @@ def _validate_executable_identity(
         or "}" in command[0]
     ):
         raise ContractError(f"INVALID_ALLOWED_EXECUTABLE_IDENTITY:{role}")
+
+
+def _validate_evidence_identity(identity: Any, *, role: str) -> None:
+    if (
+        not isinstance(identity, dict)
+        or set(identity) != {"path", "sha256"}
+        or not isinstance(identity["path"], str)
+        or not Path(identity["path"]).is_absolute()
+        or SHA256_PATTERN.fullmatch(str(identity["sha256"])) is None
+        or "{" in identity["path"]
+        or "}" in identity["path"]
+    ):
+        raise ContractError(f"INVALID_ALLOWED_EVIDENCE_IDENTITY:{role}")
 
 
 @contextmanager
@@ -465,6 +566,73 @@ def _pin_executable(
         raise
     except OSError as exc:
         raise ContractError(f"SEALED_EXECUTABLE_PIN_FAILED:{role}") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+@contextmanager
+def _pin_evidence(
+    identity: dict[str, str],
+    *,
+    role: str,
+) -> Iterator[PinnedExecutable]:
+    """검증한 regular evidence bytes를 child가 재개방하지 않도록 sealed memfd에 둔다."""
+
+    try:
+        inspected = inspect_regular_file_path(
+            Path(identity["path"]),
+            role=role,
+        )
+    except (ExecutableIdentityError, KeyError, TypeError) as exc:
+        raise ContractError(f"RUNTIME_EVIDENCE_INVALID:{role}") from exc
+    if (
+        inspected.path != identity["path"]
+        or inspected.sha256 != identity["sha256"]
+    ):
+        raise ContractError(f"RUNTIME_EVIDENCE_IDENTITY_MISMATCH:{role}")
+    memfd_cloexec = getattr(os, "MFD_CLOEXEC", 0x0001)
+    memfd_allow_sealing = getattr(os, "MFD_ALLOW_SEALING", 0x0002)
+    required_seals = (
+        F_SEAL_WRITE
+        | F_SEAL_GROW
+        | F_SEAL_SHRINK
+        | F_SEAL_SEAL
+    )
+    descriptor = -1
+    try:
+        descriptor = _create_memfd(
+            f"s1-4x-evidence-{role}",
+            memfd_cloexec | memfd_allow_sealing,
+        )
+        view = memoryview(inspected.payload)
+        written = 0
+        while written < len(view):
+            count = os.write(descriptor, view[written:])
+            if count <= 0:
+                raise OSError("short write while pinning evidence")
+            written += count
+        os.fchmod(descriptor, 0o400)
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        fcntl.fcntl(descriptor, F_ADD_SEALS, required_seals)
+        if (
+            fcntl.fcntl(descriptor, F_GET_SEALS) & required_seals
+            != required_seals
+        ):
+            raise ContractError(f"SEALED_EVIDENCE_INCOMPLETE:{role}")
+        yield PinnedExecutable(
+            binding={
+                "path": inspected.path,
+                "resolvedPath": inspected.resolved_path,
+                "sha256": inspected.sha256,
+            },
+            descriptor=descriptor,
+            required_seals=required_seals,
+        )
+    except ContractError:
+        raise
+    except OSError as exc:
+        raise ContractError(f"SEALED_EVIDENCE_PIN_FAILED:{role}") from exc
     finally:
         if descriptor >= 0:
             os.close(descriptor)
@@ -588,23 +756,43 @@ def _verify_source_commit_binding(
 
 def _benchmark_environment(
     runtime_dependencies: dict[str, PinnedExecutable],
+    runtime_evidence: dict[str, PinnedExecutable],
+    *,
+    boundary_id: str,
 ) -> dict[str, str]:
-    """Benchmark child에 필요한 값만 전달해 ambient code/tool 주입을 제거한다."""
+    """해당 boundary에 선언된 sealed runtime/evidence만 child에 전달한다."""
 
     home = os.environ.get("HOME")
     if not home or not Path(home).is_absolute():
         raise ContractError("BENCHMARK_HOME_INVALID")
-    if set(runtime_dependencies) != {"uv"}:
+    expected_dependencies = RUNTIME_DEPENDENCY_ROLES_BY_BOUNDARY.get(
+        boundary_id
+    )
+    expected_evidence = RUNTIME_EVIDENCE_ROLES_BY_BOUNDARY.get(boundary_id)
+    if (
+        expected_dependencies is None
+        or expected_evidence is None
+        or tuple(runtime_dependencies) != expected_dependencies
+    ):
         raise ContractError("BENCHMARK_RUNTIME_DEPENDENCY_SET_MISMATCH")
-    uv = runtime_dependencies["uv"]
-    if uv.descriptor < 0:
-        raise ContractError("BENCHMARK_RUNTIME_DEPENDENCY_INVALID:uv")
+    if tuple(runtime_evidence) != expected_evidence:
+        raise ContractError("BENCHMARK_RUNTIME_EVIDENCE_SET_MISMATCH")
+    for role, pinned in (*runtime_dependencies.items(), *runtime_evidence.items()):
+        if (
+            pinned.descriptor < 0
+            or SHA256_PATTERN.fullmatch(
+                str(pinned.binding.get("sha256"))
+            )
+            is None
+            or not isinstance(pinned.binding.get("path"), str)
+            or not Path(pinned.binding["path"]).is_absolute()
+        ):
+            raise ContractError(f"BENCHMARK_RUNTIME_INPUT_INVALID:{role}")
     cache_root = Path(home) / ".cache/s1-4x"
     cache_directories = {
         "TMP": cache_root / "tmp",
         "UV_CACHE_DIR": cache_root / "uv",
         "COURSIER_CACHE": cache_root / "coursier",
-        "STACK_ROOT": cache_root / "stack-root",
     }
     for path in (cache_root, *cache_directories.values()):
         try:
@@ -614,7 +802,7 @@ def _benchmark_environment(
             raise ContractError("BENCHMARK_CACHE_ROOT_INVALID") from exc
         if path.is_symlink() or resolved != path or not path.is_dir():
             raise ContractError("BENCHMARK_CACHE_ROOT_INVALID")
-    return {
+    environment = {
         "HOME": home,
         "LANG": "C.UTF-8",
         "LC_ALL": "C.UTF-8",
@@ -624,11 +812,138 @@ def _benchmark_environment(
         "TEMP": str(cache_directories["TMP"]),
         "UV_CACHE_DIR": str(cache_directories["UV_CACHE_DIR"]),
         "COURSIER_CACHE": str(cache_directories["COURSIER_CACHE"]),
-        "STACK_ROOT": str(cache_directories["STACK_ROOT"]),
         **THREAD_ENVIRONMENT,
         "S1_4X_THREAD_COUNT": "1",
-        "S1_4X_UV_BIN": f"/proc/self/fd/{uv.descriptor}",
     }
+    proc_path = {
+        role: f"/proc/self/fd/{pinned.descriptor}"
+        for role, pinned in runtime_dependencies.items()
+    }
+    if "uv" in runtime_dependencies:
+        environment.update(
+            {
+                "S1_4X_UV_BIN": proc_path["uv"],
+                "S1_4X_UV_SHA256": runtime_dependencies["uv"].binding[
+                    "sha256"
+                ],
+            }
+        )
+    if "benchmarkPython" in runtime_dependencies:
+        pinned = runtime_dependencies["benchmarkPython"]
+        environment.update(
+            {
+                "S1_4X_BENCHMARK_PYTHON_BIN": pinned.binding["path"],
+                "S1_4X_BENCHMARK_PYTHON_SHA256": pinned.binding[
+                    "sha256"
+                ],
+                "S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH": proc_path[
+                    "benchmarkPython"
+                ],
+            }
+        )
+    if boundary_id == "scala":
+        role_environment = {
+            "scalaCli": "S1_4X_SCALA_CLI",
+            "java": "S1_4X_SCALA_JAVA",
+            "scalafix": "S1_4X_SCALAFIX",
+            "scalafmt": "S1_4X_SCALAFMT",
+        }
+        for role, prefix in role_environment.items():
+            pinned = runtime_dependencies[role]
+            environment[f"{prefix}_BIN"] = pinned.binding["path"]
+            environment[f"{prefix}_SHA256"] = pinned.binding["sha256"]
+            environment[f"{prefix}_PINNED_FD_PATH"] = proc_path[role]
+        java_path = Path(runtime_dependencies["java"].binding["path"])
+        if java_path.name != "java" or java_path.parent.name != "bin":
+            raise ContractError("BENCHMARK_JAVA_LAYOUT_INVALID")
+        environment["JAVA_HOME"] = str(java_path.parent.parent)
+        scala_evidence_environment = {
+            "scalafmtArchive": "S1_4X_SCALAFMT_ARCHIVE",
+            "selectedProfileResult": (
+                "S1_4X_SCALA_SELECTED_PROFILE_RESULT"
+            ),
+            "profileQualificationResult": (
+                "S1_4X_SCALA_QUALIFICATION_RESULT"
+            ),
+            "jvmAllowlistResult": "S1_4X_SCALA_JVM_ALLOWLIST_RESULT",
+        }
+        for role, name in scala_evidence_environment.items():
+            pinned = runtime_evidence[role]
+            environment[name] = pinned.binding["path"]
+            environment[f"{name}_SHA256"] = pinned.binding["sha256"]
+            environment[f"{name}_PINNED_FD_PATH"] = (
+                f"/proc/self/fd/{pinned.descriptor}"
+            )
+        correctness_paths = {
+            profile: Path(
+                runtime_evidence[f"correctness{profile}"].binding["path"]
+            )
+            for profile in ("A", "B", "C")
+        }
+        roots = {
+            path.parent.parent
+            for path in correctness_paths.values()
+        }
+        if (
+            len(roots) != 1
+            or any(
+                path
+                != next(iter(roots))
+                / profile
+                / "scala-profile-correctness-result.v1.json"
+                for profile, path in correctness_paths.items()
+            )
+        ):
+            raise ContractError("BENCHMARK_SCALA_CORRECTNESS_LAYOUT_INVALID")
+        environment["S1_4X_SCALA_CORRECTNESS_ROOT"] = str(
+            next(iter(roots))
+        )
+        environment["S1_4X_CACHE_ROOT"] = str(cache_root)
+    elif boundary_id == "haskell":
+        role_environment = {
+            "ghcup": "S1_4X_GHCUP",
+            "stack": "S1_4X_STACK",
+            "authoritativeGhc": "S1_4X_AUTHORITATIVE_GHC",
+            "compatibilityGhc": "S1_4X_LATEST_GHC",
+            "hlint": "S1_4X_HLINT",
+            "stylishHaskell": "S1_4X_STYLISH",
+        }
+        for role, prefix in role_environment.items():
+            pinned = runtime_dependencies[role]
+            environment[f"{prefix}_BIN"] = pinned.binding["path"]
+            environment[f"{prefix}_SHA256"] = pinned.binding["sha256"]
+            environment[f"{prefix}_PINNED_FD_PATH"] = proc_path[role]
+        authoritative = Path(
+            runtime_dependencies["authoritativeGhc"].binding["path"]
+        )
+        ghcup_ancestors = [
+            parent
+            for parent in authoritative.parents
+            if parent.name == ".ghcup"
+        ]
+        if len(ghcup_ancestors) != 1:
+            raise ContractError("BENCHMARK_GHCUP_PREFIX_INVALID")
+        environment["GHCUP_INSTALL_BASE_PREFIX"] = str(
+            ghcup_ancestors[0].parent
+        )
+        haskell_evidence_environment = {
+            "baselineCorrectness": (
+                "S1_4X_HASKELL_BASELINE_CORRECTNESS"
+            ),
+            "optimizedCorrectness": (
+                "S1_4X_HASKELL_OPTIMIZED_CORRECTNESS"
+            ),
+            "profileQualification": (
+                "S1_4X_HASKELL_QUALIFICATION_ARTIFACT"
+            ),
+        }
+        for role, name in haskell_evidence_environment.items():
+            pinned = runtime_evidence[role]
+            environment[name] = f"/proc/self/fd/{pinned.descriptor}"
+            environment[f"{name}_SHA256"] = pinned.binding["sha256"]
+            environment[f"{name}_SOURCE_PATH"] = pinned.binding["path"]
+        environment["S1_4X_CACHE_ROOT"] = str(cache_root)
+    return environment
 
 
 def _expected_host_policy(plan: dict[str, Any], *, root_pid: int) -> dict[str, Any]:
@@ -1557,22 +1872,50 @@ def execute_schedule(
             ].items()
         }
         runtime_executables = {
-            dependency_id: executable_stack.enter_context(
-                _pin_executable(
-                    identity,
-                    role=f"runtimeDependency:{dependency_id}",
+            boundary_id: {
+                dependency_id: executable_stack.enter_context(
+                    _pin_executable(
+                        identity,
+                        role=(
+                            "runtimeDependency:"
+                            f"{boundary_id}:{dependency_id}"
+                        ),
+                    )
                 )
-            )
-            for dependency_id, identity in manifest["allowedExecutables"][
-                "runtimeDependencies"
+                for dependency_id, identity in dependencies.items()
+            }
+            for boundary_id, dependencies in manifest[
+                "allowedExecutables"
+            ]["runtimeDependenciesByBoundary"].items()
+        }
+        runtime_evidence = {
+            boundary_id: {
+                evidence_id: executable_stack.enter_context(
+                    _pin_evidence(
+                        identity,
+                        role=(
+                            f"runtimeEvidence:{boundary_id}:{evidence_id}"
+                        ),
+                    )
+                )
+                for evidence_id, identity in evidence.items()
+            }
+            for boundary_id, evidence in manifest[
+                "allowedEvidenceByBoundary"
             ].items()
         }
-        inherited_executables = tuple(runtime_executables.values())
+        environments = {
+            boundary_id: _benchmark_environment(
+                runtime_executables[boundary_id],
+                runtime_evidence[boundary_id],
+                boundary_id=boundary_id,
+            )
+            for boundary_id in RUNTIME_DEPENDENCY_ROLES_BY_BOUNDARY
+        }
         run_directory = reserve_directory(output_root / run_id)
         _pin_current_process(set(plan["execution"]["cpuSet"]))
         total_deadline = time.monotonic() + plan["execution"]["totalRunTimeoutSeconds"]
         valid_performance_timeouts = 0
-        environment = _benchmark_environment(runtime_executables)
         for block in schedule:
             remaining_total = total_deadline - time.monotonic()
             if remaining_total <= 0:
@@ -1600,10 +1943,13 @@ def execute_schedule(
             if host_command[0] != host_executable.binding["path"]:
                 raise ContractError("HOST_EXECUTABLE_BINDING_MISMATCH")
             try:
+                host_inherited = tuple(
+                    runtime_executables["hostValidator"].values()
+                )
                 _run_process(
                     host_command,
                     executable=host_executable,
-                    inherited_executables=inherited_executables,
+                    inherited_executables=host_inherited,
                     cwd=repo_root,
                     timeout_seconds=min(
                         plan["environmentValidity"]["maxQuietWaitSeconds"],
@@ -1611,7 +1957,7 @@ def execute_schedule(
                     ),
                     stdout_path=output_directory / "host-validator.stdout",
                     stderr_path=output_directory / "host-validator.stderr",
-                    environment=environment,
+                    environment=environments["hostValidator"],
                 )
             except ContractError as exc:
                 if str(exc) == "PERFORMANCE_DEADLINE_EXCEEDED":
@@ -1652,15 +1998,19 @@ def execute_schedule(
             )
             _write_json_exclusive(qualification_path, qualification)
             try:
+                native_inherited = (
+                    *runtime_executables[block.boundary_id].values(),
+                    *runtime_evidence[block.boundary_id].values(),
+                )
                 _run_process(
                     native_command,
                     executable=native_executable,
-                    inherited_executables=inherited_executables,
+                    inherited_executables=native_inherited,
                     cwd=repo_root,
                     timeout_seconds=block.timeout_seconds,
                     stdout_path=output_directory / "native-wrapper.stdout",
                     stderr_path=output_directory / "native-wrapper.stderr",
-                    environment=environment,
+                    environment=environments[block.boundary_id],
                 )
             except ContractError as exc:
                 _verify_source_commit_binding(

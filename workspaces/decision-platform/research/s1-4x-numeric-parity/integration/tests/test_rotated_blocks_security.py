@@ -56,9 +56,89 @@ def _host_report(plan: dict[str, Any], *, status: str = "PASS") -> dict[str, Any
     }
 
 
-def _command_manifest() -> dict[str, Any]:
+def _command_manifest(runtime_root: Path | None = None) -> dict[str, Any]:
     executable = str(Path(sys.executable).resolve())
     identity = {"path": executable, "sha256": sha256_file(Path(executable))}
+    runtime_identities: dict[str, dict[str, str]] = {}
+    evidence_identities: dict[str, dict[str, str]] = {}
+    if runtime_root is not None:
+        payload = Path(executable).read_bytes()
+        runtime_roles = {
+            role
+            for roles in runner.RUNTIME_DEPENDENCY_ROLES_BY_BOUNDARY.values()
+            for role in roles
+        }
+        for role in runtime_roles:
+            if role == "java":
+                path = runtime_root / "toolchain/jdk/bin/java"
+            elif role == "authoritativeGhc":
+                path = (
+                    runtime_root
+                    / "prefix/.ghcup/ghc/9.10.3/bin/ghc"
+                )
+            else:
+                path = runtime_root / "toolchain/bin" / role
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(payload)
+            path.chmod(0o700)
+            runtime_identities[role] = {
+                "path": str(path),
+                "sha256": sha256_file(path),
+            }
+        evidence_paths = {
+            "scalafmtArchive": runtime_root / "evidence/scalafmt.zip",
+            "selectedProfileResult": (
+                runtime_root / "evidence/scala/selected.json"
+            ),
+            "profileQualificationResult": (
+                runtime_root / "evidence/scala/qualification.json"
+            ),
+            "jvmAllowlistResult": (
+                runtime_root / "evidence/scala/jvm.json"
+            ),
+            "correctnessA": (
+                runtime_root
+                / "evidence/scala/profiles/A/"
+                "scala-profile-correctness-result.v1.json"
+            ),
+            "correctnessB": (
+                runtime_root
+                / "evidence/scala/profiles/B/"
+                "scala-profile-correctness-result.v1.json"
+            ),
+            "correctnessC": (
+                runtime_root
+                / "evidence/scala/profiles/C/"
+                "scala-profile-correctness-result.v1.json"
+            ),
+            "baselineCorrectness": (
+                runtime_root / "evidence/haskell/baseline.json"
+            ),
+            "optimizedCorrectness": (
+                runtime_root / "evidence/haskell/optimized.json"
+            ),
+            "profileQualification": (
+                runtime_root / "evidence/haskell/qualification.json"
+            ),
+        }
+        for role, path in evidence_paths.items():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"{}\n")
+            evidence_identities[role] = {
+                "path": str(path),
+                "sha256": sha256_file(path),
+            }
+    else:
+        runtime_identities = {
+            role: identity
+            for roles in runner.RUNTIME_DEPENDENCY_ROLES_BY_BOUNDARY.values()
+            for role in roles
+        }
+        evidence_identities = {
+            role: identity
+            for roles in runner.RUNTIME_EVIDENCE_ROLES_BY_BOUNDARY.values()
+            for role in roles
+        }
     return {
         "schemaVersion": "s1.4x-benchmark-command-manifest-v3",
         "benchmarkSubjectCommit": COMMIT,
@@ -103,7 +183,7 @@ def _command_manifest() -> dict[str, Any]:
             },
             "runtimeDependenciesByBoundary": {
                 boundary_id: {
-                    role: identity
+                    role: runtime_identities[role]
                     for role in roles
                 }
                 for boundary_id, roles
@@ -112,7 +192,7 @@ def _command_manifest() -> dict[str, Any]:
         },
         "allowedEvidenceByBoundary": {
             boundary_id: {
-                role: identity
+                role: evidence_identities[role]
                 for role in roles
             }
             for boundary_id, roles
@@ -123,7 +203,10 @@ def _command_manifest() -> dict[str, Any]:
 
 def _write_manifest(path: Path, manifest: dict[str, Any] | None = None) -> str:
     path.write_text(
-        json.dumps(manifest or _command_manifest(), allow_nan=False),
+        json.dumps(
+            manifest or _command_manifest(path.parent),
+            allow_nan=False,
+        ),
         encoding="utf-8",
     )
     return sha256_file(path)
@@ -511,10 +594,15 @@ def test_benchmark_environment_is_boundary_least_privilege_and_haskell_clean(
     monkeypatch.setenv("HOME", str(tmp_path))
 
     def pinned(role: str, descriptor: int) -> runner.PinnedExecutable:
+        path = (
+            tmp_path / ".ghcup/ghc/9.10.3/bin/ghc"
+            if role == "authoritativeGhc"
+            else Path(f"/opt/s1-4x/{role}")
+        )
         return runner.PinnedExecutable(
             binding={
-                "path": f"/opt/s1-4x/{role}",
-                "resolvedPath": f"/opt/s1-4x/{role}",
+                "path": str(path),
+                "resolvedPath": str(path),
                 "sha256": f"{descriptor:064x}",
             },
             descriptor=descriptor,

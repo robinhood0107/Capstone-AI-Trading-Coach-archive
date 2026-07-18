@@ -29,6 +29,8 @@ from executable_identity import (  # noqa: E402
 __all__ = [
     "BOUNDARY_IDS",
     "CommandManifestError",
+    "RUNTIME_DEPENDENCY_ROLES_BY_BOUNDARY",
+    "RUNTIME_EVIDENCE_ROLES_BY_BOUNDARY",
     "boundary_command_template",
     "build_manifest",
     "host_command_template",
@@ -46,6 +48,50 @@ BOUNDARY_IDS = (
     "scala",
     "haskell",
 )
+RUNTIME_DEPENDENCY_ROLES_BY_BOUNDARY = {
+    "hostValidator": ("uv",),
+    "python-numpy-s1-4": ("uv", "benchmarkPython"),
+    "python-numpy-s1-4r": ("uv", "benchmarkPython"),
+    "python-jax-eager-s1-4r": ("uv", "benchmarkPython"),
+    "python-jax-jit-s1-4r": ("uv", "benchmarkPython"),
+    "scala": (
+        "benchmarkPython",
+        "scalaCli",
+        "java",
+        "scalafix",
+        "scalafmt",
+    ),
+    "haskell": (
+        "benchmarkPython",
+        "ghcup",
+        "stack",
+        "authoritativeGhc",
+        "compatibilityGhc",
+        "hlint",
+        "stylishHaskell",
+    ),
+}
+RUNTIME_EVIDENCE_ROLES_BY_BOUNDARY = {
+    "hostValidator": (),
+    "python-numpy-s1-4": (),
+    "python-numpy-s1-4r": (),
+    "python-jax-eager-s1-4r": (),
+    "python-jax-jit-s1-4r": (),
+    "scala": (
+        "scalafmtArchive",
+        "selectedProfileResult",
+        "profileQualificationResult",
+        "jvmAllowlistResult",
+        "correctnessA",
+        "correctnessB",
+        "correctnessC",
+    ),
+    "haskell": (
+        "baselineCorrectness",
+        "optimizedCorrectness",
+        "profileQualification",
+    ),
+}
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 COMMIT = re.compile(r"^[0-9a-f]{40}$")
 
@@ -109,6 +155,23 @@ def _validate_runtime_identity(identity: Any, *, role: str) -> None:
     ):
         raise CommandManifestError(f"COMMAND_EXECUTABLE_MISMATCH:{role}")
     inspect_executable_identity(identity, role=role)
+
+
+def _validate_evidence_identity(identity: Any, *, role: str) -> None:
+    if (
+        not isinstance(identity, dict)
+        or set(identity) != {"path", "sha256"}
+        or not isinstance(identity["path"], str)
+        or not Path(identity["path"]).is_absolute()
+        or SHA256.fullmatch(str(identity["sha256"])) is None
+    ):
+        raise CommandManifestError(f"COMMAND_EVIDENCE_MISMATCH:{role}")
+    snapshot = inspect_regular_file_path(
+        Path(identity["path"]),
+        role=f"evidence:{role}",
+    )
+    if snapshot.sha256 != identity["sha256"]:
+        raise CommandManifestError(f"COMMAND_EVIDENCE_MISMATCH:{role}")
 
 
 def host_command_template(executable: str) -> list[str]:
@@ -191,9 +254,10 @@ def validate_manifest(value: Any) -> dict[str, Any]:
         "hostValidatorCommand",
         "boundaryCommands",
         "allowedExecutables",
+        "allowedEvidenceByBoundary",
     }:
         raise CommandManifestError("MANIFEST_FIELDS_INVALID")
-    if value["schemaVersion"] != "s1.4x-benchmark-command-manifest-v2":
+    if value["schemaVersion"] != "s1.4x-benchmark-command-manifest-v3":
         raise CommandManifestError("MANIFEST_VERSION_INVALID")
     benchmark_commit = value["benchmarkSubjectCommit"]
     source_commit = value["candidateSourceCommit"]
@@ -206,6 +270,7 @@ def validate_manifest(value: Any) -> dict[str, Any]:
     host = value["hostValidatorCommand"]
     boundaries = value["boundaryCommands"]
     identities = value["allowedExecutables"]
+    evidence_by_boundary = value["allowedEvidenceByBoundary"]
     if (
         not isinstance(host, list)
         or not host
@@ -214,18 +279,58 @@ def validate_manifest(value: Any) -> dict[str, Any]:
         or set(boundaries) != set(BOUNDARY_IDS)
         or not isinstance(identities, dict)
         or set(identities)
-        != {"hostValidator", "boundaries", "runtimeDependencies"}
+        != {
+            "hostValidator",
+            "boundaries",
+            "runtimeDependenciesByBoundary",
+        }
         or not isinstance(identities["boundaries"], dict)
         or set(identities["boundaries"]) != set(BOUNDARY_IDS)
-        or not isinstance(identities["runtimeDependencies"], dict)
-        or set(identities["runtimeDependencies"]) != {"uv"}
+        or not isinstance(
+            identities["runtimeDependenciesByBoundary"],
+            dict,
+        )
+        or set(identities["runtimeDependenciesByBoundary"])
+        != set(RUNTIME_DEPENDENCY_ROLES_BY_BOUNDARY)
     ):
         raise CommandManifestError("MANIFEST_COMMANDS_INVALID")
     _validate_identity(host, identities["hostValidator"], role="hostValidator")
-    _validate_runtime_identity(
-        identities["runtimeDependencies"]["uv"],
-        role="runtime:uv",
-    )
+    for boundary_id, expected_roles in (
+        RUNTIME_DEPENDENCY_ROLES_BY_BOUNDARY.items()
+    ):
+        dependencies = identities["runtimeDependenciesByBoundary"][
+            boundary_id
+        ]
+        if (
+            not isinstance(dependencies, dict)
+            or tuple(dependencies) != expected_roles
+        ):
+            raise CommandManifestError("MANIFEST_COMMANDS_INVALID")
+        for role, identity in dependencies.items():
+            _validate_runtime_identity(
+                identity,
+                role=f"runtime:{boundary_id}:{role}",
+            )
+    if (
+        not isinstance(evidence_by_boundary, dict)
+        or set(evidence_by_boundary)
+        != set(RUNTIME_EVIDENCE_ROLES_BY_BOUNDARY)
+    ):
+        raise CommandManifestError("MANIFEST_EVIDENCE_INVALID")
+    for boundary_id, expected_roles in (
+        RUNTIME_EVIDENCE_ROLES_BY_BOUNDARY.items()
+    ):
+        evidence = evidence_by_boundary[boundary_id]
+        if (
+            not isinstance(evidence, dict)
+            or tuple(evidence) != expected_roles
+        ):
+            raise CommandManifestError("MANIFEST_EVIDENCE_INVALID")
+        for role, identity in evidence.items():
+            _validate_evidence_identity(
+                identity,
+                role=f"{boundary_id}:{role}",
+            )
     _validate_placeholder_grammar(host, error="HOST_COMMAND_TEMPLATE_MISMATCH")
     if host != host_command_template(host[0]):
         raise CommandManifestError("HOST_COMMAND_TEMPLATE_MISMATCH")
@@ -260,12 +365,13 @@ def build_manifest(
     host_validator_command: Sequence[str],
     boundary_commands: Mapping[str, Sequence[str]],
     allowed_executables: Mapping[str, Any],
+    allowed_evidence_by_boundary: Mapping[str, Any],
 ) -> dict[str, Any]:
     """명시적으로 제공된 argv/identity만 사용해 v2 manifest를 만든다."""
 
     return validate_manifest(
         {
-            "schemaVersion": "s1.4x-benchmark-command-manifest-v2",
+            "schemaVersion": "s1.4x-benchmark-command-manifest-v3",
             "benchmarkSubjectCommit": benchmark_subject_commit,
             "candidateSourceCommit": candidate_source_commit,
             "hostValidatorCommand": list(host_validator_command),
@@ -273,6 +379,9 @@ def build_manifest(
                 key: list(command) for key, command in boundary_commands.items()
             },
             "allowedExecutables": dict(allowed_executables),
+            "allowedEvidenceByBoundary": dict(
+                allowed_evidence_by_boundary
+            ),
         }
     )
 
@@ -360,6 +469,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 host_validator_command=spec["hostValidatorCommand"],
                 boundary_commands=spec["boundaryCommands"],
                 allowed_executables=spec["allowedExecutables"],
+                allowed_evidence_by_boundary=spec[
+                    "allowedEvidenceByBoundary"
+                ],
             )
             digest = write_manifest_exclusive(
                 arguments.output,

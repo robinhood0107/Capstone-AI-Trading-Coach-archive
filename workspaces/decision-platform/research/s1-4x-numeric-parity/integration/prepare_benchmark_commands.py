@@ -13,17 +13,59 @@ from pathlib import Path
 
 from benchmark_commands import (
     BOUNDARY_IDS,
+    RUNTIME_DEPENDENCY_ROLES_BY_BOUNDARY,
+    RUNTIME_EVIDENCE_ROLES_BY_BOUNDARY,
     boundary_command_template,
     build_manifest,
     host_command_template,
     write_manifest_exclusive,
 )
-from executable_identity import inspect_executable_identity, inspect_executable_path
+from executable_identity import (
+    inspect_executable_identity,
+    inspect_executable_path,
+    inspect_regular_file_path,
+)
 
 
 def _identity(path: Path) -> dict[str, str]:
     inspected = inspect_executable_path(path, role="prepare")
     return {"path": inspected.path, "sha256": inspected.sha256}
+
+
+def _evidence_identity(path: Path) -> dict[str, str]:
+    inspected = inspect_regular_file_path(path, role="prepareEvidence")
+    return {
+        "path": str(path),
+        "sha256": inspected.sha256,
+    }
+
+
+def _parse_role_paths(
+    values: Sequence[str],
+    *,
+    expected_roles: set[str],
+    label: str,
+) -> dict[str, Path]:
+    parsed: dict[str, Path] = {}
+    for value in values:
+        role, separator, raw_path = value.partition("=")
+        path = Path(raw_path)
+        if (
+            separator != "="
+            or role not in expected_roles
+            or role in parsed
+            or not raw_path
+            or not path.is_absolute()
+        ):
+            raise ValueError(f"{label} role/path is invalid: {value}")
+        parsed[role] = path
+    if set(parsed) != expected_roles:
+        missing = sorted(expected_roles - set(parsed))
+        extra = sorted(set(parsed) - expected_roles)
+        raise ValueError(
+            f"{label} role set mismatch: missing={missing}, extra={extra}"
+        )
+    return parsed
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -34,7 +76,18 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--python-wrapper", type=Path, required=True)
     parser.add_argument("--scala-wrapper", type=Path, required=True)
     parser.add_argument("--haskell-wrapper", type=Path, required=True)
-    parser.add_argument("--uv", type=Path, required=True)
+    parser.add_argument(
+        "--runtime-executable",
+        action="append",
+        default=[],
+        metavar="ROLE=/ABSOLUTE/PATH",
+    )
+    parser.add_argument(
+        "--runtime-evidence",
+        action="append",
+        default=[],
+        metavar="ROLE=/ABSOLUTE/PATH",
+    )
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--sidecar", type=Path, required=True)
     return parser
@@ -87,18 +140,45 @@ def main(argv: Sequence[str] | None = None) -> int:
         subject = arguments.benchmark_subject_commit
         if completed.returncode != 0 or completed.stdout.strip() != subject:
             raise ValueError("benchmark subject does not equal current HEAD")
-        identities = {
+        wrapper_identities = {
             "host": _identity(arguments.host_wrapper),
             "python": _identity(arguments.python_wrapper),
             "scala": _identity(arguments.scala_wrapper),
             "haskell": _identity(arguments.haskell_wrapper),
-            "uv": _identity(arguments.uv),
+        }
+        executable_roles = {
+            role
+            for roles in RUNTIME_DEPENDENCY_ROLES_BY_BOUNDARY.values()
+            for role in roles
+        }
+        evidence_roles = {
+            role
+            for roles in RUNTIME_EVIDENCE_ROLES_BY_BOUNDARY.values()
+            for role in roles
+        }
+        executable_paths = _parse_role_paths(
+            arguments.runtime_executable,
+            expected_roles=executable_roles,
+            label="runtime executable",
+        )
+        evidence_paths = _parse_role_paths(
+            arguments.runtime_evidence,
+            expected_roles=evidence_roles,
+            label="runtime evidence",
+        )
+        runtime_identities = {
+            role: _identity(path)
+            for role, path in executable_paths.items()
+        }
+        evidence_identities = {
+            role: _evidence_identity(path)
+            for role, path in evidence_paths.items()
         }
         boundary_identity = {
             boundary: (
-                identities["python"]
+                wrapper_identities["python"]
                 if boundary.startswith("python-")
-                else identities[boundary]
+                else wrapper_identities[boundary]
             )
             for boundary in BOUNDARY_IDS
         }
@@ -106,7 +186,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             benchmark_subject_commit=subject,
             candidate_source_commit=subject,
             host_validator_command=host_command_template(
-                identities["host"]["path"]
+                wrapper_identities["host"]["path"]
             ),
             boundary_commands={
                 boundary: boundary_command_template(
@@ -116,9 +196,24 @@ def main(argv: Sequence[str] | None = None) -> int:
                 for boundary in BOUNDARY_IDS
             },
             allowed_executables={
-                "hostValidator": identities["host"],
+                "hostValidator": wrapper_identities["host"],
                 "boundaries": boundary_identity,
-                "runtimeDependencies": {"uv": identities["uv"]},
+                "runtimeDependenciesByBoundary": {
+                    boundary: {
+                        role: runtime_identities[role]
+                        for role in roles
+                    }
+                    for boundary, roles
+                    in RUNTIME_DEPENDENCY_ROLES_BY_BOUNDARY.items()
+                },
+            },
+            allowed_evidence_by_boundary={
+                boundary: {
+                    role: evidence_identities[role]
+                    for role in roles
+                }
+                for boundary, roles
+                in RUNTIME_EVIDENCE_ROLES_BY_BOUNDARY.items()
             },
         )
         digest = write_manifest_exclusive(
