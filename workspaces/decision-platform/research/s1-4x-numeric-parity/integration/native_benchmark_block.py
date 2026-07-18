@@ -11,10 +11,12 @@ import os
 import re
 import statistics
 import sys
-from collections.abc import Mapping
+import tempfile
+from collections.abc import Mapping, Sequence
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from benchmark_input_ledger import validate_input_ledger
 from executable_identity import (
@@ -180,6 +182,251 @@ HASKELL_RUNTIME_IDENTITY_FIELDS = {
     "executedBenchmarkSha256",
     "status",
 }
+SCALA_RUNTIME_SOURCE_PATHS = (
+    "benchmarks/scala/ai/trading/coach/s14x/benchmark/BenchmarkInvocation.scala",
+    "benchmarks/scala/ai/trading/coach/s14x/benchmark/BenchmarkSetupProbeMain.scala",
+    "benchmarks/scala/ai/trading/coach/s14x/benchmark/JvmForkEvidence.scala",
+    "benchmarks/scala/s1_4x/benchmarks/classical_path_risk/ClassicalPathRiskBenchmark.scala",
+    "benchmarks/scala/s1_4x/benchmarks/coverage_batch/CoverageBatchBenchmark.scala",
+    "benchmarks/scala/s1_4x/benchmarks/intraday_realized/IntradayRealizedBenchmark.scala",
+    "benchmarks/scala/s1_4x/benchmarks/path_transform/PathTransformBenchmark.scala",
+    "benchmarks/scala/s1_4x/benchmarks/probabilistic_scalar/ProbabilisticScalarBenchmark.scala",
+    "benchmarks/scala/s1_4x/benchmarks/serial_sharpe/SerialSharpeBenchmark.scala",
+    "project.scala",
+    "selected-profile.scala",
+    "src/main/scala/ai/trading/coach/s14x/core/AdvancedRisk.scala",
+    "src/main/scala/ai/trading/coach/s14x/core/Models.scala",
+    "src/main/scala/ai/trading/coach/s14x/core/NumericPrimitives.scala",
+    "src/main/scala/ai/trading/coach/s14x/core/ProductionMetrics.scala",
+    "src/main/scala/ai/trading/coach/s14x/core/StableError.scala",
+    "src/main/scala/ai/trading/coach/s14x/core/Validation.scala",
+    "src/main/scala/ai/trading/coach/s14x/shell/BinaryArrayReader.scala",
+    "src/main/scala/ai/trading/coach/s14x/shell/CandidateRunner.scala",
+    "src/main/scala/ai/trading/coach/s14x/shell/ContractDecoder.scala",
+    "src/main/scala/ai/trading/coach/s14x/shell/JsonSupport.scala",
+    "src/main/scala/ai/trading/coach/s14x/shell/Main.scala",
+)
+SCALA_SOURCE_MANIFEST_FIELDS = {
+    "schemaVersion",
+    "language",
+    "files",
+    "inputSets",
+    "canonicalManifestSha256",
+}
+SCALA_SOURCE_INPUT_SETS = {
+    "tracked": "files",
+    "manifest": "files",
+    "format": "files",
+    "compile": "files",
+    "lint": "files",
+    "profileRun": "files",
+}
+SCALA_COMPILER_PROFILE_FIELDS = {
+    "schemaVersion",
+    "scalaVersion",
+    "jdkRelease",
+    "projectPackage",
+    "baseOptionGroups",
+    "profiles",
+    "warningNegativeFixtures",
+    "diagnosticOnlyOptions",
+    "forbiddenOptions",
+    "fallbackProfile",
+}
+SCALA_SELECTED_RESULT_FIELDS = {
+    "schemaVersion",
+    "benchmarkPlanSha256",
+    "selectorConfigSha256",
+    "qualificationSha256",
+    "sourceInputManifestSha256",
+    "compilerProfilesSha256",
+    "toolchainLockSha256",
+    "mergedToolchainProvenanceSha256",
+    "scalaCliBinarySha256",
+    "javaExecutableSha256",
+    "jvmArgumentAllowlistSha256",
+    "effectiveJvmArgumentsCapabilitySha256",
+    "profileOptionsSha256",
+    "selectedProfileSourceSha256",
+    "selectedProfileOptions",
+    "selectedProfileOptionsSha256",
+    "correctnessResultSha256",
+    "profiles",
+    "selectedProfileId",
+    "fallbackProfileId",
+    "fallbackExecuted",
+    "selectionStatus",
+}
+SCALA_JVM_ALLOWLIST_FIELDS = {
+    "schemaVersion",
+    "benchmarkPlanSha256",
+    "capabilitySmokePlanSha256",
+    "toolchainLockSha256",
+    "javaExecutablePathId",
+    "javaExecutableSha256",
+    "runtimeVersion",
+    "vendor",
+    "plannedCliJvmArguments",
+    "effectiveJvmArguments",
+    "stableSystemProperties",
+    "ambientJvmOptionVariables",
+    "systemPropertiesSha256",
+    "environmentAllowlistSha256",
+    "smokeForkEvidenceSha256",
+    "effectiveArgumentsSha256",
+    "status",
+}
+SCALA_JVM_FORK_FIELDS = {
+    "schemaVersion",
+    "forkIndex",
+    "javaExecutablePathId",
+    "javaExecutableSha256",
+    "runtimeVersion",
+    "vendor",
+    "javaHomePathId",
+    "inputArguments",
+    "stableSystemProperties",
+    "ambientJvmOptionVariables",
+    "systemPropertiesSha256",
+    "environmentAllowlistSha256",
+    "runtimeClasspathSha256",
+    "evidenceSha256",
+}
+SCALA_EFFECTIVE_JVM_FIELDS = {
+    "schemaVersion",
+    "policyId",
+    "jvmArgumentAllowlistSha256",
+    "capabilitySmokePlanSha256",
+    "javaExecutablePathId",
+    "javaExecutableSha256",
+    "effectiveJvmArguments",
+    "forkEvidenceSha256",
+    "forkCount",
+    "effectiveArgumentsSha256",
+    "aggregateStatus",
+}
+SCALA_JMH_VALIDATION_FIELDS = {
+    "schemaVersion",
+    "benchmark",
+    "mode",
+    "timeUnit",
+    "threadCount",
+    "forks",
+    "warmupIterations",
+    "warmupTime",
+    "measurementIterations",
+    "measurementTime",
+    "effectiveJvmArguments",
+    "logicalOperationsPerInvocation",
+    "rawScoreNsPerInvocation",
+    "normalizedScoreNsPerLogicalOperation",
+    "nativeValue",
+    "rawSampleCount",
+    "status",
+}
+SCALA_JMH_RUN_RESULT_FIELDS = {
+    "schemaVersion",
+    "profileId",
+    "caseId",
+    "logicalOperationsPerInvocation",
+    "rawScoreNsPerInvocation",
+    "normalizedScoreNsPerLogicalOperation",
+    "runMode",
+    "benchmarkPlanSha256",
+    "sourceInputManifestSha256",
+    "scalaCliBinarySha256",
+    "compilerProfilesSha256",
+    "profileOptionsSha256",
+    "inputPaths",
+    "portableArgv",
+    "portableArgvSha256",
+    "runtimeArgvSha256",
+    "rawNativeJsonSha256",
+    "effectiveJvmArgsSha256",
+    "jvmArgumentAllowlistSha256",
+    "nativeValidationSha256",
+    "measurementReadyMarkerSha256",
+    "stdoutSha256",
+    "stderrSha256",
+    "exitCode",
+    "status",
+    "aggregateStatus",
+}
+SCALA_MEASUREMENT_MARKER_FIELDS = {
+    "schemaVersion",
+    "benchmarkPlanSha256",
+    "caseId",
+    "profileId",
+    "runMode",
+    "setupStatus",
+    "markerCardinality",
+}
+SCALA_CASE_EVIDENCE_FILES = (
+    "native.json",
+    "scala-jmh-run-result.v1.json",
+    "scala-jmh-native-validation.v1.json",
+    "scala-effective-jvm-args-result.v1.json",
+    "measurement-ready.v1.json",
+    "fork-evidence.normalized.json",
+    "jmh.stdout",
+    "jmh.stderr",
+    "jmh-list.txt",
+)
+SCALA_CASE_JSON_FILES = frozenset(SCALA_CASE_EVIDENCE_FILES[:6])
+SCALA_ARTIFACT_CLOSURE_FIELDS = {
+    "sourceTreeSha256",
+    "selectedProfileResultSha256",
+    "selectedProfileSourceSha256",
+    "sourceInputManifestSha256",
+    "compilerProfilesSha256",
+    "scalaCliBinarySha256",
+    "javaExecutableSha256",
+    "toolchainLockSha256",
+    "mergedToolchainProvenanceSha256",
+    "effectiveJvmArgumentsCapabilitySha256",
+}
+SCALA_CANDIDATE_PROVENANCE_FIELDS = {
+    "kind",
+    "selectedProfileResultPath",
+    "selectedProfileResultSha256",
+    "selectedProfileSourcePath",
+    "selectedProfileSourceSha256",
+    "selectedProfileId",
+    "sourceInputManifestPath",
+    "sourceInputManifestSha256",
+    "compilerProfilesPath",
+    "compilerProfilesSha256",
+    "toolchainLockPath",
+    "toolchainLockSha256",
+    "mergedToolchainProvenancePath",
+    "mergedToolchainProvenanceSha256",
+    "effectiveJvmArgumentsCapabilityPath",
+    "effectiveJvmArgumentsCapabilitySha256",
+    "scalaCliPath",
+    "scalaCliBinarySha256",
+    "javaExecutablePath",
+    "javaExecutableSha256",
+}
+SCALA_EXPECTED_STABLE_PROPERTIES = {
+    "java.runtime.version": "25.0.3+9-LTS",
+    "java.specification.version": "25",
+    "java.vendor": "Eclipse Adoptium",
+    "java.vm.name": "OpenJDK 64-Bit Server VM",
+}
+SCALA_EXPECTED_AMBIENT_JVM_OPTIONS = {
+    "JAVA_TOOL_OPTIONS": "UNSET",
+    "_JAVA_OPTIONS": "UNSET",
+    "JDK_JAVA_OPTIONS": "UNSET",
+}
+SCALA_EXPECTED_BENCHMARK_ENVIRONMENT = {
+    "S1_4X_BENCHMARK_CASE_ID": "SET",
+    "S1_4X_BENCHMARK_PLAN": "SET",
+    "S1_4X_BENCHMARK_PROFILE": "SET",
+    "S1_4X_BENCHMARK_RUN_MODE": "SET",
+    "S1_4X_EFFECTIVE_JVM_EVIDENCE_DIR": "SET",
+    "S1_4X_FIXTURE_ROOT": "SET",
+    "S1_4X_MEASUREMENT_READY_MARKER": "SET",
+}
 CRITERION_MEASUREMENT_KEYS = [
     "time",
     "cpuTime",
@@ -270,6 +517,160 @@ def _canonical_sha256(value: Any) -> str:
     ).hexdigest()
 
 
+def _canonical_pairs_sha256(value: Any, *, error: str) -> str:
+    if not isinstance(value, dict) or any(
+        not isinstance(key, str) or not isinstance(item, str)
+        for key, item in value.items()
+    ):
+        raise GateError(error)
+    return hashlib.sha256(
+        "".join(
+            f"{key}={value[key]}\n"
+            for key in sorted(value, key=str.encode)
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _scala_artifact_closure_sha256(closure: Mapping[str, Any]) -> str:
+    """Scala source/profile/tool bytes 전체를 candidate artifact identity로 묶는다."""
+
+    if (
+        set(closure) != SCALA_ARTIFACT_CLOSURE_FIELDS
+        or any(SHA256.fullmatch(str(value)) is None for value in closure.values())
+    ):
+        raise GateError("SCALA_NATIVE_ARTIFACT_CLOSURE_INVALID")
+    return _canonical_sha256(dict(closure))
+
+
+def _validate_scala_executable_identities(
+    *,
+    scala_cli_path: Path,
+    java_executable_path: Path,
+) -> tuple[InspectedExecutable, InspectedExecutable]:
+    scala_cli_snapshot = _snapshot_regular_file(
+        scala_cli_path,
+        role="scala-cli-executable",
+        error="SCALA_NATIVE_SCALA_CLI_IDENTITY_INVALID",
+        executable=True,
+    )
+    java_executable_snapshot = _snapshot_regular_file(
+        java_executable_path,
+        role="scala-java-executable",
+        error="SCALA_NATIVE_JAVA_IDENTITY_INVALID",
+        executable=True,
+    )
+    if scala_cli_snapshot.sha256 != FROZEN_SCALA_CLI_SHA256:
+        raise GateError("SCALA_NATIVE_SCALA_CLI_IDENTITY_INVALID")
+    if java_executable_snapshot.sha256 != FROZEN_JAVA_EXECUTABLE_SHA256:
+        raise GateError("SCALA_NATIVE_JAVA_IDENTITY_INVALID")
+    return scala_cli_snapshot, java_executable_snapshot
+
+
+def _scala_effective_runtime_arguments_sha256(
+    *,
+    selector_id: str,
+    expected_case_ids: list[str],
+    profile_id: str,
+    profile_options_sha256: str,
+    case_receipts: Sequence[Mapping[str, Any]],
+) -> str:
+    """각 case가 실제 기록한 argv/JVM/portable digest를 순서째 실행 identity로 묶는다."""
+
+    receipt_fields = {
+        "caseId",
+        "runtimeArgvSha256",
+        "effectiveJvmArgsSha256",
+        "portableArgvSha256",
+    }
+    if (
+        not selector_id
+        or not profile_id
+        or SHA256.fullmatch(profile_options_sha256) is None
+        or [item.get("caseId") for item in case_receipts] != expected_case_ids
+        or any(
+            set(item) != receipt_fields
+            or any(
+                SHA256.fullmatch(str(item.get(field))) is None
+                for field in (
+                    "runtimeArgvSha256",
+                    "effectiveJvmArgsSha256",
+                    "portableArgvSha256",
+                )
+            )
+            for item in case_receipts
+        )
+    ):
+        raise GateError("SCALA_NATIVE_RUNTIME_RECEIPT_ORDER_INVALID")
+    return _canonical_sha256(
+        {
+            "selectorId": selector_id,
+            "expectedCaseIds": expected_case_ids,
+            "profileId": profile_id,
+            "profileOptionsSha256": profile_options_sha256,
+            "cases": [dict(item) for item in case_receipts],
+        }
+    )
+
+
+def _scala_full_runtime_argv(
+    *,
+    scala_cli: Path,
+    scala_root: Path,
+    source_paths: list[str],
+    scala_cli_arguments: list[str],
+    raw_path: Path,
+    jmh_include_regex: str,
+) -> list[str]:
+    """Scala lane full runner와 동일한 exact source/options/JMH argv를 재구성한다."""
+
+    if (
+        source_paths != list(SCALA_RUNTIME_SOURCE_PATHS)
+        or not isinstance(scala_cli_arguments, list)
+        or any(
+            not isinstance(argument, str) or not argument
+            for argument in scala_cli_arguments
+        )
+        or not jmh_include_regex
+    ):
+        raise GateError("SCALA_NATIVE_RUNTIME_ARGV_INPUT_INVALID")
+    return [
+        str(scala_cli),
+        "--power",
+        "run",
+        *(str(scala_root / relative_path) for relative_path in source_paths),
+        "--server=false",
+        "--jvm",
+        "system",
+        "--coursier-validate-checksums",
+        *scala_cli_arguments,
+        "--jmh",
+        "--jmh-version",
+        "1.37",
+        "--",
+        "-bm",
+        "avgt",
+        "-tu",
+        "ns",
+        "-t",
+        "1",
+        "-f",
+        "3",
+        "-wi",
+        "5",
+        "-i",
+        "10",
+        "-w",
+        "1s",
+        "-r",
+        "1s",
+        "-rf",
+        "json",
+        "-rff",
+        str(raw_path),
+        jmh_include_regex,
+    ]
+
+
 def _parse_utc_timestamp(value: str) -> datetime | None:
     if UTC_TIMESTAMP.fullmatch(value) is None:
         return None
@@ -342,6 +743,66 @@ def _snapshot_json_file(
     except GateError as exc:
         raise GateError(error) from exc
     return snapshot, document
+
+
+@contextmanager
+def _sealed_snapshot_path(
+    snapshot: InspectedExecutable,
+    *,
+    error: str,
+) -> Iterator[Path]:
+    """검증기가 path API만 제공할 때 unlinked read-only FD로 snapshot bytes를 전달한다."""
+
+    writer, temporary_name = tempfile.mkstemp(
+        prefix=".s1-4x-snapshot-",
+        dir="/tmp",
+    )
+    reader = -1
+    try:
+        remaining = memoryview(snapshot.payload)
+        while remaining:
+            written = os.write(writer, remaining)
+            if written <= 0:
+                raise GateError(error)
+            remaining = remaining[written:]
+        os.fsync(writer)
+        os.fchmod(writer, 0o400)
+        reader = os.open(
+            f"/proc/self/fd/{writer}",
+            os.O_RDONLY | os.O_CLOEXEC,
+        )
+        os.unlink(temporary_name)
+        os.close(writer)
+        writer = -1
+        yield Path(f"/proc/self/fd/{reader}")
+    except OSError as exc:
+        raise GateError(error) from exc
+    finally:
+        if writer >= 0:
+            os.close(writer)
+        if reader >= 0:
+            os.close(reader)
+        try:
+            os.unlink(temporary_name)
+        except FileNotFoundError:
+            pass
+
+
+def _validate_plan_snapshot(
+    snapshot: InspectedExecutable,
+    *,
+    error: str,
+) -> dict[str, Any]:
+    """Frozen plan validator가 snapshot FD만 읽도록 path substitution을 차단한다."""
+
+    try:
+        with _sealed_snapshot_path(snapshot, error=error) as snapshot_path:
+            plan = validate_plan(snapshot_path)
+            if not isinstance(plan, dict):
+                raise GateError(error)
+            return plan
+    except (ContractError, GateError, OSError) as exc:
+        raise GateError(error) from exc
 
 
 def _number(value: Any, *, positive: bool = False) -> float | None:
@@ -510,6 +971,9 @@ def _validate_scala_toolchain_lock(
     *,
     s1_4x_root: Path,
     error: str,
+    project_sha256: str | None = None,
+    scalafmt_config_sha256: str | None = None,
+    merged_provenance_value: Any | None = None,
 ) -> None:
     lock = _exact_object(
         value,
@@ -575,7 +1039,21 @@ def _validate_scala_toolchain_lock(
     project_path = s1_4x_root / "scala/project.scala"
     scalafmt_path = s1_4x_root / "scala/.scalafmt.conf"
     merged_provenance_path = s1_4x_root / "contract/toolchain-provenance.v1.json"
-    merged_provenance = strict_json_load(merged_provenance_path)
+    merged_provenance = (
+        merged_provenance_value
+        if merged_provenance_value is not None
+        else strict_json_load(merged_provenance_path)
+    )
+    actual_project_sha256 = (
+        project_sha256
+        if project_sha256 is not None
+        else sha256_file(project_path)
+    )
+    actual_scalafmt_config_sha256 = (
+        scalafmt_config_sha256
+        if scalafmt_config_sha256 is not None
+        else sha256_file(scalafmt_path)
+    )
     if not isinstance(merged_provenance, dict) or any(
         field not in merged_provenance for field in TOOLCHAIN_PROJECTION_FIELDS
     ):
@@ -609,10 +1087,10 @@ def _validate_scala_toolchain_lock(
         }
         or scala["version"] != "3.8.4"
         or scala["projectPath"] != f"{expected_prefix}/scala/project.scala"
-        or scala["projectSha256"] != sha256_file(project_path)
+        or scala["projectSha256"] != actual_project_sha256
         or scalafmt["version"] != "3.11.4"
         or scalafmt["configPath"] != f"{expected_prefix}/scala/.scalafmt.conf"
-        or scalafmt["configSha256"] != sha256_file(scalafmt_path)
+        or scalafmt["configSha256"] != actual_scalafmt_config_sha256
         or scalafmt["runnerPathId"] != "SCALA_CLI_1_15_0"
         or scalafmt["archiveUri"]
         != (
@@ -646,6 +1124,286 @@ def _validate_scala_toolchain_lock(
         or lock["sharedDistributionProvenance"] != expected_shared
     ):
         raise GateError(error)
+
+
+def _validate_scala_compiler_profiles(
+    value: Any,
+    *,
+    error: str,
+) -> dict[str, Any]:
+    profiles_document = _exact_object(
+        value,
+        SCALA_COMPILER_PROFILE_FIELDS,
+        error=error,
+    )
+    profiles = profiles_document["profiles"]
+    expected_profiles = {
+        "A": {
+            "profileName": "baseline",
+            "additionalOptions": [],
+            "scalaCliArguments": [],
+        },
+        "B": {
+            "profileName": "opt",
+            "additionalOptions": ["-opt"],
+            "scalaCliArguments": ["--scalac-option=-opt"],
+        },
+        "C": {
+            "profileName": "opt-own-source-inline",
+            "additionalOptions": [
+                "-opt",
+                "-opt-inline:ai.trading.coach.s14x.**",
+            ],
+            "scalaCliArguments": [
+                "--scalac-option=-opt",
+                "--scalac-option=-opt-inline:ai.trading.coach.s14x.**",
+            ],
+        },
+    }
+    if (
+        profiles_document["schemaVersion"]
+        != "s1.4x-scala-compiler-profiles-v1"
+        or profiles_document["scalaVersion"] != "3.8.4"
+        or profiles_document["jdkRelease"] != "25"
+        or profiles_document["projectPackage"] != "ai.trading.coach.s14x"
+        or profiles != expected_profiles
+        or profiles_document["fallbackProfile"] != "A"
+        or not isinstance(profiles_document["baseOptionGroups"], list)
+        or not profiles_document["baseOptionGroups"]
+        or not isinstance(profiles_document["warningNegativeFixtures"], list)
+        or not profiles_document["warningNegativeFixtures"]
+        or not isinstance(profiles_document["diagnosticOnlyOptions"], list)
+        or not isinstance(profiles_document["forbiddenOptions"], list)
+    ):
+        raise GateError(error)
+    return profiles_document
+
+
+def _validate_scala_source_manifest(
+    value: Any,
+    *,
+    scala_root: Path,
+    error: str,
+) -> tuple[dict[str, Any], dict[str, InspectedExecutable], str]:
+    """Manifest 전체와 full JMH exact 22-source closure를 같은 snapshot으로 검증한다."""
+
+    manifest = _exact_object(
+        value,
+        SCALA_SOURCE_MANIFEST_FIELDS,
+        error=error,
+    )
+    files = manifest["files"]
+    if (
+        manifest["schemaVersion"] != "s1.4x-source-input-manifest-v1"
+        or manifest["language"] != "scala"
+        or manifest["inputSets"] != SCALA_SOURCE_INPUT_SETS
+        or not isinstance(files, dict)
+        or not files
+        or list(files) != sorted(files, key=str.encode)
+        or SHA256.fullmatch(str(manifest["canonicalManifestSha256"])) is None
+    ):
+        raise GateError(error)
+    snapshots: dict[str, InspectedExecutable] = {}
+    manifest_lines: list[str] = []
+    runtime_paths: list[str] = []
+    source_tree_entries: list[dict[str, str]] = []
+    for relative_path, raw_metadata in files.items():
+        if (
+            not isinstance(relative_path, str)
+            or not relative_path
+            or Path(relative_path).is_absolute()
+            or ".." in Path(relative_path).parts
+        ):
+            raise GateError(error)
+        metadata = _exact_object(
+            raw_metadata,
+            {"role", "sha256"},
+            error=error,
+        )
+        role = metadata["role"]
+        if role not in {"configuration", "main", "benchmark", "test"}:
+            raise GateError(error)
+        path = scala_root / relative_path
+        snapshot = _snapshot_regular_file(
+            path,
+            role=f"scala-source:{relative_path}",
+            error=error,
+        )
+        if metadata["sha256"] != snapshot.sha256:
+            raise GateError(error)
+        snapshots[relative_path] = snapshot
+        manifest_lines.append(f"{snapshot.sha256}  {relative_path}\n")
+        if role in {"configuration", "main", "benchmark"}:
+            runtime_paths.append(relative_path)
+            source_tree_entries.append(
+                {"path": relative_path, "sha256": snapshot.sha256}
+            )
+    if (
+        tuple(runtime_paths) != SCALA_RUNTIME_SOURCE_PATHS
+        or len(runtime_paths) != 22
+        or manifest["canonicalManifestSha256"]
+        != hashlib.sha256("".join(manifest_lines).encode("utf-8")).hexdigest()
+    ):
+        raise GateError(error)
+    expected_runtime_set = set(SCALA_RUNTIME_SOURCE_PATHS)
+    actual_runtime_candidates = {
+        path.relative_to(scala_root).as_posix()
+        for candidate_root in (scala_root / "benchmarks", scala_root / "src/main")
+        for path in candidate_root.rglob("*.scala")
+        if path.is_file() and not path.is_symlink()
+    } | {"project.scala", "selected-profile.scala"}
+    if actual_runtime_candidates != expected_runtime_set:
+        raise GateError(error)
+    return manifest, snapshots, _canonical_sha256(source_tree_entries)
+
+
+def _validate_scala_jvm_allowlist(
+    value: Any,
+    *,
+    plan_sha256: str,
+    toolchain_lock_sha256: str,
+    java_executable_sha256: str,
+    error: str,
+    capability_smoke_plan_sha256: str | None = None,
+) -> dict[str, Any]:
+    allowlist = _exact_object(
+        value,
+        SCALA_JVM_ALLOWLIST_FIELDS,
+        error=error,
+    )
+    effective_arguments = allowlist["effectiveJvmArguments"]
+    smoke_hashes = allowlist["smokeForkEvidenceSha256"]
+    if (
+        allowlist["schemaVersion"]
+        != "s1.4x-scala-jvm-argument-allowlist-v1"
+        or allowlist["benchmarkPlanSha256"] != plan_sha256
+        or (
+            capability_smoke_plan_sha256 is not None
+            and allowlist["capabilitySmokePlanSha256"]
+            != capability_smoke_plan_sha256
+        )
+        or allowlist["toolchainLockSha256"] != toolchain_lock_sha256
+        or allowlist["javaExecutablePathId"]
+        != "TEMURIN_25_0_3_9_LTS/bin/java"
+        or allowlist["javaExecutableSha256"] != java_executable_sha256
+        or allowlist["runtimeVersion"] != "25.0.3+9-LTS"
+        or allowlist["vendor"] != "Eclipse Adoptium"
+        or allowlist["plannedCliJvmArguments"] != []
+        or not isinstance(effective_arguments, list)
+        or any(not isinstance(item, str) for item in effective_arguments)
+        or allowlist["stableSystemProperties"]
+        != SCALA_EXPECTED_STABLE_PROPERTIES
+        or allowlist["ambientJvmOptionVariables"]
+        != SCALA_EXPECTED_AMBIENT_JVM_OPTIONS
+        or allowlist["systemPropertiesSha256"]
+        != _canonical_pairs_sha256(
+            SCALA_EXPECTED_STABLE_PROPERTIES,
+            error=error,
+        )
+        or allowlist["environmentAllowlistSha256"]
+        != _canonical_pairs_sha256(
+            SCALA_EXPECTED_BENCHMARK_ENVIRONMENT,
+            error=error,
+        )
+        or not isinstance(smoke_hashes, list)
+        or len(smoke_hashes) != 1
+        or SHA256.fullmatch(str(smoke_hashes[0])) is None
+        or SHA256.fullmatch(str(allowlist["capabilitySmokePlanSha256"])) is None
+        or allowlist["effectiveArgumentsSha256"]
+        != _canonical_sha256(effective_arguments)
+        or allowlist["status"] != "PASS"
+    ):
+        raise GateError(error)
+    return allowlist
+
+
+def _validate_scala_selected_result(
+    value: Any,
+    *,
+    plan: Mapping[str, Any],
+    plan_sha256: str,
+    selected_source_sha256: str,
+    source_manifest_sha256: str,
+    compiler_profiles_sha256: str,
+    compiler_profiles: Mapping[str, Any],
+    toolchain_lock_sha256: str,
+    merged_provenance_sha256: str,
+    jvm_allowlist_sha256: str,
+    scala_cli_sha256: str,
+    java_executable_sha256: str,
+    error: str,
+) -> tuple[dict[str, Any], str, list[str], str]:
+    selected = _exact_object(
+        value,
+        SCALA_SELECTED_RESULT_FIELDS,
+        error=error,
+    )
+    profile_id = selected["selectedProfileId"]
+    profile_contracts = compiler_profiles["profiles"]
+    profile_contract = (
+        profile_contracts.get(profile_id)
+        if isinstance(profile_contracts, dict)
+        else None
+    )
+    selected_options = (
+        profile_contract.get("additionalOptions")
+        if isinstance(profile_contract, dict)
+        else None
+    )
+    scala_cli_arguments = (
+        profile_contract.get("scalaCliArguments")
+        if isinstance(profile_contract, dict)
+        else None
+    )
+    correctness = selected["correctnessResultSha256"]
+    profile_results = selected["profiles"]
+    all_profile_options = {
+        profile: profile_contracts[profile]["additionalOptions"]
+        for profile in ("A", "B", "C")
+    }
+    if (
+        selected["schemaVersion"]
+        != "s1.4x-scala-selected-profile-result-v1"
+        or selected["benchmarkPlanSha256"] != plan_sha256
+        or SHA256.fullmatch(str(selected["selectorConfigSha256"])) is None
+        or SHA256.fullmatch(str(selected["qualificationSha256"])) is None
+        or selected["sourceInputManifestSha256"] != source_manifest_sha256
+        or selected["compilerProfilesSha256"] != compiler_profiles_sha256
+        or selected["toolchainLockSha256"] != toolchain_lock_sha256
+        or selected["mergedToolchainProvenanceSha256"]
+        != merged_provenance_sha256
+        or selected["scalaCliBinarySha256"] != scala_cli_sha256
+        or selected["javaExecutableSha256"] != java_executable_sha256
+        or selected["jvmArgumentAllowlistSha256"] != jvm_allowlist_sha256
+        or selected["effectiveJvmArgumentsCapabilitySha256"]
+        != jvm_allowlist_sha256
+        or selected["selectedProfileSourceSha256"]
+        != selected_source_sha256
+        or profile_id not in {"A", "B", "C"}
+        or selected_options is None
+        or scala_cli_arguments is None
+        or selected["selectedProfileOptions"] != selected_options
+        or selected["selectedProfileOptionsSha256"]
+        != _canonical_sha256(selected_options)
+        or selected["profileOptionsSha256"]
+        != _canonical_sha256(all_profile_options)
+        or not isinstance(correctness, dict)
+        or set(correctness) != {"A", "B", "C"}
+        or any(SHA256.fullmatch(str(item)) is None for item in correctness.values())
+        or not isinstance(profile_results, dict)
+        or set(profile_results) != {"A", "B", "C"}
+        or selected["fallbackProfileId"] != "A"
+        or type(selected["fallbackExecuted"]) is not bool
+        or selected["fallbackExecuted"] != (profile_id == "A")
+        or selected["selectionStatus"] != "PASS"
+    ):
+        raise GateError(error)
+    return (
+        selected,
+        str(profile_id),
+        list(scala_cli_arguments),
+        str(selected["selectedProfileOptionsSha256"]),
+    )
 
 
 def _validate_haskell_toolchain_lock(
@@ -827,6 +1585,7 @@ def _validate_haskell_selected_profile(
     plan: Mapping[str, Any],
     plan_path: Path,
     error: str,
+    plan_sha256: str | None = None,
 ) -> dict[str, Any]:
     """최종 Haskell profile이 frozen plan/source/compiler identity를 묶는지 검증한다."""
 
@@ -865,7 +1624,12 @@ def _validate_haskell_selected_profile(
             )
         )
         or profile["optionsSha256"] != _canonical_sha256(options)
-        or profile["qualificationPlanSha256"] != sha256_file(plan_path)
+        or profile["qualificationPlanSha256"]
+        != (
+            plan_sha256
+            if plan_sha256 is not None
+            else sha256_file(plan_path)
+        )
         or profile["selectorConfigSha256"]
         != _canonical_sha256(plan.get("haskellProfileQualification"))
         or profile["fallbackProfile"] != "baseline-o0-fasm"
@@ -1006,6 +1770,805 @@ def _haskell_benchmark_source_tree_sha256(
     return _canonical_sha256(entries)
 
 
+def _snapshot_scala_case_evidence(
+    case_directory: Path,
+    *,
+    case_id: str,
+) -> tuple[
+    dict[str, tuple[InspectedExecutable, Any]],
+    list[tuple[InspectedExecutable, Any]],
+]:
+    """한 Scala case의 9개 root evidence와 세 raw fork를 FD별 한 번만 읽는다."""
+
+    if (
+        case_directory.is_symlink()
+        or not case_directory.is_dir()
+        or {
+            path.name for path in case_directory.iterdir()
+        }
+        != {*SCALA_CASE_EVIDENCE_FILES, "fork-evidence"}
+    ):
+        raise GateError(f"SCALA_NATIVE_CASE_DIRECTORY_INVALID:{case_id}")
+    evidence: dict[str, tuple[InspectedExecutable, Any]] = {}
+    for name in SCALA_CASE_EVIDENCE_FILES:
+        path = case_directory / name
+        if name in SCALA_CASE_JSON_FILES:
+            snapshot, document = _snapshot_json_file(
+                path,
+                role=f"scala-case:{case_id}:{name}",
+                error=f"SCALA_NATIVE_CASE_EVIDENCE_INVALID:{case_id}:{name}",
+            )
+        else:
+            snapshot = _snapshot_regular_file(
+                path,
+                role=f"scala-case:{case_id}:{name}",
+                error=f"SCALA_NATIVE_CASE_EVIDENCE_INVALID:{case_id}:{name}",
+            )
+            document = None
+        evidence[name] = (snapshot, document)
+    fork_root = case_directory / "fork-evidence"
+    if fork_root.is_symlink() or not fork_root.is_dir():
+        raise GateError(f"SCALA_NATIVE_FORK_EVIDENCE_INVALID:{case_id}")
+    fork_paths = sorted(fork_root.glob("jvm-fork-*.json"), key=lambda path: path.name)
+    if (
+        len(fork_paths) != 3
+        or {path.name for path in fork_root.iterdir()}
+        != {path.name for path in fork_paths}
+    ):
+        raise GateError(f"SCALA_NATIVE_FORK_EVIDENCE_INVALID:{case_id}")
+    raw_forks = [
+        _snapshot_json_file(
+            path,
+            role=f"scala-case:{case_id}:raw-fork:{index}",
+            error=f"SCALA_NATIVE_FORK_EVIDENCE_INVALID:{case_id}",
+        )
+        for index, path in enumerate(fork_paths, start=1)
+    ]
+    return evidence, raw_forks
+
+
+def _validate_scala_effective_jvm_evidence(
+    *,
+    normalized_value: Any,
+    raw_forks: list[tuple[InspectedExecutable, Any]],
+    effective_value: Any,
+    allowlist: Mapping[str, Any],
+    allowlist_sha256: str,
+    java_executable_sha256: str,
+    case_id: str,
+) -> None:
+    normalized = normalized_value
+    if not isinstance(normalized, list) or len(normalized) != 3:
+        raise GateError(f"SCALA_NATIVE_FORK_EVIDENCE_INVALID:{case_id}")
+    evidence_hashes: list[str] = []
+    for index, (normalized_fork, raw_snapshot_and_value) in enumerate(
+        zip(normalized, raw_forks, strict=True),
+        start=1,
+    ):
+        raw_snapshot, raw_value = raw_snapshot_and_value
+        if not isinstance(raw_value, dict):
+            raise GateError(f"SCALA_NATIVE_FORK_EVIDENCE_INVALID:{case_id}")
+        expected_normalized = dict(raw_value)
+        process_id = expected_normalized.pop("forkProcessId", None)
+        start_time = expected_normalized.pop("runtimeStartTimeEpochMillis", None)
+        if (
+            expected_normalized.get("schemaVersion")
+            != "s1.4x-scala-jvm-fork-raw-evidence-v1"
+            or type(process_id) is not int
+            or process_id <= 0
+            or type(start_time) is not int
+            or start_time <= 0
+        ):
+            raise GateError(f"SCALA_NATIVE_FORK_EVIDENCE_INVALID:{case_id}")
+        expected_normalized["schemaVersion"] = (
+            "s1.4x-scala-jvm-fork-evidence-v1"
+        )
+        expected_normalized["forkIndex"] = index
+        expected_normalized["evidenceSha256"] = raw_snapshot.sha256
+        fork = _exact_object(
+            normalized_fork,
+            SCALA_JVM_FORK_FIELDS,
+            error=f"SCALA_NATIVE_FORK_EVIDENCE_INVALID:{case_id}",
+        )
+        if (
+            fork != expected_normalized
+            or fork["forkIndex"] != index
+            or fork["javaExecutablePathId"]
+            != "TEMURIN_25_0_3_9_LTS/bin/java"
+            or fork["javaExecutableSha256"] != java_executable_sha256
+            or fork["runtimeVersion"] != "25.0.3+9-LTS"
+            or fork["vendor"] != "Eclipse Adoptium"
+            or fork["javaHomePathId"] != "TEMURIN_25_0_3_9_LTS"
+            or fork["inputArguments"] != allowlist["effectiveJvmArguments"]
+            or fork["stableSystemProperties"]
+            != SCALA_EXPECTED_STABLE_PROPERTIES
+            or fork["ambientJvmOptionVariables"]
+            != SCALA_EXPECTED_AMBIENT_JVM_OPTIONS
+            or fork["systemPropertiesSha256"]
+            != _canonical_pairs_sha256(
+                SCALA_EXPECTED_STABLE_PROPERTIES,
+                error=f"SCALA_NATIVE_FORK_EVIDENCE_INVALID:{case_id}",
+            )
+            or fork["environmentAllowlistSha256"]
+            != _canonical_pairs_sha256(
+                SCALA_EXPECTED_BENCHMARK_ENVIRONMENT,
+                error=f"SCALA_NATIVE_FORK_EVIDENCE_INVALID:{case_id}",
+            )
+            or SHA256.fullmatch(str(fork["runtimeClasspathSha256"])) is None
+        ):
+            raise GateError(f"SCALA_NATIVE_FORK_EVIDENCE_INVALID:{case_id}")
+        evidence_hashes.append(raw_snapshot.sha256)
+    effective = _exact_object(
+        effective_value,
+        SCALA_EFFECTIVE_JVM_FIELDS,
+        error=f"SCALA_NATIVE_EFFECTIVE_JVM_EVIDENCE_INVALID:{case_id}",
+    )
+    expected_effective = {
+        "schemaVersion": "s1.4x-scala-effective-jvm-args-result-v1",
+        "policyId": "capability-smoke-effective-jvm-args-v1",
+        "jvmArgumentAllowlistSha256": allowlist_sha256,
+        "capabilitySmokePlanSha256": allowlist[
+            "capabilitySmokePlanSha256"
+        ],
+        "javaExecutablePathId": "TEMURIN_25_0_3_9_LTS/bin/java",
+        "javaExecutableSha256": java_executable_sha256,
+        "effectiveJvmArguments": allowlist["effectiveJvmArguments"],
+        "forkEvidenceSha256": evidence_hashes,
+        "forkCount": 3,
+        "effectiveArgumentsSha256": allowlist[
+            "effectiveArgumentsSha256"
+        ],
+        "aggregateStatus": "PASS",
+    }
+    if effective != expected_effective:
+        raise GateError(
+            f"SCALA_NATIVE_EFFECTIVE_JVM_EVIDENCE_INVALID:{case_id}"
+        )
+
+
+def _scala_native_case_from_raw(
+    raw_document: Any,
+    *,
+    case_id: str,
+    jmh_include_regex: str,
+    logical_operations: int,
+) -> tuple[dict[str, Any], dict[str, Any], str]:
+    if (
+        not isinstance(raw_document, list)
+        or len(raw_document) != 1
+        or not isinstance(raw_document[0], dict)
+    ):
+        raise GateError(f"JMH_RAW_DOCUMENT_INVALID:{case_id}")
+    result = raw_document[0]
+    metric = result.get("primaryMetric")
+    raw_data = metric.get("rawData") if isinstance(metric, dict) else None
+    score = metric.get("score") if isinstance(metric, dict) else None
+    score_number = _number(score, positive=True)
+    confidence = (
+        metric.get("scoreConfidence") if isinstance(metric, dict) else None
+    )
+    if (
+        type(logical_operations) is not int
+        or logical_operations < 1
+        or not isinstance(raw_data, list)
+        or not isinstance(confidence, list)
+        or len(confidence) != 2
+        or score_number is None
+        or _number(confidence[0]) is None
+        or _number(confidence[1]) is None
+    ):
+        raise GateError(f"JMH_RAW_CONTRACT_INVALID:{case_id}")
+    samples = [
+        float(sample)
+        for fork in raw_data
+        if isinstance(fork, list)
+        for sample in fork
+        if _number(sample, positive=True) is not None
+    ]
+    if len(samples) != 30:
+        raise GateError(f"JMH_RAW_CONTRACT_INVALID:{case_id}")
+    native_case = {
+        "caseId": case_id,
+        "nativeValue": score_number,
+        "samples": len(samples),
+        "warmupIterations": 5,
+        "measurementIterations": 10,
+    }
+    native_p95 = _nearest_rank_p95(samples)
+    dispersion = native_p95 - statistics.median(samples)
+    statistics_case = {
+        "caseId": case_id,
+        "nativeSampleCount": len(samples),
+        "nativeP95": native_p95,
+        "confidenceLevel": None,
+        "confidenceLow": float(confidence[0]),
+        "confidenceHigh": float(confidence[1]),
+        "dispersionMetric": "p95-minus-median-ns-per-invocation",
+        "dispersionValue": dispersion,
+        "nativeUnit": "ns",
+        "logicalOperationsPerInvocation": logical_operations,
+        "normalizedP95NsPerLogicalOperation": (
+            native_p95 / logical_operations
+        ),
+        "normalizedConfidenceLowNsPerLogicalOperation": (
+            float(confidence[0]) / logical_operations
+        ),
+        "normalizedConfidenceHighNsPerLogicalOperation": (
+            float(confidence[1]) / logical_operations
+        ),
+        "normalizedDispersionNsPerLogicalOperation": (
+            dispersion / logical_operations
+        ),
+    }
+    _parse_jmh_raw(
+        raw_document,
+        case_id=case_id,
+        jmh_include_regex=jmh_include_regex,
+        native_case=native_case,
+        native_statistics_case=statistics_case,
+    )
+    benchmark_name = result.get("benchmark")
+    if not isinstance(benchmark_name, str):
+        raise GateError(f"JMH_RAW_CASE_SELECTION_INVALID:{case_id}")
+    return native_case, statistics_case, benchmark_name
+
+
+def _validate_scala_case_evidence(
+    *,
+    case_directory: Path,
+    block_directory: Path,
+    case_index: int,
+    case_id: str,
+    logical_operations: int,
+    jmh_include_regex: str,
+    plan_sha256: str,
+    source_manifest_sha256: str,
+    compiler_profiles_sha256: str,
+    profile_id: str,
+    profile_options_sha256: str,
+    scala_cli_arguments: list[str],
+    scala_cli_snapshot: InspectedExecutable,
+    scala_root: Path,
+    jvm_allowlist: Mapping[str, Any],
+    jvm_allowlist_sha256: str,
+    java_executable_sha256: str,
+) -> dict[str, Any]:
+    evidence, raw_forks = _snapshot_scala_case_evidence(
+        case_directory,
+        case_id=case_id,
+    )
+    raw_snapshot, raw_document = evidence["native.json"]
+    run_snapshot, run_value = evidence["scala-jmh-run-result.v1.json"]
+    validation_snapshot, validation_value = evidence[
+        "scala-jmh-native-validation.v1.json"
+    ]
+    effective_snapshot, effective_value = evidence[
+        "scala-effective-jvm-args-result.v1.json"
+    ]
+    marker_snapshot, marker_value = evidence["measurement-ready.v1.json"]
+    normalized_snapshot, normalized_value = evidence[
+        "fork-evidence.normalized.json"
+    ]
+    stdout_snapshot, _ = evidence["jmh.stdout"]
+    stderr_snapshot, _ = evidence["jmh.stderr"]
+    list_snapshot, _ = evidence["jmh-list.txt"]
+    _validate_scala_effective_jvm_evidence(
+        normalized_value=normalized_value,
+        raw_forks=raw_forks,
+        effective_value=effective_value,
+        allowlist=jvm_allowlist,
+        allowlist_sha256=jvm_allowlist_sha256,
+        java_executable_sha256=java_executable_sha256,
+        case_id=case_id,
+    )
+    native_case, statistics_case, benchmark_name = (
+        _scala_native_case_from_raw(
+            raw_document,
+            case_id=case_id,
+            jmh_include_regex=jmh_include_regex,
+            logical_operations=logical_operations,
+        )
+    )
+    raw_result = raw_document[0]
+    if (
+        raw_result.get("jvmArgs") != jvm_allowlist["effectiveJvmArguments"]
+        or raw_result.get("measurementTime") != "1 s"
+        or raw_result.get("warmupTime") != "1 s"
+    ):
+        raise GateError(f"JMH_RAW_CONTRACT_INVALID:{case_id}")
+    metric = raw_result["primaryMetric"]
+    expected_validation = {
+        "schemaVersion": "s1.4x-scala-jmh-native-validation-v1",
+        "benchmark": benchmark_name,
+        "mode": "AverageTime",
+        "timeUnit": "ns/op",
+        "threadCount": 1,
+        "forks": 3,
+        "warmupIterations": 5,
+        "warmupTime": "1 s",
+        "measurementIterations": 10,
+        "measurementTime": "1 s",
+        "effectiveJvmArguments": jvm_allowlist["effectiveJvmArguments"],
+        "logicalOperationsPerInvocation": logical_operations,
+        "rawScoreNsPerInvocation": float(metric["score"]),
+        "normalizedScoreNsPerLogicalOperation": (
+            float(metric["score"]) / logical_operations
+        ),
+        "nativeValue": float(metric["score"]),
+        "rawSampleCount": 30,
+        "status": "PASS",
+    }
+    _exact_object(
+        validation_value,
+        SCALA_JMH_VALIDATION_FIELDS,
+        error=f"SCALA_NATIVE_VALIDATION_INVALID:{case_id}",
+    )
+    if validation_value != expected_validation:
+        raise GateError(f"SCALA_NATIVE_VALIDATION_INVALID:{case_id}")
+    marker = _exact_object(
+        marker_value,
+        SCALA_MEASUREMENT_MARKER_FIELDS,
+        error=f"SCALA_NATIVE_MEASUREMENT_MARKER_INVALID:{case_id}",
+    )
+    if marker != {
+        "schemaVersion": "s1.4x-scala-measurement-ready-v1",
+        "benchmarkPlanSha256": plan_sha256,
+        "caseId": case_id,
+        "profileId": profile_id,
+        "runMode": "full",
+        "setupStatus": "PASS",
+        "markerCardinality": 1,
+    }:
+        raise GateError(f"SCALA_NATIVE_MEASUREMENT_MARKER_INVALID:{case_id}")
+    try:
+        list_text = list_snapshot.payload.decode("utf-8", errors="strict")
+    except UnicodeDecodeError as exc:
+        raise GateError(f"SCALA_NATIVE_JMH_LIST_INVALID:{case_id}") from exc
+    if list_text.splitlines().count(benchmark_name) != 1:
+        raise GateError(f"SCALA_NATIVE_JMH_LIST_INVALID:{case_id}")
+    expected_argv = _scala_full_runtime_argv(
+        scala_cli=Path(scala_cli_snapshot.path),
+        scala_root=scala_root,
+        source_paths=list(SCALA_RUNTIME_SOURCE_PATHS),
+        scala_cli_arguments=scala_cli_arguments,
+        raw_path=case_directory / "native.json",
+        jmh_include_regex=jmh_include_regex,
+    )
+    portable_argv = _scala_full_runtime_argv(
+        scala_cli=Path("SCALA_CLI_1_15_0"),
+        scala_root=Path("SCALA_ROOT"),
+        source_paths=list(SCALA_RUNTIME_SOURCE_PATHS),
+        scala_cli_arguments=scala_cli_arguments,
+        raw_path=Path("EVIDENCE_ROOT/native.json"),
+        jmh_include_regex=jmh_include_regex,
+    )
+    run = _exact_object(
+        run_value,
+        SCALA_JMH_RUN_RESULT_FIELDS,
+        error=f"SCALA_NATIVE_RUN_RECEIPT_INVALID:{case_id}",
+    )
+    expected_run = {
+        "schemaVersion": "s1.4x-scala-jmh-run-result-v1",
+        "profileId": profile_id,
+        "caseId": case_id,
+        "logicalOperationsPerInvocation": logical_operations,
+        "rawScoreNsPerInvocation": float(metric["score"]),
+        "normalizedScoreNsPerLogicalOperation": (
+            float(metric["score"]) / logical_operations
+        ),
+        "runMode": "full",
+        "benchmarkPlanSha256": plan_sha256,
+        "sourceInputManifestSha256": source_manifest_sha256,
+        "scalaCliBinarySha256": scala_cli_snapshot.sha256,
+        "compilerProfilesSha256": compiler_profiles_sha256,
+        "profileOptionsSha256": profile_options_sha256,
+        "inputPaths": list(SCALA_RUNTIME_SOURCE_PATHS),
+        "portableArgv": portable_argv,
+        "portableArgvSha256": _canonical_sha256(portable_argv),
+        "runtimeArgvSha256": _canonical_sha256(expected_argv),
+        "rawNativeJsonSha256": raw_snapshot.sha256,
+        "effectiveJvmArgsSha256": effective_snapshot.sha256,
+        "jvmArgumentAllowlistSha256": jvm_allowlist_sha256,
+        "nativeValidationSha256": validation_snapshot.sha256,
+        "measurementReadyMarkerSha256": marker_snapshot.sha256,
+        "stdoutSha256": stdout_snapshot.sha256,
+        "stderrSha256": stderr_snapshot.sha256,
+        "exitCode": 0,
+        "status": "PASS",
+        "aggregateStatus": "PASS",
+    }
+    if run != expected_run:
+        raise GateError(f"SCALA_NATIVE_RUN_RECEIPT_INVALID:{case_id}")
+    expected_case_directory = block_directory / (
+        f"scala-jmh/case-{case_index:03d}"
+    )
+    if case_directory != expected_case_directory:
+        raise GateError(f"SCALA_NATIVE_CASE_DIRECTORY_INVALID:{case_id}")
+    return {
+        "nativeCase": native_case,
+        "statisticsCase": statistics_case,
+        "rawSnapshot": raw_snapshot,
+        "rawDocument": raw_document,
+        "runtimeArgv": expected_argv,
+        "runtimeReceipt": {
+            "caseId": case_id,
+            "runtimeArgvSha256": str(run["runtimeArgvSha256"]),
+            "effectiveJvmArgsSha256": str(
+                run["effectiveJvmArgsSha256"]
+            ),
+            "portableArgvSha256": str(run["portableArgvSha256"]),
+        },
+        "rootEvidenceSha256": {
+            name: snapshot.sha256
+            for name, (snapshot, _) in evidence.items()
+        },
+        "normalizedForkEvidenceSha256": normalized_snapshot.sha256,
+        "runReceiptSha256": run_snapshot.sha256,
+    }
+
+
+def _validate_scala_production_receipt(
+    *,
+    candidate_provenance: Any,
+    arguments: list[str],
+    provenance: Mapping[str, Any],
+    case_id: str,
+    expected_case_ids: list[str],
+    selector_id: str,
+    block_directory: Path,
+    plan: Mapping[str, Any],
+    plan_path: Path,
+    plan_sha256: str,
+    effective_runtime_arguments_sha256: str,
+    artifact_sha256: str | None,
+    source_tree_sha256: str | None,
+    native_toolchain_lock_sha256: str | None,
+    profile: str,
+) -> str:
+    """A/B/C production receipt의 source, tool, 실제 run-result closure를 재검증한다."""
+
+    error = f"NATIVE_EXECUTION_PROVENANCE_INVALID:{case_id}"
+    scala_provenance = _exact_object(
+        candidate_provenance,
+        SCALA_CANDIDATE_PROVENANCE_FIELDS,
+        error=error,
+    )
+    s1_4x_root = plan_path.parent.parent
+    scala_root = s1_4x_root / "scala"
+    expected_paths = {
+        "selectedProfileSourcePath": scala_root / "selected-profile.scala",
+        "sourceInputManifestPath": scala_root / "source-inputs.v1.json",
+        "compilerProfilesPath": scala_root / "compiler-profiles.v1.json",
+        "toolchainLockPath": scala_root / "toolchain-lock.v1.json",
+        "mergedToolchainProvenancePath": (
+            s1_4x_root / "contract/toolchain-provenance.v1.json"
+        ),
+    }
+    for field, expected_path in expected_paths.items():
+        if scala_provenance[field] != str(expected_path):
+            raise GateError(error)
+    selected_result_path = Path(
+        str(scala_provenance["selectedProfileResultPath"])
+    )
+    selected_source_path = expected_paths["selectedProfileSourcePath"]
+    source_manifest_path = expected_paths["sourceInputManifestPath"]
+    compiler_profiles_path = expected_paths["compilerProfilesPath"]
+    toolchain_lock_path = expected_paths["toolchainLockPath"]
+    merged_provenance_path = expected_paths[
+        "mergedToolchainProvenancePath"
+    ]
+    capability_path = Path(
+        str(scala_provenance["effectiveJvmArgumentsCapabilityPath"])
+    )
+    scala_cli_path = Path(str(scala_provenance["scalaCliPath"]))
+    java_executable_path = Path(
+        str(scala_provenance["javaExecutablePath"])
+    )
+    if any(
+        not path.is_absolute()
+        for path in (
+            selected_result_path,
+            capability_path,
+            scala_cli_path,
+            java_executable_path,
+        )
+    ):
+        raise GateError(error)
+    selected_result_snapshot, selected_result_value = _snapshot_json_file(
+        selected_result_path,
+        role=f"scala-receipt-selected-result:{case_id}",
+        error=error,
+    )
+    selected_source_snapshot = _snapshot_regular_file(
+        selected_source_path,
+        role=f"scala-receipt-selected-source:{case_id}",
+        error=error,
+    )
+    source_manifest_snapshot, source_manifest_value = _snapshot_json_file(
+        source_manifest_path,
+        role=f"scala-receipt-source-manifest:{case_id}",
+        error=error,
+    )
+    compiler_profiles_snapshot, compiler_profiles_value = _snapshot_json_file(
+        compiler_profiles_path,
+        role=f"scala-receipt-compiler-profiles:{case_id}",
+        error=error,
+    )
+    toolchain_lock_snapshot, toolchain_lock_value = _snapshot_json_file(
+        toolchain_lock_path,
+        role=f"scala-receipt-toolchain-lock:{case_id}",
+        error=error,
+    )
+    merged_provenance_snapshot, merged_provenance_value = _snapshot_json_file(
+        merged_provenance_path,
+        role=f"scala-receipt-toolchain-provenance:{case_id}",
+        error=error,
+    )
+    capability_snapshot, capability_value = _snapshot_json_file(
+        capability_path,
+        role=f"scala-receipt-jvm-capability:{case_id}",
+        error=error,
+    )
+    scala_cli_snapshot = _snapshot_regular_file(
+        scala_cli_path,
+        role=f"scala-receipt-scala-cli:{case_id}",
+        error=error,
+        executable=True,
+    )
+    java_snapshot = _snapshot_regular_file(
+        java_executable_path,
+        role=f"scala-receipt-java:{case_id}",
+        error=error,
+        executable=True,
+    )
+    expected_hashes = {
+        "selectedProfileResultSha256": selected_result_snapshot.sha256,
+        "selectedProfileSourceSha256": selected_source_snapshot.sha256,
+        "sourceInputManifestSha256": source_manifest_snapshot.sha256,
+        "compilerProfilesSha256": compiler_profiles_snapshot.sha256,
+        "toolchainLockSha256": toolchain_lock_snapshot.sha256,
+        "mergedToolchainProvenanceSha256": (
+            merged_provenance_snapshot.sha256
+        ),
+        "effectiveJvmArgumentsCapabilitySha256": (
+            capability_snapshot.sha256
+        ),
+        "scalaCliBinarySha256": scala_cli_snapshot.sha256,
+        "javaExecutableSha256": java_snapshot.sha256,
+    }
+    if (
+        scala_provenance["kind"] != "scala"
+        or scala_provenance["selectedProfileId"] != profile
+        or any(
+            scala_provenance[field] != value
+            for field, value in expected_hashes.items()
+        )
+        or scala_cli_snapshot.sha256 != FROZEN_SCALA_CLI_SHA256
+        or java_snapshot.sha256 != FROZEN_JAVA_EXECUTABLE_SHA256
+        or merged_provenance_snapshot.sha256
+        != FROZEN_MERGED_TOOLCHAIN_PROVENANCE_SHA256
+    ):
+        raise GateError(error)
+    _, source_snapshots, computed_source_tree_sha256 = (
+        _validate_scala_source_manifest(
+            source_manifest_value,
+            scala_root=scala_root,
+            error=error,
+        )
+    )
+    if (
+        source_snapshots["selected-profile.scala"].sha256
+        != selected_source_snapshot.sha256
+    ):
+        raise GateError(error)
+    computed_artifact_sha256 = _scala_artifact_closure_sha256(
+        {
+            "sourceTreeSha256": computed_source_tree_sha256,
+            "selectedProfileResultSha256": (
+                selected_result_snapshot.sha256
+            ),
+            "selectedProfileSourceSha256": (
+                selected_source_snapshot.sha256
+            ),
+            "sourceInputManifestSha256": (
+                source_manifest_snapshot.sha256
+            ),
+            "compilerProfilesSha256": compiler_profiles_snapshot.sha256,
+            "scalaCliBinarySha256": scala_cli_snapshot.sha256,
+            "javaExecutableSha256": java_snapshot.sha256,
+            "toolchainLockSha256": toolchain_lock_snapshot.sha256,
+            "mergedToolchainProvenanceSha256": (
+                merged_provenance_snapshot.sha256
+            ),
+            "effectiveJvmArgumentsCapabilitySha256": (
+                capability_snapshot.sha256
+            ),
+        }
+    )
+    if (
+        artifact_sha256 != computed_artifact_sha256
+        or source_tree_sha256 != computed_source_tree_sha256
+        or native_toolchain_lock_sha256
+        != toolchain_lock_snapshot.sha256
+    ):
+        raise GateError(error)
+    compiler_profiles = _validate_scala_compiler_profiles(
+        compiler_profiles_value,
+        error=error,
+    )
+    scalafmt_config_snapshot = _snapshot_regular_file(
+        scala_root / ".scalafmt.conf",
+        role=f"scala-receipt-scalafmt-config:{case_id}",
+        error=error,
+    )
+    _validate_scala_toolchain_lock(
+        toolchain_lock_value,
+        s1_4x_root=s1_4x_root,
+        error=error,
+        project_sha256=source_snapshots["project.scala"].sha256,
+        scalafmt_config_sha256=scalafmt_config_snapshot.sha256,
+        merged_provenance_value=merged_provenance_value,
+    )
+    capability_smoke_plan_snapshot = _snapshot_regular_file(
+        s1_4x_root / "contract/capability-smoke-plan.v1.json",
+        role=f"scala-receipt-capability-smoke-plan:{case_id}",
+        error=error,
+    )
+    _validate_scala_jvm_allowlist(
+        capability_value,
+        plan_sha256=plan_sha256,
+        toolchain_lock_sha256=toolchain_lock_snapshot.sha256,
+        java_executable_sha256=java_snapshot.sha256,
+        error=error,
+        capability_smoke_plan_sha256=(
+            capability_smoke_plan_snapshot.sha256
+        ),
+    )
+    _, selected_profile, scala_cli_arguments, profile_options_sha256 = (
+        _validate_scala_selected_result(
+            selected_result_value,
+            plan=plan,
+            plan_sha256=plan_sha256,
+            selected_source_sha256=selected_source_snapshot.sha256,
+            source_manifest_sha256=source_manifest_snapshot.sha256,
+            compiler_profiles_sha256=compiler_profiles_snapshot.sha256,
+            compiler_profiles=compiler_profiles,
+            toolchain_lock_sha256=toolchain_lock_snapshot.sha256,
+            merged_provenance_sha256=merged_provenance_snapshot.sha256,
+            jvm_allowlist_sha256=capability_snapshot.sha256,
+            scala_cli_sha256=scala_cli_snapshot.sha256,
+            java_executable_sha256=java_snapshot.sha256,
+            error=error,
+        )
+    )
+    selector = next(
+        (
+            entry
+            for entry in plan.get("familySelectors", [])
+            if isinstance(entry, dict)
+            and entry.get("selectorId") == selector_id
+        ),
+        None,
+    )
+    if (
+        selected_profile != profile
+        or not isinstance(selector, dict)
+        or selector.get("boundaryId") != "scala"
+        or selector.get("expectedCaseIds") != expected_case_ids
+        or not isinstance(selector.get("jmhIncludeRegex"), str)
+        or not selector["jmhIncludeRegex"]
+    ):
+        raise GateError(error)
+    frozen_case_by_id = {
+        item.get("caseId"): item
+        for item in plan.get("cases", [])
+        if isinstance(item, dict)
+    }
+    runtime_receipts: list[dict[str, str]] = []
+    expected_arguments_for_case: list[str] | None = None
+    for index, expected_case_id in enumerate(expected_case_ids, start=1):
+        case_directory = block_directory / f"scala-jmh/case-{index:03d}"
+        raw_path = case_directory / "native.json"
+        expected_argv = _scala_full_runtime_argv(
+            scala_cli=scala_cli_path,
+            scala_root=scala_root,
+            source_paths=list(SCALA_RUNTIME_SOURCE_PATHS),
+            scala_cli_arguments=scala_cli_arguments,
+            raw_path=raw_path,
+            jmh_include_regex=str(selector["jmhIncludeRegex"]),
+        )
+        portable_argv = _scala_full_runtime_argv(
+            scala_cli=Path("SCALA_CLI_1_15_0"),
+            scala_root=Path("SCALA_ROOT"),
+            source_paths=list(SCALA_RUNTIME_SOURCE_PATHS),
+            scala_cli_arguments=scala_cli_arguments,
+            raw_path=Path("EVIDENCE_ROOT/native.json"),
+            jmh_include_regex=str(selector["jmhIncludeRegex"]),
+        )
+        run_snapshot, run_value = _snapshot_json_file(
+            case_directory / "scala-jmh-run-result.v1.json",
+            role=f"scala-receipt-run-result:{expected_case_id}",
+            error=error,
+        )
+        del run_snapshot
+        run = _exact_object(
+            run_value,
+            SCALA_JMH_RUN_RESULT_FIELDS,
+            error=error,
+        )
+        effective_snapshot = _snapshot_regular_file(
+            case_directory / "scala-effective-jvm-args-result.v1.json",
+            role=f"scala-receipt-effective-jvm:{expected_case_id}",
+            error=error,
+        )
+        frozen_case = frozen_case_by_id.get(expected_case_id)
+        logical_operations = (
+            frozen_case.get("logicalOperationsPerInvocation")
+            if isinstance(frozen_case, dict)
+            else None
+        )
+        if (
+            type(logical_operations) is not int
+            or logical_operations < 1
+            or run["schemaVersion"]
+            != "s1.4x-scala-jmh-run-result-v1"
+            or run["profileId"] != profile
+            or run["caseId"] != expected_case_id
+            or run["logicalOperationsPerInvocation"] != logical_operations
+            or run["runMode"] != "full"
+            or run["benchmarkPlanSha256"] != plan_sha256
+            or run["sourceInputManifestSha256"]
+            != source_manifest_snapshot.sha256
+            or run["scalaCliBinarySha256"] != scala_cli_snapshot.sha256
+            or run["compilerProfilesSha256"]
+            != compiler_profiles_snapshot.sha256
+            or run["profileOptionsSha256"] != profile_options_sha256
+            or run["inputPaths"] != list(SCALA_RUNTIME_SOURCE_PATHS)
+            or run["portableArgv"] != portable_argv
+            or run["portableArgvSha256"]
+            != _canonical_sha256(portable_argv)
+            or run["runtimeArgvSha256"] != _canonical_sha256(expected_argv)
+            or run["effectiveJvmArgsSha256"] != effective_snapshot.sha256
+            or run["jvmArgumentAllowlistSha256"]
+            != capability_snapshot.sha256
+            or run["exitCode"] != 0
+            or run["status"] != "PASS"
+            or run["aggregateStatus"] != "PASS"
+        ):
+            raise GateError(error)
+        runtime_receipts.append(
+            {
+                "caseId": expected_case_id,
+                "runtimeArgvSha256": str(run["runtimeArgvSha256"]),
+                "effectiveJvmArgsSha256": str(
+                    run["effectiveJvmArgsSha256"]
+                ),
+                "portableArgvSha256": str(run["portableArgvSha256"]),
+            }
+        )
+        if expected_case_id == case_id:
+            expected_arguments_for_case = expected_argv
+    aggregate_sha256 = _scala_effective_runtime_arguments_sha256(
+        selector_id=selector_id,
+        expected_case_ids=expected_case_ids,
+        profile_id=profile,
+        profile_options_sha256=profile_options_sha256,
+        case_receipts=runtime_receipts,
+    )
+    if (
+        expected_arguments_for_case is None
+        or arguments != expected_arguments_for_case
+        or provenance["benchmarkExecutablePath"] != str(scala_cli_path)
+        or provenance["benchmarkExecutableSha256"]
+        != scala_cli_snapshot.sha256
+        or provenance["effectiveRuntimeArgumentsSha256"]
+        != aggregate_sha256
+        or effective_runtime_arguments_sha256 != aggregate_sha256
+    ):
+        raise GateError(f"NATIVE_EXECUTION_ARGV_INVALID:{case_id}")
+    return str(selector["jmhIncludeRegex"])
+
+
 def _validate_execution_receipt(
     *,
     item: Mapping[str, Any],
@@ -1020,6 +2583,11 @@ def _validate_execution_receipt(
     effective_runtime_arguments_sha256: str,
     profile: str,
     receipt_snapshots: dict[Path, tuple[InspectedExecutable, Any]],
+    plan_document: Mapping[str, Any] | None = None,
+    plan_sha256: str | None = None,
+    artifact_sha256: str | None = None,
+    source_tree_sha256: str | None = None,
+    native_toolchain_lock_sha256: str | None = None,
 ) -> str | None:
     receipt_path_text = item["executionReceiptPath"]
     if (
@@ -1060,8 +2628,20 @@ def _validate_execution_receipt(
     resolved_plan = plan_path.resolve(strict=True)
     resolved_fixture_root = fixture_root_path.resolve(strict=True)
     resolved_input_ledger = input_ledger_path.resolve(strict=True)
-    plan = strict_json_load(resolved_plan)
-    if not isinstance(plan, dict):
+    plan_value: Any = (
+        dict(plan_document)
+        if plan_document is not None
+        else strict_json_load(resolved_plan)
+    )
+    if not isinstance(plan_value, dict):
+        raise GateError(f"NATIVE_EXECUTION_PROVENANCE_INVALID:{case_id}")
+    plan = plan_value
+    effective_plan_sha256 = (
+        plan_sha256
+        if plan_sha256 is not None
+        else sha256_file(resolved_plan)
+    )
+    if SHA256.fullmatch(str(effective_plan_sha256)) is None:
         raise GateError(f"NATIVE_EXECUTION_PROVENANCE_INVALID:{case_id}")
     benchmark_executable_text = provenance["benchmarkExecutablePath"]
     if (
@@ -1091,7 +2671,7 @@ def _validate_execution_receipt(
         or receipt["rawEvidenceSha256"] != item["rawEvidenceSha256"]
         or receipt["status"] != "PASS"
         or provenance["planPath"] != str(resolved_plan)
-        or provenance["planSha256"] != sha256_file(resolved_plan)
+        or provenance["planSha256"] != effective_plan_sha256
         or provenance["fixtureRootPath"] != str(resolved_fixture_root)
         or provenance["fixtureFreezeIdentitySha256"]
         != _canonical_sha256(plan.get("fixtureFreezeIdentity"))
@@ -1108,6 +2688,28 @@ def _validate_execution_receipt(
     ):
         raise GateError(f"NATIVE_EXECUTION_RECEIPT_INVALID:{case_id}")
     if boundary_id == "scala":
+        if profile in {"A", "B", "C"}:
+            return _validate_scala_production_receipt(
+                candidate_provenance=candidate_provenance,
+                arguments=arguments,
+                provenance=provenance,
+                case_id=case_id,
+                expected_case_ids=expected_case_ids,
+                selector_id=selector_id,
+                block_directory=block_directory,
+                plan=plan,
+                plan_path=resolved_plan,
+                plan_sha256=effective_plan_sha256,
+                effective_runtime_arguments_sha256=(
+                    effective_runtime_arguments_sha256
+                ),
+                artifact_sha256=artifact_sha256,
+                source_tree_sha256=source_tree_sha256,
+                native_toolchain_lock_sha256=(
+                    native_toolchain_lock_sha256
+                ),
+                profile=profile,
+            )
         scala_provenance = _exact_object(
             candidate_provenance,
             {
@@ -1501,6 +3103,7 @@ def _validate_execution_receipt(
             plan=plan,
             plan_path=resolved_plan,
             error=f"NATIVE_EXECUTION_PROVENANCE_INVALID:{case_id}",
+            plan_sha256=effective_plan_sha256,
         )
         _validate_haskell_source_manifest(
             strict_json_load(Path(source_manifest_text)),
@@ -1910,6 +3513,11 @@ def validate_native_contract_evidence(
     profile: str | None = None,
     _raw_snapshots: dict[Path, tuple[InspectedExecutable, Any]] | None = None,
     _receipt_snapshots: dict[Path, tuple[InspectedExecutable, Any]] | None = None,
+    _plan_document: Mapping[str, Any] | None = None,
+    _plan_sha256: str | None = None,
+    _artifact_sha256: str | None = None,
+    _source_tree_sha256: str | None = None,
+    _native_toolchain_lock_sha256: str | None = None,
 ) -> dict[str, Any]:
     """Candidate framework별 frozen timing 설정과 raw evidence bytes를 검증한다."""
 
@@ -2105,6 +3713,13 @@ def validate_native_contract_evidence(
             effective_runtime_arguments_sha256=str(effective_runtime_arguments_sha256),
             profile=profile,
             receipt_snapshots=receipt_snapshots,
+            plan_document=_plan_document,
+            plan_sha256=_plan_sha256,
+            artifact_sha256=_artifact_sha256,
+            source_tree_sha256=_source_tree_sha256,
+            native_toolchain_lock_sha256=(
+                _native_toolchain_lock_sha256
+            ),
         )
         if boundary_id == "scala":
             if native_statistics_case is None or not isinstance(
@@ -2143,7 +3758,11 @@ def validate_native_contract_evidence(
             raise GateError("CRITERION_FAMILY_EVIDENCE_NOT_SHARED")
         if plan_path is None:
             raise GateError("NATIVE_EXECUTION_CONTEXT_INVALID")
-        plan_document = strict_json_load(plan_path)
+        plan_document: Any = (
+            dict(_plan_document)
+            if _plan_document is not None
+            else strict_json_load(plan_path)
+        )
         frozen_cases = (
             plan_document.get("cases") if isinstance(plan_document, dict) else None
         )
@@ -2214,6 +3833,557 @@ def validate_native_contract_evidence(
                 ),
             )
     return document
+
+
+def produce_scala_native_evidence(
+    *,
+    repo_root: Path,
+    plan_path: Path,
+    block_directory: Path,
+    selector_id: str,
+    scala_jmh_root: Path,
+    input_ledger_path: Path,
+    fixture_root_path: Path,
+    selected_profile_result_path: Path,
+    selected_profile_source_path: Path,
+    source_input_manifest_path: Path,
+    compiler_profiles_path: Path,
+    toolchain_lock_path: Path,
+    merged_toolchain_provenance_path: Path,
+    jvm_argument_capability_path: Path,
+    scala_cli_path: Path,
+    java_executable_path: Path,
+    started_at: str,
+    finished_at: str,
+) -> dict[str, Any]:
+    """Scala case별 JMH raw를 검증하고 세 공통 native evidence만 배타 발행한다."""
+
+    path_inputs = (
+        repo_root,
+        plan_path,
+        block_directory,
+        scala_jmh_root,
+        input_ledger_path,
+        fixture_root_path,
+        selected_profile_result_path,
+        selected_profile_source_path,
+        source_input_manifest_path,
+        compiler_profiles_path,
+        toolchain_lock_path,
+        merged_toolchain_provenance_path,
+        jvm_argument_capability_path,
+        scala_cli_path,
+        java_executable_path,
+    )
+    if any(not path.is_absolute() for path in path_inputs):
+        raise GateError("SCALA_NATIVE_PRODUCER_INPUT_INVALID")
+    repo = Path(os.path.abspath(repo_root))
+    plan_file = Path(os.path.abspath(plan_path))
+    block = Path(os.path.abspath(block_directory))
+    jmh_root = Path(os.path.abspath(scala_jmh_root))
+    ledger_file = Path(os.path.abspath(input_ledger_path))
+    fixture_root = Path(os.path.abspath(fixture_root_path))
+    selected_result_file = Path(
+        os.path.abspath(selected_profile_result_path)
+    )
+    selected_source_file = Path(
+        os.path.abspath(selected_profile_source_path)
+    )
+    source_manifest_file = Path(
+        os.path.abspath(source_input_manifest_path)
+    )
+    compiler_profiles_file = Path(
+        os.path.abspath(compiler_profiles_path)
+    )
+    toolchain_lock_file = Path(os.path.abspath(toolchain_lock_path))
+    merged_provenance_file = Path(
+        os.path.abspath(merged_toolchain_provenance_path)
+    )
+    jvm_capability_file = Path(
+        os.path.abspath(jvm_argument_capability_path)
+    )
+    scala_cli_file = Path(os.path.abspath(scala_cli_path))
+    java_executable_file = Path(os.path.abspath(java_executable_path))
+    started_timestamp = _parse_utc_timestamp(started_at)
+    finished_timestamp = _parse_utc_timestamp(finished_at)
+    s1_4x_root = plan_file.parent.parent
+    expected_s1_4x_root = (
+        repo
+        / "workspaces/decision-platform/research/s1-4x-numeric-parity"
+    )
+    scala_root = s1_4x_root / "scala"
+    if (
+        repo.is_symlink()
+        or not repo.is_dir()
+        or repo.resolve(strict=True) != repo
+        or block.is_symlink()
+        or not block.is_dir()
+        or block.resolve(strict=True) != block
+        or jmh_root.is_symlink()
+        or not jmh_root.is_dir()
+        or jmh_root.resolve(strict=True) != jmh_root
+        or fixture_root.is_symlink()
+        or not fixture_root.is_dir()
+        or fixture_root.resolve(strict=True) != fixture_root
+        or s1_4x_root != expected_s1_4x_root
+        or plan_file
+        != expected_s1_4x_root / "benchmarks/benchmark-plan.v1.json"
+        or jmh_root != block / "scala-jmh"
+        or ledger_file != block / "input-ledger.json"
+        or fixture_root != s1_4x_root / "contract/fixtures"
+        or selected_source_file != scala_root / "selected-profile.scala"
+        or source_manifest_file != scala_root / "source-inputs.v1.json"
+        or compiler_profiles_file
+        != scala_root / "compiler-profiles.v1.json"
+        or toolchain_lock_file != scala_root / "toolchain-lock.v1.json"
+        or merged_provenance_file
+        != s1_4x_root / "contract/toolchain-provenance.v1.json"
+        or started_timestamp is None
+        or finished_timestamp is None
+        or started_timestamp >= finished_timestamp
+    ):
+        raise GateError("SCALA_NATIVE_PRODUCER_INPUT_INVALID")
+    output_paths = {
+        "nativeContractValidationSha256": (
+            block / "native-contract-validation.json"
+        ),
+        "nativeReportSha256": block / "native.json",
+        "nativeStatisticsSha256": block / "native-statistics.json",
+    }
+    receipt_root = block / "receipts"
+    if (
+        receipt_root.exists()
+        or receipt_root.is_symlink()
+        or any(
+            path.exists() or path.is_symlink()
+            for path in output_paths.values()
+        )
+    ):
+        raise GateError("SCALA_NATIVE_OUTPUT_ALREADY_EXISTS")
+    plan_snapshot, plan_value = _snapshot_json_file(
+        plan_file,
+        role="scala-benchmark-plan",
+        error="SCALA_NATIVE_PLAN_INVALID",
+    )
+    plan = _validate_plan_snapshot(
+        plan_snapshot,
+        error="SCALA_NATIVE_PLAN_INVALID",
+    )
+    if plan != plan_value:
+        raise GateError("SCALA_NATIVE_PLAN_INVALID")
+    selector = next(
+        (
+            item
+            for item in plan["familySelectors"]
+            if item.get("selectorId") == selector_id
+        ),
+        None,
+    )
+    if (
+        not isinstance(selector, dict)
+        or selector.get("boundaryId") != "scala"
+        or selector.get("criterionMatchMode") != "none"
+        or selector.get("criterionPrefix") is not None
+        or not isinstance(selector.get("jmhIncludeRegex"), str)
+        or not selector["jmhIncludeRegex"]
+        or not isinstance(selector.get("expectedCaseIds"), list)
+    ):
+        raise GateError("SCALA_NATIVE_SELECTOR_INVALID")
+    expected_case_ids = selector["expectedCaseIds"]
+    if (
+        not 2 <= len(expected_case_ids) <= 45
+        or any(
+            not isinstance(case_id, str) or not case_id
+            for case_id in expected_case_ids
+        )
+        or len(set(expected_case_ids)) != len(expected_case_ids)
+    ):
+        raise GateError("SCALA_NATIVE_SELECTOR_INVALID")
+    frozen_case_by_id = {
+        case["caseId"]: case
+        for case in plan["cases"]
+        if isinstance(case, dict) and isinstance(case.get("caseId"), str)
+    }
+    logical_operations_by_case: dict[str, int] = {}
+    for case_id in expected_case_ids:
+        frozen_case = frozen_case_by_id.get(case_id)
+        logical_operations = (
+            frozen_case.get("logicalOperationsPerInvocation")
+            if isinstance(frozen_case, dict)
+            else None
+        )
+        if type(logical_operations) is not int or logical_operations < 1:
+            raise GateError(f"SCALA_NATIVE_FROZEN_CASE_INVALID:{case_id}")
+        logical_operations_by_case[case_id] = logical_operations
+    ledger_snapshot, ledger_value = _snapshot_json_file(
+        ledger_file,
+        role="scala-input-ledger",
+        error="SCALA_NATIVE_INPUT_LEDGER_INVALID",
+    )
+    with _sealed_snapshot_path(
+        plan_snapshot,
+        error="SCALA_NATIVE_INPUT_LEDGER_INVALID",
+    ) as sealed_plan_path:
+        validate_input_ledger(
+            ledger_value,
+            plan=plan,
+            plan_path=sealed_plan_path,
+            repo_root=repo,
+            boundary_id="scala",
+            selector_id=selector_id,
+        )
+    source_manifest_snapshot, source_manifest_value = _snapshot_json_file(
+        source_manifest_file,
+        role="scala-source-input-manifest",
+        error="SCALA_NATIVE_SOURCE_MANIFEST_INVALID",
+    )
+    _, source_snapshots, source_tree_sha256 = (
+        _validate_scala_source_manifest(
+            source_manifest_value,
+            scala_root=scala_root,
+            error="SCALA_NATIVE_SOURCE_MANIFEST_INVALID",
+        )
+    )
+    selected_source_snapshot = source_snapshots.get("selected-profile.scala")
+    if (
+        selected_source_snapshot is None
+        or selected_source_snapshot.path != str(selected_source_file)
+    ):
+        raise GateError("SCALA_NATIVE_SELECTED_PROFILE_SOURCE_INVALID")
+    compiler_profiles_snapshot, compiler_profiles_value = _snapshot_json_file(
+        compiler_profiles_file,
+        role="scala-compiler-profiles",
+        error="SCALA_NATIVE_COMPILER_PROFILES_INVALID",
+    )
+    compiler_profiles = _validate_scala_compiler_profiles(
+        compiler_profiles_value,
+        error="SCALA_NATIVE_COMPILER_PROFILES_INVALID",
+    )
+    toolchain_lock_snapshot, toolchain_lock_value = _snapshot_json_file(
+        toolchain_lock_file,
+        role="scala-toolchain-lock",
+        error="SCALA_NATIVE_TOOLCHAIN_LOCK_INVALID",
+    )
+    merged_provenance_snapshot, merged_provenance_value = _snapshot_json_file(
+        merged_provenance_file,
+        role="scala-toolchain-provenance",
+        error="SCALA_NATIVE_TOOLCHAIN_PROVENANCE_INVALID",
+    )
+    scalafmt_config_snapshot = _snapshot_regular_file(
+        scala_root / ".scalafmt.conf",
+        role="scala-scalafmt-config",
+        error="SCALA_NATIVE_TOOLCHAIN_LOCK_INVALID",
+    )
+    _validate_scala_toolchain_lock(
+        toolchain_lock_value,
+        s1_4x_root=s1_4x_root,
+        error="SCALA_NATIVE_TOOLCHAIN_LOCK_INVALID",
+        project_sha256=source_snapshots["project.scala"].sha256,
+        scalafmt_config_sha256=scalafmt_config_snapshot.sha256,
+        merged_provenance_value=merged_provenance_value,
+    )
+    if (
+        merged_provenance_snapshot.sha256
+        != FROZEN_MERGED_TOOLCHAIN_PROVENANCE_SHA256
+    ):
+        raise GateError("SCALA_NATIVE_TOOLCHAIN_PROVENANCE_INVALID")
+    scala_cli_snapshot, java_executable_snapshot = (
+        _validate_scala_executable_identities(
+            scala_cli_path=scala_cli_file,
+            java_executable_path=java_executable_file,
+        )
+    )
+    jvm_capability_snapshot, jvm_capability_value = _snapshot_json_file(
+        jvm_capability_file,
+        role="scala-jvm-argument-capability",
+        error="SCALA_NATIVE_JVM_CAPABILITY_INVALID",
+    )
+    capability_smoke_plan_snapshot = _snapshot_regular_file(
+        s1_4x_root / "contract/capability-smoke-plan.v1.json",
+        role="scala-capability-smoke-plan",
+        error="SCALA_NATIVE_JVM_CAPABILITY_INVALID",
+    )
+    jvm_allowlist = _validate_scala_jvm_allowlist(
+        jvm_capability_value,
+        plan_sha256=plan_snapshot.sha256,
+        toolchain_lock_sha256=toolchain_lock_snapshot.sha256,
+        java_executable_sha256=java_executable_snapshot.sha256,
+        error="SCALA_NATIVE_JVM_CAPABILITY_INVALID",
+        capability_smoke_plan_sha256=(
+            capability_smoke_plan_snapshot.sha256
+        ),
+    )
+    selected_result_snapshot, selected_result_value = _snapshot_json_file(
+        selected_result_file,
+        role="scala-selected-profile-result",
+        error="SCALA_NATIVE_SELECTED_PROFILE_RESULT_INVALID",
+    )
+    _, profile_id, scala_cli_arguments, profile_options_sha256 = (
+        _validate_scala_selected_result(
+            selected_result_value,
+            plan=plan,
+            plan_sha256=plan_snapshot.sha256,
+            selected_source_sha256=selected_source_snapshot.sha256,
+            source_manifest_sha256=source_manifest_snapshot.sha256,
+            compiler_profiles_sha256=compiler_profiles_snapshot.sha256,
+            compiler_profiles=compiler_profiles,
+            toolchain_lock_sha256=toolchain_lock_snapshot.sha256,
+            merged_provenance_sha256=merged_provenance_snapshot.sha256,
+            jvm_allowlist_sha256=jvm_capability_snapshot.sha256,
+            scala_cli_sha256=scala_cli_snapshot.sha256,
+            java_executable_sha256=java_executable_snapshot.sha256,
+            error="SCALA_NATIVE_SELECTED_PROFILE_RESULT_INVALID",
+        )
+    )
+    case_evidence = [
+        _validate_scala_case_evidence(
+            case_directory=jmh_root / f"case-{index:03d}",
+            block_directory=block,
+            case_index=index,
+            case_id=case_id,
+            logical_operations=logical_operations_by_case[case_id],
+            jmh_include_regex=str(selector["jmhIncludeRegex"]),
+            plan_sha256=plan_snapshot.sha256,
+            source_manifest_sha256=source_manifest_snapshot.sha256,
+            compiler_profiles_sha256=compiler_profiles_snapshot.sha256,
+            profile_id=profile_id,
+            profile_options_sha256=profile_options_sha256,
+            scala_cli_arguments=scala_cli_arguments,
+            scala_cli_snapshot=scala_cli_snapshot,
+            scala_root=scala_root,
+            jvm_allowlist=jvm_allowlist,
+            jvm_allowlist_sha256=jvm_capability_snapshot.sha256,
+            java_executable_sha256=java_executable_snapshot.sha256,
+        )
+        for index, case_id in enumerate(expected_case_ids, start=1)
+    ]
+    runtime_arguments_sha256 = (
+        _scala_effective_runtime_arguments_sha256(
+            selector_id=selector_id,
+            expected_case_ids=expected_case_ids,
+            profile_id=profile_id,
+            profile_options_sha256=profile_options_sha256,
+            case_receipts=[
+                item["runtimeReceipt"] for item in case_evidence
+            ],
+        )
+    )
+    artifact_sha256 = _scala_artifact_closure_sha256(
+        {
+            "sourceTreeSha256": source_tree_sha256,
+            "selectedProfileResultSha256": (
+                selected_result_snapshot.sha256
+            ),
+            "selectedProfileSourceSha256": (
+                selected_source_snapshot.sha256
+            ),
+            "sourceInputManifestSha256": (
+                source_manifest_snapshot.sha256
+            ),
+            "compilerProfilesSha256": compiler_profiles_snapshot.sha256,
+            "scalaCliBinarySha256": scala_cli_snapshot.sha256,
+            "javaExecutableSha256": java_executable_snapshot.sha256,
+            "toolchainLockSha256": toolchain_lock_snapshot.sha256,
+            "mergedToolchainProvenanceSha256": (
+                merged_provenance_snapshot.sha256
+            ),
+            "effectiveJvmArgumentsCapabilitySha256": (
+                jvm_capability_snapshot.sha256
+            ),
+        }
+    )
+    candidate_provenance = {
+        "kind": "scala",
+        "selectedProfileResultPath": str(selected_result_file),
+        "selectedProfileResultSha256": selected_result_snapshot.sha256,
+        "selectedProfileSourcePath": str(selected_source_file),
+        "selectedProfileSourceSha256": selected_source_snapshot.sha256,
+        "selectedProfileId": profile_id,
+        "sourceInputManifestPath": str(source_manifest_file),
+        "sourceInputManifestSha256": source_manifest_snapshot.sha256,
+        "compilerProfilesPath": str(compiler_profiles_file),
+        "compilerProfilesSha256": compiler_profiles_snapshot.sha256,
+        "toolchainLockPath": str(toolchain_lock_file),
+        "toolchainLockSha256": toolchain_lock_snapshot.sha256,
+        "mergedToolchainProvenancePath": str(merged_provenance_file),
+        "mergedToolchainProvenanceSha256": (
+            merged_provenance_snapshot.sha256
+        ),
+        "effectiveJvmArgumentsCapabilityPath": str(jvm_capability_file),
+        "effectiveJvmArgumentsCapabilitySha256": (
+            jvm_capability_snapshot.sha256
+        ),
+        "scalaCliPath": str(scala_cli_file),
+        "scalaCliBinarySha256": scala_cli_snapshot.sha256,
+        "javaExecutablePath": str(java_executable_file),
+        "javaExecutableSha256": java_executable_snapshot.sha256,
+    }
+    receipt_root.mkdir(mode=0o700)
+    receipt_snapshots: dict[
+        Path,
+        tuple[InspectedExecutable, Any],
+    ] = {}
+    native_contract_cases: list[dict[str, Any]] = []
+    raw_snapshots: dict[Path, tuple[InspectedExecutable, Any]] = {}
+    for index, (case_id, item) in enumerate(
+        zip(expected_case_ids, case_evidence, strict=True),
+        start=1,
+    ):
+        raw_relative = f"scala-jmh/case-{index:03d}/native.json"
+        receipt_relative = f"receipts/case-{index:03d}.json"
+        raw_snapshot = item["rawSnapshot"]
+        raw_document = item["rawDocument"]
+        receipt_document = {
+            "schemaVersion": (
+                "s1.4x-native-case-execution-receipt-v1"
+            ),
+            "boundaryId": "scala",
+            "selectorId": selector_id,
+            "caseId": case_id,
+            "commandArgv": item["runtimeArgv"],
+            "environment": {"S1_4X_BENCHMARK_CASE_ID": case_id},
+            "exitCode": 0,
+            "rawEvidencePath": raw_relative,
+            "rawEvidenceSha256": raw_snapshot.sha256,
+            "provenance": {
+                "planPath": str(plan_file),
+                "planSha256": plan_snapshot.sha256,
+                "fixtureRootPath": str(fixture_root),
+                "fixtureFreezeIdentitySha256": _canonical_sha256(
+                    plan["fixtureFreezeIdentity"]
+                ),
+                "inputLedgerPath": str(ledger_file),
+                "inputLedgerSha256": ledger_snapshot.sha256,
+                "selectorId": selector_id,
+                "caseIds": expected_case_ids,
+                "benchmarkExecutablePath": str(scala_cli_file),
+                "benchmarkExecutableSha256": scala_cli_snapshot.sha256,
+                "effectiveRuntimeArgumentsSha256": (
+                    runtime_arguments_sha256
+                ),
+                "candidateProvenance": candidate_provenance,
+            },
+            "status": "PASS",
+        }
+        receipt_path = block / receipt_relative
+        exclusive_json_write(receipt_path, receipt_document)
+        receipt_snapshot_and_value = _snapshot_json_file(
+            receipt_path,
+            role=f"scala-native-execution-receipt:{case_id}",
+            error=f"SCALA_NATIVE_EXECUTION_RECEIPT_INVALID:{case_id}",
+        )
+        receipt_snapshots[receipt_path] = receipt_snapshot_and_value
+        raw_path = block / raw_relative
+        raw_snapshots[raw_path] = (raw_snapshot, raw_document)
+        native_contract_cases.append(
+            {
+                "caseId": case_id,
+                "nativeSampleCount": item["nativeCase"]["samples"],
+                "rawEvidencePath": raw_relative,
+                "rawEvidenceSha256": raw_snapshot.sha256,
+                "executionReceiptPath": receipt_relative,
+                "executionReceiptSha256": (
+                    receipt_snapshot_and_value[0].sha256
+                ),
+                "status": "PASS",
+            }
+        )
+    native_cases = [item["nativeCase"] for item in case_evidence]
+    statistics_cases = [
+        item["statisticsCase"] for item in case_evidence
+    ]
+    native_contract = {
+        "schemaVersion": "s1.4x-native-contract-validation-v1",
+        "boundaryId": "scala",
+        "selectorId": selector_id,
+        "framework": "JMH",
+        "frameworkVersion": "1.37",
+        "configuration": {
+            "benchmarkMode": "AverageTime",
+            "nativeTimeUnit": "ns",
+            "threads": 1,
+            "forks": 3,
+            "warmupIterations": 5,
+            "warmupSeconds": 1,
+            "measurementIterations": 10,
+            "measurementSeconds": 1,
+        },
+        "cases": native_contract_cases,
+        "status": "PASS",
+    }
+    validate_native_contract_evidence(
+        native_contract,
+        boundary_id="scala",
+        selector_id=selector_id,
+        block_directory=block,
+        native_cases=native_cases,
+        native_statistics_cases=statistics_cases,
+        plan_path=plan_file,
+        fixture_root_path=fixture_root,
+        input_ledger_path=ledger_file,
+        effective_runtime_arguments_sha256=runtime_arguments_sha256,
+        profile=profile_id,
+        _raw_snapshots=raw_snapshots,
+        _receipt_snapshots=receipt_snapshots,
+        _plan_document=plan,
+        _plan_sha256=plan_snapshot.sha256,
+        _artifact_sha256=artifact_sha256,
+        _source_tree_sha256=source_tree_sha256,
+        _native_toolchain_lock_sha256=toolchain_lock_snapshot.sha256,
+    )
+    native_contract_sha256 = _canonical_sha256(native_contract)
+    native_document = {
+        "schemaVersion": "s1.4x-candidate-native-benchmark-v1",
+        "boundaryId": "scala",
+        "selectorId": selector_id,
+        "nativeBenchmarkMode": "AverageTime",
+        "nativeTimeUnit": "ns",
+        "profile": profile_id,
+        "artifactSha256": artifact_sha256,
+        "sourceTreeSha256": source_tree_sha256,
+        "toolchainLockSha256": toolchain_lock_snapshot.sha256,
+        "effectiveRuntimeArgumentsSha256": runtime_arguments_sha256,
+        "inputLedgerSha256": ledger_snapshot.sha256,
+        "nativeContractValidationSha256": native_contract_sha256,
+        "startedAt": started_at,
+        "finishedAt": finished_at,
+        "cases": native_cases,
+        "status": "PASS",
+    }
+    native_sha256 = _canonical_sha256(native_document)
+    statistics_document = {
+        "schemaVersion": "s1.4x-native-statistics-v1",
+        "boundaryId": "scala",
+        "selectorId": selector_id,
+        "nativeReportSha256": native_sha256,
+        "cases": statistics_cases,
+        "status": "PASS",
+    }
+    exclusive_json_write(
+        output_paths["nativeContractValidationSha256"],
+        native_contract,
+    )
+    exclusive_json_write(output_paths["nativeReportSha256"], native_document)
+    exclusive_json_write(
+        output_paths["nativeStatisticsSha256"],
+        statistics_document,
+    )
+    output_sha256 = {
+        field: sha256_file(path) for field, path in output_paths.items()
+    }
+    if (
+        output_sha256["nativeContractValidationSha256"]
+        != native_contract_sha256
+        or output_sha256["nativeReportSha256"] != native_sha256
+    ):
+        raise GateError("SCALA_NATIVE_OUTPUT_DIGEST_INVALID")
+    return {
+        "boundaryId": "scala",
+        "selectorId": selector_id,
+        "caseCount": len(native_cases),
+        **output_sha256,
+        "status": "PASS",
+    }
 
 
 def produce_haskell_native_evidence(
@@ -2719,6 +4889,92 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _scala_producer_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Scala JMH case raw를 shared native evidence로 투영한다."
+    )
+    parser.add_argument("--repo-root", type=Path, required=True)
+    parser.add_argument("--plan", type=Path, required=True)
+    parser.add_argument("--block-dir", type=Path, required=True)
+    parser.add_argument("--selector", required=True)
+    parser.add_argument("--scala-jmh-root", type=Path, required=True)
+    parser.add_argument("--input-ledger", type=Path, required=True)
+    parser.add_argument("--fixture-root", type=Path, required=True)
+    parser.add_argument(
+        "--selected-profile-result",
+        type=Path,
+        required=True,
+    )
+    parser.add_argument(
+        "--selected-profile-source",
+        type=Path,
+        required=True,
+    )
+    parser.add_argument(
+        "--source-input-manifest",
+        type=Path,
+        required=True,
+    )
+    parser.add_argument("--compiler-profiles", type=Path, required=True)
+    parser.add_argument("--toolchain-lock", type=Path, required=True)
+    parser.add_argument("--toolchain-provenance", type=Path, required=True)
+    parser.add_argument(
+        "--jvm-argument-capability",
+        type=Path,
+        required=True,
+    )
+    parser.add_argument("--scala-cli", type=Path, required=True)
+    parser.add_argument("--java-executable", type=Path, required=True)
+    parser.add_argument("--started-at", required=True)
+    parser.add_argument("--finished-at", required=True)
+    return parser
+
+
+def _scala_producer_main(argv: list[str]) -> int:
+    arguments = _scala_producer_parser().parse_args(argv)
+    try:
+        result = produce_scala_native_evidence(
+            repo_root=arguments.repo_root,
+            plan_path=arguments.plan,
+            block_directory=arguments.block_dir,
+            selector_id=arguments.selector,
+            scala_jmh_root=arguments.scala_jmh_root,
+            input_ledger_path=arguments.input_ledger,
+            fixture_root_path=arguments.fixture_root,
+            selected_profile_result_path=(
+                arguments.selected_profile_result
+            ),
+            selected_profile_source_path=(
+                arguments.selected_profile_source
+            ),
+            source_input_manifest_path=arguments.source_input_manifest,
+            compiler_profiles_path=arguments.compiler_profiles,
+            toolchain_lock_path=arguments.toolchain_lock,
+            merged_toolchain_provenance_path=(
+                arguments.toolchain_provenance
+            ),
+            jvm_argument_capability_path=(
+                arguments.jvm_argument_capability
+            ),
+            scala_cli_path=arguments.scala_cli,
+            java_executable_path=arguments.java_executable,
+            started_at=arguments.started_at,
+            finished_at=arguments.finished_at,
+        )
+    except (
+        ContractError,
+        GateError,
+        OSError,
+        KeyError,
+        TypeError,
+        ValueError,
+    ) as exc:
+        print(f"SCALA_NATIVE_PRODUCER_FAIL:{exc}", file=sys.stderr)
+        return 2
+    print(json.dumps(result, allow_nan=False, sort_keys=True))
+    return 0
+
+
 def _haskell_producer_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Criterion raw family를 shared native evidence로 투영한다."
@@ -2770,6 +5026,8 @@ def _haskell_producer_main(argv: list[str]) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     command_arguments = list(sys.argv[1:] if argv is None else argv)
+    if command_arguments and command_arguments[0] == "produce-scala-native":
+        return _scala_producer_main(command_arguments[1:])
     if (
         command_arguments
         and command_arguments[0] == "produce-haskell-native"
@@ -2778,7 +5036,20 @@ def main(argv: list[str] | None = None) -> int:
     arguments = _parser().parse_args(command_arguments)
     try:
         repo = arguments.repo_root.resolve(strict=True)
-        plan_path = arguments.plan.resolve(strict=True)
+        if not arguments.plan.is_absolute():
+            raise GateError("CANDIDATE_NATIVE_PLAN_PATH_INVALID")
+        plan_path = Path(os.path.abspath(arguments.plan))
+        plan_snapshot, plan_value = _snapshot_json_file(
+            plan_path,
+            role="candidate-native-benchmark-plan",
+            error="CANDIDATE_NATIVE_PLAN_INVALID",
+        )
+        plan = _validate_plan_snapshot(
+            plan_snapshot,
+            error="CANDIDATE_NATIVE_PLAN_INVALID",
+        )
+        if plan != plan_value:
+            raise GateError("CANDIDATE_NATIVE_PLAN_INVALID")
         block_dir = arguments.block_dir.resolve(strict=True)
         qualification_path = arguments.qualification.resolve(strict=True)
         native_path = block_dir / "native.json"
@@ -2794,7 +5065,6 @@ def main(argv: list[str] | None = None) -> int:
             or native_contract_path.is_symlink()
         ):
             raise GateError("CANDIDATE_NATIVE_STATISTICS_MISSING")
-        plan = validate_plan(plan_path)
         native = strict_json_load(native_path)
         if (
             not isinstance(native, Mapping)
@@ -2804,14 +5074,18 @@ def main(argv: list[str] | None = None) -> int:
             or native.get("nativeContractValidationSha256") != sha256_file(native_contract_path)
         ):
             raise GateError("CANDIDATE_NATIVE_ARGV_MISMATCH")
-        validate_input_ledger(
-            strict_json_load(input_ledger_path),
-            plan=plan,
-            plan_path=plan_path,
-            repo_root=repo,
-            boundary_id=arguments.boundary,
-            selector_id=arguments.selector,
-        )
+        with _sealed_snapshot_path(
+            plan_snapshot,
+            error="CANDIDATE_NATIVE_INPUT_LEDGER_INVALID",
+        ) as sealed_plan_path:
+            validate_input_ledger(
+                strict_json_load(input_ledger_path),
+                plan=plan,
+                plan_path=sealed_plan_path,
+                repo_root=repo,
+                boundary_id=arguments.boundary,
+                selector_id=arguments.selector,
+            )
         native_cases = native.get("cases")
         if not isinstance(native_cases, list):
             raise GateError("CANDIDATE_NATIVE_CASES_INVALID")
@@ -2852,6 +5126,13 @@ def main(argv: list[str] | None = None) -> int:
             input_ledger_path=input_ledger_path,
             effective_runtime_arguments_sha256=str(native["effectiveRuntimeArgumentsSha256"]),
             profile=str(native["profile"]),
+            _plan_document=plan,
+            _plan_sha256=plan_snapshot.sha256,
+            _artifact_sha256=str(native["artifactSha256"]),
+            _source_tree_sha256=str(native["sourceTreeSha256"]),
+            _native_toolchain_lock_sha256=str(
+                native["toolchainLockSha256"]
+            ),
         )
         report = build_block_result(
             plan=plan,
@@ -2871,13 +5152,17 @@ def main(argv: list[str] | None = None) -> int:
         )
         result_path = block_dir / "block-result.json"
         exclusive_json_write(result_path, report)
-        validate_block_result(
-            result_path,
-            plan_path=plan_path,
-            native_report_path=native_path,
-            expected_boundary_id=arguments.boundary,
-            expected_selector_id=arguments.selector,
-        )
+        with _sealed_snapshot_path(
+            plan_snapshot,
+            error="CANDIDATE_NATIVE_PLAN_INVALID",
+        ) as sealed_plan_path:
+            validate_block_result(
+                result_path,
+                plan_path=sealed_plan_path,
+                native_report_path=native_path,
+                expected_boundary_id=arguments.boundary,
+                expected_selector_id=arguments.selector,
+            )
     except (ContractError, GateError, OSError, KeyError, ValueError) as exc:
         print(f"NATIVE_BENCHMARK_BLOCK_FAIL:{exc}", file=sys.stderr)
         return 2
