@@ -9,6 +9,7 @@ import sys
 import tempfile
 from pathlib import Path
 from unittest import TestCase
+from unittest.mock import patch
 
 INTEGRATION = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(INTEGRATION))
@@ -17,9 +18,11 @@ from benchmark_commands import (  # noqa: E402
     BOUNDARY_IDS,
     CommandManifestError,
     build_manifest,
+    inspect_executable_identity,
     validate_manifest,
     write_manifest_exclusive,
 )
+from prepare_benchmark_commands import _identity  # noqa: E402
 
 
 class BenchmarkCommandManifestTests(TestCase):
@@ -151,7 +154,7 @@ class BenchmarkCommandManifestTests(TestCase):
     def test_manifest_rejects_missing_directory_symlink_and_non_executable_identity(
         self,
     ) -> None:
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(dir="/tmp") as directory:
             root = Path(directory)
             missing = root / "missing"
             cases = [
@@ -172,6 +175,9 @@ class BenchmarkCommandManifestTests(TestCase):
             ]
             regular = root / "wrapper"
             regular.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            os.chmod(regular, 0o600)
+            self.assertEqual(regular.stat().st_mode & 0o111, 0)
+            self.assertFalse(os.access(regular, os.X_OK))
             regular_digest = hashlib.sha256(regular.read_bytes()).hexdigest()
             cases.append(
                 (
@@ -205,3 +211,83 @@ class BenchmarkCommandManifestTests(TestCase):
                     expected_error,
                 ):
                     validate_manifest(self._manifest_for_identity(identity))
+
+    def test_manifest_and_prepare_reject_intermediate_symlink_component(self) -> None:
+        with tempfile.TemporaryDirectory(dir="/tmp") as directory:
+            root = Path(directory)
+            real_parent = root / "real-parent"
+            real_parent.mkdir()
+            wrapper = real_parent / "wrapper"
+            wrapper.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            os.chmod(wrapper, 0o700)
+            linked_parent = root / "linked-parent"
+            linked_parent.symlink_to(real_parent, target_is_directory=True)
+            supplied = linked_parent / "wrapper"
+            identity = {
+                "path": str(supplied),
+                "sha256": hashlib.sha256(wrapper.read_bytes()).hexdigest(),
+            }
+
+            with self.assertRaisesRegex(
+                CommandManifestError,
+                "COMMAND_EXECUTABLE_SYMLINK_COMPONENT",
+            ):
+                validate_manifest(self._manifest_for_identity(identity))
+            with self.assertRaisesRegex(
+                ValueError,
+                "COMMAND_EXECUTABLE_SYMLINK_COMPONENT",
+            ):
+                _identity(supplied)
+
+    def test_manifest_and_prepare_require_effective_current_user_execute_access(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory(dir="/tmp") as directory:
+            wrapper = Path(directory) / "wrapper"
+            wrapper.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            os.chmod(wrapper, 0o410)
+            self.assertEqual(wrapper.stat().st_uid, os.geteuid())
+            self.assertFalse(os.access(wrapper, os.X_OK, effective_ids=True))
+            identity = {
+                "path": str(wrapper),
+                "sha256": hashlib.sha256(wrapper.read_bytes()).hexdigest(),
+            }
+
+            with self.assertRaisesRegex(
+                CommandManifestError,
+                "COMMAND_EXECUTABLE_NOT_EXECUTABLE",
+            ):
+                validate_manifest(self._manifest_for_identity(identity))
+            with self.assertRaisesRegex(ValueError, "COMMAND_EXECUTABLE_NOT_EXECUTABLE"):
+                _identity(wrapper)
+
+    def test_identity_read_failure_closes_every_owned_descriptor(self) -> None:
+        with tempfile.TemporaryDirectory(dir="/tmp") as directory:
+            wrapper = Path(directory) / "wrapper"
+            wrapper.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            os.chmod(wrapper, 0o700)
+            identity = {
+                "path": str(wrapper),
+                "sha256": hashlib.sha256(wrapper.read_bytes()).hexdigest(),
+            }
+            opened: list[int] = []
+            real_open = os.open
+
+            def tracking_open(*args: object, **kwargs: object) -> int:
+                descriptor = real_open(*args, **kwargs)  # type: ignore[arg-type]
+                opened.append(descriptor)
+                return descriptor
+
+            with patch("benchmark_commands.os.open", side_effect=tracking_open), patch(
+                "benchmark_commands.os.read",
+                side_effect=OSError("forced read failure"),
+            ), self.assertRaisesRegex(
+                CommandManifestError,
+                "COMMAND_EXECUTABLE_CHANGED_DURING_VALIDATION",
+            ):
+                inspect_executable_identity(identity, role="test")
+
+            self.assertGreaterEqual(len(opened), 2)
+            for descriptor in opened:
+                with self.assertRaises(OSError):
+                    os.fstat(descriptor)

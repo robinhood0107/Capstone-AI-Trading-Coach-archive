@@ -121,6 +121,39 @@ def test_command_manifest_requires_precommitted_digest_and_executable_identity(
         )
 
 
+def test_runner_executes_sealed_verified_bytes_after_supplier_path_replacement(
+    tmp_path: Path,
+) -> None:
+    supplied = tmp_path / "wrapper"
+    supplied.write_text("#!/bin/sh\nprintf 'A\\n'\n", encoding="utf-8")
+    supplied.chmod(0o700)
+    identity = {
+        "path": str(supplied),
+        "sha256": sha256_file(supplied),
+    }
+
+    with runner._pin_executable(identity, role="test") as pinned:
+        replacement = tmp_path / "replacement"
+        replacement.write_text("#!/bin/sh\nprintf 'B\\n'\n", encoding="utf-8")
+        replacement.chmod(0o700)
+        replacement.replace(supplied)
+
+        for invocation in range(2):
+            stdout = tmp_path / f"stdout-{invocation}"
+            stderr = tmp_path / f"stderr-{invocation}"
+            runner._run_process(
+                [str(supplied)],
+                executable=pinned,
+                cwd=tmp_path,
+                timeout_seconds=5,
+                stdout_path=stdout,
+                stderr_path=stderr,
+                environment=dict(os.environ),
+            )
+            assert stdout.read_text(encoding="utf-8") == "A\n"
+            assert stderr.read_bytes() == b""
+
+
 def test_command_renderer_rejects_unbound_or_formatted_placeholders() -> None:
     with pytest.raises(ContractError, match="UNKNOWN_COMMAND_PLACEHOLDER"):
         runner._render_command(["tool", "{unbound}"], {"bound": "value"})
