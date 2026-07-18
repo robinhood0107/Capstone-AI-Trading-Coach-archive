@@ -19,10 +19,6 @@
     within:
       - S14X.Contract.Process
 - ignore:
-    name: Use isDigit
-    within:
-      - S14X.Contract.Process
-- ignore:
     name: Avoid partial function
     within:
       - S14X.Core.NumericPrimitives

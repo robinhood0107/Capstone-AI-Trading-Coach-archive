@@ -23,16 +23,6 @@
     },
     {
       "language": "haskell",
-      "file": "src/contract/S14X/Contract/Process.hs",
-      "rule": "Use isDigit",
-      "symbol": "isDigitAscii",
-      "reason": "Data.Char.isDigit accepts non-ASCII Unicode digits, while lowercase hexadecimal digests and path identifiers require exactly 0-9.",
-      "focusedTest": "test/S14X/ContractSpec.hs: Unicode digits cannot enter SHA or path contracts",
-      "owner": "S1.4X",
-      "expiresWhen": "A standard-library predicate with the exact ASCII 0-9 contract is compiler-pinned and tested."
-    },
-    {
-      "language": "haskell",
       "file": "src/core/S14X/Core/NumericPrimitives.hs",
       "rule": "Avoid partial function",
       "symbol": "pureSort:div",

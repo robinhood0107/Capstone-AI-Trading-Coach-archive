@@ -13,6 +13,7 @@ import           Data.Aeson (Value, encode, object, toJSON, (.=))
 import           Data.Aeson.Types (Pair)
 import           Data.Binary.Get (getDoublele, runGet)
 import           Data.ByteString (ByteString)
+import           Data.Char (isDigit)
 import           Data.Digest.Pure.SHA (sha256, showDigest)
 import           Data.Either (lefts, rights)
 import           Data.Map.Strict (Map)
@@ -968,13 +969,13 @@ validFieldIdentifier value =
       Text.length value <= 64
         && isLowerAscii first
         && Text.all
-          (\character -> isLowerAscii character || isDigitAscii character || character == '_')
+          (\character -> isLowerAscii character || isDigit character || character == '_')
           value
     Nothing -> False
 
 validIdentifierEdge :: Char -> Bool
 validIdentifierEdge character =
-  isLowerAscii character || isDigitAscii character
+  isLowerAscii character || isDigit character
 
 validIdentifierCharacter :: Char -> Bool
 validIdentifierCharacter character =
@@ -995,20 +996,17 @@ validSha256 :: Text -> Bool
 validSha256 value =
   Text.length value == 64
     && Text.all
-      (\character -> isDigitAscii character || (character >= 'a' && character <= 'f'))
+      (\character -> isDigit character || (character >= 'a' && character <= 'f'))
       value
 
 isAsciiAlphaNumeric :: Char -> Bool
 isAsciiAlphaNumeric character =
   isLowerAscii character
     || (character >= 'A' && character <= 'Z')
-    || isDigitAscii character
+    || isDigit character
 
 isLowerAscii :: Char -> Bool
 isLowerAscii character = character >= 'a' && character <= 'z'
-
-isDigitAscii :: Char -> Bool
-isDigitAscii character = character >= '0' && character <= '9'
 
 pathWithin :: FilePath -> FilePath -> Bool
 pathWithin root candidate =
