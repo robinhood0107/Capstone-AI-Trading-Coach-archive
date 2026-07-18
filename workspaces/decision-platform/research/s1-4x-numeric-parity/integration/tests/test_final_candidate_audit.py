@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from typing import Any
 from unittest import TestCase
 from unittest.mock import patch
 
@@ -313,7 +314,7 @@ class FinalCandidateAuditTests(TestCase):
         _git(self.repository, "commit", "-m", message)
         return _git(self.repository, "rev-parse", "HEAD")
 
-    def _generate(self) -> dict[str, object]:
+    def _generate(self) -> dict[str, Any]:
         generate_final_candidate_audit(
             repository_root=self.repository,
             benchmark_subject_commit=self.commit,
@@ -322,7 +323,7 @@ class FinalCandidateAuditTests(TestCase):
         )
         return json.loads(self.ledger_path.read_text(encoding="utf-8"))
 
-    def _rewrite_ledger(self, document: dict[str, object]) -> None:
+    def _rewrite_ledger(self, document: dict[str, Any]) -> None:
         self.ledger_path.write_text(
             json.dumps(document, sort_keys=True),
             encoding="utf-8",
@@ -472,7 +473,7 @@ class FinalCandidateAuditTests(TestCase):
         original_loader = audit_module.strict_json_load
         swapped = False
 
-        def replace_after_snapshot(value: object) -> object:
+        def replace_after_snapshot(value: bytes | str | Path) -> Any:
             nonlocal swapped
             if not swapped and value == original_payload:
                 source_path.write_bytes(forged_payload)
