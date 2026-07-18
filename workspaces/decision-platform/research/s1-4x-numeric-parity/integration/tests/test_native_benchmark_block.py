@@ -9,6 +9,8 @@ import math
 import statistics
 import sys
 import tempfile
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
 from typing import Any
 from unittest import TestCase
@@ -182,7 +184,55 @@ class NativeBenchmarkBlockTests(TestCase):
                     "schemaVersion": "s1.4x-haskell-selected-profile-v1",
                     "profileId": "baseline-o0-fasm",
                     "ghcOptions": selected_options,
+                    "compilerVersion": "9.10.3",
+                    "compilerSha256": native_block_module.FROZEN_GHC_910_SHA256,
+                    "sourceTreeSha256": "5" * 64,
                     "optionsSha256": effective_options_sha256,
+                    "fullCorrectnessSha256": "6" * 64,
+                    "qualificationPlanSha256": hashlib.sha256(
+                        json.dumps(
+                            strict_json_load(PLAN),
+                            sort_keys=True,
+                        ).encode()
+                    ).hexdigest(),
+                    "qualificationArtifactSha256": "7" * 64,
+                    "selectorConfigSha256": _canonical_sha256(
+                        strict_json_load(PLAN)["haskellProfileQualification"]
+                    ),
+                    "fallbackProfile": "baseline-o0-fasm",
+                    "selectedBy": "frozen-criterion-selector",
+                },
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
+        source_input_manifest = haskell_root / "source-inputs.v1.json"
+        source_manifest_files = {
+            "selected-profile.v1.json": {
+                "role": "configuration",
+                "sha256": hashlib.sha256(selected_profile.read_bytes()).hexdigest(),
+            }
+        }
+        source_input_manifest.write_text(
+            json.dumps(
+                {
+                    "schemaVersion": "s1.4x-source-input-manifest-v1",
+                    "language": "haskell",
+                    "files": source_manifest_files,
+                    "inputSets": {
+                        "tracked": "files",
+                        "manifest": "files",
+                        "format": "files",
+                        "compile": "files",
+                        "lint": "files",
+                        "profileRun": "files",
+                    },
+                    "canonicalManifestSha256": hashlib.sha256(
+                        (
+                            f"{source_manifest_files['selected-profile.v1.json']['sha256']}"
+                            "  selected-profile.v1.json\n"
+                        ).encode()
+                    ).hexdigest(),
                 },
                 sort_keys=True,
             ),
@@ -192,6 +242,18 @@ class NativeBenchmarkBlockTests(TestCase):
         plan_path = temporary / "benchmarks/benchmark-plan.v1.json"
         plan_path.parent.mkdir()
         plan_path.write_text(json.dumps(plan, sort_keys=True), encoding="utf-8")
+        marker_python = Path(sys.executable).resolve(strict=True)
+        marker_script = plan_path.parent / "run_rotated_blocks.py"
+        marker_script.write_text("# marker fixture\n", encoding="utf-8")
+        qualification_path = temporary / "timeout-qualification.json"
+        qualification_path.write_text('{"phase":"PRE_RUN"}', encoding="utf-8")
+        marker_argv = [
+            str(marker_python),
+            str(marker_script.resolve()),
+            "mark-measurement-entered",
+            "--qualification",
+            str(qualification_path.resolve()),
+        ]
         ghcup_sha256 = hashlib.sha256(ghcup.read_bytes()).hexdigest()
         stack_sha256 = hashlib.sha256(stack.read_bytes()).hexdigest()
         self.enterContext(
@@ -337,7 +399,21 @@ class NativeBenchmarkBlockTests(TestCase):
                 "selectedProfilePath": str(selected_profile.resolve()),
                 "selectedProfileSha256": hashlib.sha256(selected_profile.read_bytes()).hexdigest(),
                 "selectedProfileId": "baseline-o0-fasm",
+                "sourceInputManifestPath": str(source_input_manifest.resolve()),
+                "sourceInputManifestSha256": hashlib.sha256(
+                    source_input_manifest.read_bytes()
+                ).hexdigest(),
                 "effectiveCompilerFlagsSha256": effective_options_sha256,
+                "markerPythonPath": str(marker_python),
+                "markerPythonSha256": hashlib.sha256(
+                    marker_python.read_bytes()
+                ).hexdigest(),
+                "markerScriptPath": str(marker_script.resolve()),
+                "markerScriptSha256": hashlib.sha256(
+                    marker_script.read_bytes()
+                ).hexdigest(),
+                "markerArgv": marker_argv,
+                "markerArgvSha256": _canonical_sha256(marker_argv),
                 "ghcupPath": str(ghcup.resolve()),
                 "ghcupSha256": hashlib.sha256(ghcup.read_bytes()).hexdigest(),
                 "stackPath": str(stack.resolve()),
@@ -545,11 +621,49 @@ class NativeBenchmarkBlockTests(TestCase):
                     ),
                     "dispersionValue": standard_deviation,
                     "nativeUnit": "s",
-                    "logicalOperationsPerInvocation": 1,
-                    "normalizedP95NsPerLogicalOperation": max(samples) * 1e9,
-                    "normalizedConfidenceLowNsPerLogicalOperation": (regression_slope * 0.9 * 1e9),
-                    "normalizedConfidenceHighNsPerLogicalOperation": (regression_slope * 1.2 * 1e9),
-                    "normalizedDispersionNsPerLogicalOperation": (standard_deviation * 1e9),
+                    "logicalOperationsPerInvocation": next(
+                        frozen["logicalOperationsPerInvocation"]
+                        for frozen in plan["cases"]
+                        if frozen["caseId"] == case["caseId"]
+                    ),
+                    "normalizedP95NsPerLogicalOperation": (
+                        max(samples)
+                        * 1e9
+                        / next(
+                            frozen["logicalOperationsPerInvocation"]
+                            for frozen in plan["cases"]
+                            if frozen["caseId"] == case["caseId"]
+                        )
+                    ),
+                    "normalizedConfidenceLowNsPerLogicalOperation": (
+                        regression_slope
+                        * 0.9
+                        * 1e9
+                        / next(
+                            frozen["logicalOperationsPerInvocation"]
+                            for frozen in plan["cases"]
+                            if frozen["caseId"] == case["caseId"]
+                        )
+                    ),
+                    "normalizedConfidenceHighNsPerLogicalOperation": (
+                        regression_slope
+                        * 1.2
+                        * 1e9
+                        / next(
+                            frozen["logicalOperationsPerInvocation"]
+                            for frozen in plan["cases"]
+                            if frozen["caseId"] == case["caseId"]
+                        )
+                    ),
+                    "normalizedDispersionNsPerLogicalOperation": (
+                        standard_deviation
+                        * 1e9
+                        / next(
+                            frozen["logicalOperationsPerInvocation"]
+                            for frozen in plan["cases"]
+                            if frozen["caseId"] == case["caseId"]
+                        )
+                    ),
                 }
             )
 
@@ -571,7 +685,9 @@ class NativeBenchmarkBlockTests(TestCase):
             "caseId": None,
             "commandArgv": [
                 str(ghcup.resolve()),
+                "--offline",
                 "run",
+                "--quick",
                 "--ghc",
                 "9.10.3",
                 "--stack",
@@ -580,6 +696,9 @@ class NativeBenchmarkBlockTests(TestCase):
                 str(stack.resolve()),
                 "--stack-yaml",
                 str(stack_yaml.resolve()),
+                "--no-terminal",
+                "--color",
+                "never",
                 "--system-ghc",
                 "--no-install-ghc",
                 "bench",
@@ -642,6 +761,137 @@ class NativeBenchmarkBlockTests(TestCase):
             effective_runtime_arguments_sha256=effective_options_sha256,
             profile="baseline-o0-fasm",
         )
+
+        producer_stdout = StringIO()
+        with (
+            patch.object(
+                native_block_module,
+                "validate_input_ledger",
+            ) as ledger_validator,
+            redirect_stdout(producer_stdout),
+        ):
+            producer_exit = native_block_module.main(
+                [
+                    "produce-haskell-native",
+                    "--repo-root",
+                    str(temporary),
+                    "--plan",
+                    str(plan_path),
+                    "--block-dir",
+                    str(temporary),
+                    "--selector",
+                    selector_id,
+                    "--criterion-raw",
+                    str(raw_path),
+                    "--execution-receipt",
+                    str(receipt_path),
+                    "--input-ledger",
+                    str(input_ledger),
+                    "--fixture-root",
+                    str(FIXTURES),
+                    "--selected-profile",
+                    str(selected_profile),
+                    "--source-input-manifest",
+                    str(source_input_manifest),
+                    "--toolchain-lock",
+                    str(toolchain_lock),
+                    "--toolchain-provenance",
+                    str(merged_provenance),
+                    "--benchmark-artifact",
+                    str(benchmark_executable),
+                    "--started-at",
+                    "2026-07-18T00:00:00Z",
+                    "--finished-at",
+                    "2026-07-18T00:01:00Z",
+                ]
+            )
+        self.assertEqual(producer_exit, 0)
+        produced = json.loads(producer_stdout.getvalue())
+        ledger_validator.assert_called_once()
+        native_document = strict_json_load(temporary / "native.json")
+        statistics_document = strict_json_load(temporary / "native-statistics.json")
+        contract_document = strict_json_load(
+            temporary / "native-contract-validation.json"
+        )
+        frozen_case_by_id = {case["caseId"]: case for case in plan["cases"]}
+        self.assertEqual(produced["caseCount"], 2)
+        self.assertEqual(
+            [case["caseId"] for case in native_document["cases"]],
+            expected_case_ids,
+        )
+        self.assertEqual(
+            [case["nativeValue"] for case in native_document["cases"]],
+            [case["nativeValue"] for case in cases],
+        )
+        self.assertEqual(
+            [
+                case["logicalOperationsPerInvocation"]
+                for case in statistics_document["cases"]
+            ],
+            [
+                frozen_case_by_id[case_id]["logicalOperationsPerInvocation"]
+                for case_id in expected_case_ids
+            ],
+        )
+        for statistics_case in statistics_document["cases"]:
+            logical = statistics_case["logicalOperationsPerInvocation"]
+            self.assertAlmostEqual(
+                statistics_case["normalizedP95NsPerLogicalOperation"],
+                statistics_case["nativeP95"] * 1e9 / logical,
+            )
+            self.assertAlmostEqual(
+                statistics_case[
+                    "normalizedConfidenceLowNsPerLogicalOperation"
+                ],
+                statistics_case["confidenceLow"] * 1e9 / logical,
+            )
+            self.assertAlmostEqual(
+                statistics_case[
+                    "normalizedConfidenceHighNsPerLogicalOperation"
+                ],
+                statistics_case["confidenceHigh"] * 1e9 / logical,
+            )
+            self.assertAlmostEqual(
+                statistics_case["normalizedDispersionNsPerLogicalOperation"],
+                statistics_case["dispersionValue"] * 1e9 / logical,
+            )
+        self.assertTrue(
+            all(
+                case["rawEvidenceSha256"] == raw_sha
+                and case["executionReceiptSha256"] == receipt_sha
+                for case in contract_document["cases"]
+            )
+        )
+        self.assertEqual(
+            native_document["sourceTreeSha256"],
+            strict_json_load(selected_profile)["sourceTreeSha256"],
+        )
+        self.assertEqual(
+            native_document["artifactSha256"],
+            hashlib.sha256(benchmark_executable.read_bytes()).hexdigest(),
+        )
+        self.assertFalse((temporary / "block-result.json").exists())
+        with self.assertRaisesRegex(
+            GateError,
+            "HASKELL_NATIVE_OUTPUT_ALREADY_EXISTS",
+        ):
+            native_block_module.produce_haskell_native_evidence(
+                repo_root=temporary,
+                plan_path=plan_path,
+                block_directory=temporary,
+                selector_id=selector_id,
+                criterion_raw_path=raw_path,
+                execution_receipt_path=receipt_path,
+                input_ledger_path=input_ledger,
+                fixture_root_path=FIXTURES,
+                selected_profile_path=selected_profile,
+                source_input_manifest_path=source_input_manifest,
+                toolchain_lock_path=toolchain_lock,
+                merged_toolchain_provenance_path=merged_provenance,
+                benchmark_artifact_path=benchmark_executable,
+                started_at="2026-07-18T00:00:00Z",
+                finished_at="2026-07-18T00:01:00Z",
+            )
 
         invalid = copy.deepcopy(evidence)
         invalid["configuration"]["timeLimitSeconds"] = 4
@@ -760,6 +1010,29 @@ class NativeBenchmarkBlockTests(TestCase):
         forged_provenance_receipt = copy.deepcopy(receipt_document)
         forged_provenance_receipt["provenance"]["candidateProvenance"]["ghcupSha256"] = "0" * 64
         install_receipt(forged_provenance_receipt)
+        with self.assertRaisesRegex(
+            GateError,
+            "NATIVE_EXECUTION_PROVENANCE_INVALID",
+        ):
+            validate_native_contract_evidence(
+                evidence,
+                boundary_id="haskell",
+                selector_id=selector_id,
+                block_directory=temporary,
+                native_cases=cases,
+                native_statistics_cases=statistics_cases,
+                plan_path=plan_path,
+                fixture_root_path=FIXTURES,
+                input_ledger_path=input_ledger,
+                effective_runtime_arguments_sha256=effective_options_sha256,
+                profile="baseline-o0-fasm",
+            )
+
+        forged_marker_receipt = copy.deepcopy(receipt_document)
+        forged_marker_receipt["provenance"]["candidateProvenance"][
+            "markerScriptSha256"
+        ] = "0" * 64
+        install_receipt(forged_marker_receipt)
         with self.assertRaisesRegex(
             GateError,
             "NATIVE_EXECUTION_PROVENANCE_INVALID",
@@ -949,7 +1222,9 @@ class NativeBenchmarkBlockTests(TestCase):
                         "implementor": "Eclipse Adoptium",
                         "runtimeVersion": "25.0.3+9-LTS",
                         "vmName": "OpenJDK 64-Bit Server VM",
-                        "javaExecutableSha256": "5" * 64,
+                        "javaExecutableSha256": (
+                            native_block_module.FROZEN_JAVA_EXECUTABLE_SHA256
+                        ),
                     },
                     "scalaCli": {
                         "pathId": "SCALA_CLI_1_15_0",
