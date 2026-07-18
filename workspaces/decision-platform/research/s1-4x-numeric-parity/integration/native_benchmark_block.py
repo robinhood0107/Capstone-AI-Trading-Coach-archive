@@ -206,6 +206,33 @@ SCALA_RUNTIME_SOURCE_PATHS = (
     "src/main/scala/ai/trading/coach/s14x/shell/JsonSupport.scala",
     "src/main/scala/ai/trading/coach/s14x/shell/Main.scala",
 )
+SCALA_JMH_TOOL_PATH_IDS = (
+    ("SCALA_ROOT/tools/run-jmh-native-full.sh", "tools/run-jmh-native-full.sh"),
+    ("SCALA_ROOT/tools/run-jmh-native-smoke.sh", "tools/run-jmh-native-smoke.sh"),
+    ("SCALA_ROOT/tools/compile-benchmarks.sh", "tools/compile-benchmarks.sh"),
+    ("SCALA_ROOT/tools/assert-toolchain.sh", "tools/assert-toolchain.sh"),
+    (
+        "SCALA_ROOT/tools/assert-compiler-profiles.sh",
+        "tools/assert-compiler-profiles.sh",
+    ),
+    (
+        "SCALA_ROOT/tools/check-jmh-plan-integrity.sh",
+        "tools/check-jmh-plan-integrity.sh",
+    ),
+    (
+        "SCALA_ROOT/tools/source_input_manifest.py",
+        "tools/source_input_manifest.py",
+    ),
+    ("SCALA_ROOT/tools/t3_evidence.py", "tools/t3_evidence.py"),
+)
+SCALA_JMH_ENVIRONMENT_VALUES = {
+    "COURSIER_CACHE": "CACHE_ROOT/coursier",
+    "COURSIER_CONFIG_DIR": "SCALA_ISOLATION/coursier-config",
+    "SCALA_CLI_CONFIG": "SCALA_ISOLATION/scala-cli-home/config.json",
+    "SCALA_CLI_HOME": "SCALA_ISOLATION/scala-cli-home",
+    "S1_4X_SCALA_WORKSPACE": "SCALA_WORKSPACE",
+    "XDG_CONFIG_HOME": "SCALA_ISOLATION/xdg-config",
+}
 SCALA_SOURCE_MANIFEST_FIELDS = {
     "schemaVersion",
     "language",
@@ -335,12 +362,17 @@ SCALA_JMH_RUN_RESULT_FIELDS = {
     "benchmarkPlanSha256",
     "sourceInputManifestSha256",
     "scalaCliBinarySha256",
+    "scalaCliExecutionPathId",
     "compilerProfilesSha256",
     "profileOptionsSha256",
     "inputPaths",
     "portableArgv",
     "portableArgvSha256",
     "runtimeArgvSha256",
+    "commandToolClosure",
+    "commandToolClosureSha256",
+    "environmentValuesSha256",
+    "scalaWorkspacePathId",
     "rawNativeJsonSha256",
     "effectiveJvmArgsSha256",
     "jvmArgumentAllowlistSha256",
@@ -517,6 +549,84 @@ def _canonical_sha256(value: Any) -> str:
     ).hexdigest()
 
 
+def _scala_jmh_runtime_paths(
+    *,
+    block_directory: Path,
+    scala_cli_sha256: str,
+    java_executable_sha256: str,
+    error: str,
+) -> tuple[Path, Path, Path]:
+    """Parent가 sealed FD로 넘긴 Scala CLI/Java와 output-bound workspace를 재검증한다."""
+
+    cache_root_text = os.environ.get("S1_4X_CACHE_ROOT")
+    workspace_text = os.environ.get("S1_4X_SCALA_WORKSPACE")
+    scala_cli_text = os.environ.get("S1_4X_SCALA_CLI_EXEC_PATH")
+    java_text = os.environ.get("S1_4X_SCALA_JAVA_PINNED_FD_PATH")
+    if (
+        not cache_root_text
+        or not workspace_text
+        or not scala_cli_text
+        or not java_text
+        or not Path(cache_root_text).is_absolute()
+        or re.fullmatch(r"/proc/self/fd/[0-9]+", scala_cli_text) is None
+        or re.fullmatch(r"/proc/self/fd/[0-9]+", java_text) is None
+    ):
+        raise GateError(error)
+    cache_root = Path(cache_root_text)
+    workspace = Path(workspace_text)
+    workspace_key = hashlib.sha256(
+        str(block_directory).encode("utf-8")
+    ).hexdigest()
+    expected_workspace = (
+        cache_root / "scala-workspaces" / workspace_key
+    )
+    scala_cli = Path(scala_cli_text)
+    java = Path(java_text)
+    try:
+        scala_cli_digest = sha256_file(scala_cli)
+        java_digest = sha256_file(java)
+    except OSError as exc:
+        raise GateError(error) from exc
+    if (
+        workspace != expected_workspace
+        or not workspace.is_dir()
+        or workspace.is_symlink()
+        or scala_cli_digest != scala_cli_sha256
+        or java_digest != java_executable_sha256
+    ):
+        raise GateError(error)
+    return scala_cli, java, workspace
+
+
+def _scala_jmh_command_tool_closure(
+    *,
+    scala_root: Path,
+    scala_cli_sha256: str,
+    java_executable_sha256: str,
+    error: str,
+) -> list[dict[str, str]]:
+    """Full JMH receipt의 executable과 orchestration script closure를 재구성한다."""
+
+    closure = [
+        {
+            "pathId": "SCALA_CLI_1_15_0",
+            "sha256": scala_cli_sha256,
+        },
+        {
+            "pathId": "TEMURIN_25_0_3_9_LTS/bin/java",
+            "sha256": java_executable_sha256,
+        },
+    ]
+    for path_id, relative_path in SCALA_JMH_TOOL_PATH_IDS:
+        snapshot = _snapshot_regular_file(
+            scala_root / relative_path,
+            role=f"scala-jmh-tool:{relative_path}",
+            error=error,
+        )
+        closure.append({"pathId": path_id, "sha256": snapshot.sha256})
+    return closure
+
+
 def _canonical_pairs_sha256(value: Any, *, error: str) -> str:
     if not isinstance(value, dict) or any(
         not isinstance(key, str) or not isinstance(item, str)
@@ -618,6 +728,8 @@ def _scala_full_runtime_argv(
     scala_root: Path,
     source_paths: list[str],
     scala_cli_arguments: list[str],
+    scala_workspace: Path,
+    jvm_executable: Path,
     raw_path: Path,
     jmh_include_regex: str,
 ) -> list[str]:
@@ -638,6 +750,8 @@ def _scala_full_runtime_argv(
         "--power",
         "run",
         *(str(scala_root / relative_path) for relative_path in source_paths),
+        "--workspace",
+        str(scala_workspace),
         "--server=false",
         "--jvm",
         "system",
@@ -653,6 +767,8 @@ def _scala_full_runtime_argv(
         "ns",
         "-t",
         "1",
+        "-jvm",
+        str(jvm_executable),
         "-f",
         "3",
         "-wi",
@@ -2137,11 +2253,27 @@ def _validate_scala_case_evidence(
         raise GateError(f"SCALA_NATIVE_JMH_LIST_INVALID:{case_id}") from exc
     if list_text.splitlines().count(benchmark_name) != 1:
         raise GateError(f"SCALA_NATIVE_JMH_LIST_INVALID:{case_id}")
+    scala_cli_execution, java_execution, scala_workspace = (
+        _scala_jmh_runtime_paths(
+            block_directory=block_directory,
+            scala_cli_sha256=scala_cli_snapshot.sha256,
+            java_executable_sha256=java_executable_sha256,
+            error=f"SCALA_NATIVE_RUNTIME_CLOSURE_INVALID:{case_id}",
+        )
+    )
+    command_tool_closure = _scala_jmh_command_tool_closure(
+        scala_root=scala_root,
+        scala_cli_sha256=scala_cli_snapshot.sha256,
+        java_executable_sha256=java_executable_sha256,
+        error=f"SCALA_NATIVE_RUNTIME_CLOSURE_INVALID:{case_id}",
+    )
     expected_argv = _scala_full_runtime_argv(
-        scala_cli=Path(scala_cli_snapshot.path),
+        scala_cli=scala_cli_execution,
         scala_root=scala_root,
         source_paths=list(SCALA_RUNTIME_SOURCE_PATHS),
         scala_cli_arguments=scala_cli_arguments,
+        scala_workspace=scala_workspace,
+        jvm_executable=java_execution,
         raw_path=case_directory / "native.json",
         jmh_include_regex=jmh_include_regex,
     )
@@ -2150,6 +2282,8 @@ def _validate_scala_case_evidence(
         scala_root=Path("SCALA_ROOT"),
         source_paths=list(SCALA_RUNTIME_SOURCE_PATHS),
         scala_cli_arguments=scala_cli_arguments,
+        scala_workspace=Path("SCALA_WORKSPACE"),
+        jvm_executable=Path("PINNED_JAVA_FD"),
         raw_path=Path("EVIDENCE_ROOT/native.json"),
         jmh_include_regex=jmh_include_regex,
     )
@@ -2171,12 +2305,21 @@ def _validate_scala_case_evidence(
         "benchmarkPlanSha256": plan_sha256,
         "sourceInputManifestSha256": source_manifest_sha256,
         "scalaCliBinarySha256": scala_cli_snapshot.sha256,
+        "scalaCliExecutionPathId": "PINNED_SCALA_CLI_FD",
         "compilerProfilesSha256": compiler_profiles_sha256,
         "profileOptionsSha256": profile_options_sha256,
         "inputPaths": list(SCALA_RUNTIME_SOURCE_PATHS),
         "portableArgv": portable_argv,
         "portableArgvSha256": _canonical_sha256(portable_argv),
         "runtimeArgvSha256": _canonical_sha256(expected_argv),
+        "commandToolClosure": command_tool_closure,
+        "commandToolClosureSha256": _canonical_sha256(
+            command_tool_closure
+        ),
+        "environmentValuesSha256": _canonical_sha256(
+            SCALA_JMH_ENVIRONMENT_VALUES
+        ),
+        "scalaWorkspacePathId": "SCALA_WORKSPACE",
         "rawNativeJsonSha256": raw_snapshot.sha256,
         "effectiveJvmArgsSha256": effective_snapshot.sha256,
         "jvmArgumentAllowlistSha256": jvm_allowlist_sha256,
@@ -2475,16 +2618,32 @@ def _validate_scala_production_receipt(
         for item in plan.get("cases", [])
         if isinstance(item, dict)
     }
+    scala_cli_execution, java_execution, scala_workspace = (
+        _scala_jmh_runtime_paths(
+            block_directory=block_directory,
+            scala_cli_sha256=scala_cli_snapshot.sha256,
+            java_executable_sha256=java_snapshot.sha256,
+            error=error,
+        )
+    )
+    command_tool_closure = _scala_jmh_command_tool_closure(
+        scala_root=scala_root,
+        scala_cli_sha256=scala_cli_snapshot.sha256,
+        java_executable_sha256=java_snapshot.sha256,
+        error=error,
+    )
     runtime_receipts: list[dict[str, str]] = []
     expected_arguments_for_case: list[str] | None = None
     for index, expected_case_id in enumerate(expected_case_ids, start=1):
         case_directory = block_directory / f"scala-jmh/case-{index:03d}"
         raw_path = case_directory / "native.json"
         expected_argv = _scala_full_runtime_argv(
-            scala_cli=scala_cli_path,
+            scala_cli=scala_cli_execution,
             scala_root=scala_root,
             source_paths=list(SCALA_RUNTIME_SOURCE_PATHS),
             scala_cli_arguments=scala_cli_arguments,
+            scala_workspace=scala_workspace,
+            jvm_executable=java_execution,
             raw_path=raw_path,
             jmh_include_regex=str(selector["jmhIncludeRegex"]),
         )
@@ -2493,6 +2652,8 @@ def _validate_scala_production_receipt(
             scala_root=Path("SCALA_ROOT"),
             source_paths=list(SCALA_RUNTIME_SOURCE_PATHS),
             scala_cli_arguments=scala_cli_arguments,
+            scala_workspace=Path("SCALA_WORKSPACE"),
+            jvm_executable=Path("PINNED_JAVA_FD"),
             raw_path=Path("EVIDENCE_ROOT/native.json"),
             jmh_include_regex=str(selector["jmhIncludeRegex"]),
         )
@@ -2531,6 +2692,8 @@ def _validate_scala_production_receipt(
             or run["sourceInputManifestSha256"]
             != source_manifest_snapshot.sha256
             or run["scalaCliBinarySha256"] != scala_cli_snapshot.sha256
+            or run["scalaCliExecutionPathId"]
+            != "PINNED_SCALA_CLI_FD"
             or run["compilerProfilesSha256"]
             != compiler_profiles_snapshot.sha256
             or run["profileOptionsSha256"] != profile_options_sha256
@@ -2539,6 +2702,12 @@ def _validate_scala_production_receipt(
             or run["portableArgvSha256"]
             != _canonical_sha256(portable_argv)
             or run["runtimeArgvSha256"] != _canonical_sha256(expected_argv)
+            or run["commandToolClosure"] != command_tool_closure
+            or run["commandToolClosureSha256"]
+            != _canonical_sha256(command_tool_closure)
+            or run["environmentValuesSha256"]
+            != _canonical_sha256(SCALA_JMH_ENVIRONMENT_VALUES)
+            or run["scalaWorkspacePathId"] != "SCALA_WORKSPACE"
             or run["effectiveJvmArgsSha256"] != effective_snapshot.sha256
             or run["jvmArgumentAllowlistSha256"]
             != capability_snapshot.sha256

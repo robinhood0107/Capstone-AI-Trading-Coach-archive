@@ -65,13 +65,16 @@ class NativeBenchmarkBlockTests(TestCase):
             source_paths=list(native_block_module.SCALA_RUNTIME_SOURCE_PATHS),
             scala_cli_arguments=["--scala", "3.8.4"],
             scala_workspace=Path("/cache/scala-workspace"),
+            jvm_executable=Path("/proc/self/fd/42"),
             raw_path=Path("/evidence/native.json"),
             jmh_include_regex="^benchmark$",
         )
         workspace_index = argv.index("--workspace")
+        jvm_index = argv.index("-jvm")
         self.assertEqual(argv[0], "/proc/self/fd/41")
         self.assertEqual(argv[workspace_index + 1], "/cache/scala-workspace")
         self.assertEqual(argv[workspace_index + 2], "--server=false")
+        self.assertEqual(argv[jvm_index + 1], "/proc/self/fd/42")
 
     def test_scala_effective_runtime_identity_binds_actual_case_receipts_in_order(
         self,
@@ -320,11 +323,15 @@ class NativeBenchmarkBlockTests(TestCase):
     ) -> None:
         scala_root = Path("/repo/numeric/scala")
         raw_path = Path("/run/block/scala-jmh/case-001/native.json")
+        scala_workspace = Path("/cache/scala-workspace")
+        java_executable = Path("/proc/self/fd/42")
         argv = native_block_module._scala_full_runtime_argv(
             scala_cli=Path("/tools/scala-cli"),
             scala_root=scala_root,
             source_paths=list(native_block_module.SCALA_RUNTIME_SOURCE_PATHS),
             scala_cli_arguments=["--scalac-option=-opt"],
+            scala_workspace=scala_workspace,
+            jvm_executable=java_executable,
             raw_path=raw_path,
             jmh_include_regex=r"^s1_4x\.benchmarks\.family\.Benchmark\.benchmark$",
         )
@@ -339,8 +346,10 @@ class NativeBenchmarkBlockTests(TestCase):
             ],
         )
         self.assertEqual(
-            argv[source_end : source_end + 5],
+            argv[source_end : source_end + 7],
             [
+                "--workspace",
+                str(scala_workspace),
                 "--server=false",
                 "--jvm",
                 "system",
@@ -348,6 +357,8 @@ class NativeBenchmarkBlockTests(TestCase):
                 "--scalac-option=-opt",
             ],
         )
+        jvm_index = argv.index("-jvm")
+        self.assertEqual(argv[jvm_index + 1], str(java_executable))
 
     def test_native_json_snapshot_keeps_digest_and_payload_on_one_descriptor(
         self,
