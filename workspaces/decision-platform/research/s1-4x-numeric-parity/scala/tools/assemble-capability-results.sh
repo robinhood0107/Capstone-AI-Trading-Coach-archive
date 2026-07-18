@@ -5,10 +5,10 @@ SCALA_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 S1_ROOT="$(cd -- "$SCALA_ROOT/.." && pwd -P)"
 SCALA_CLI="${S1_4X_SCALA_CLI_BIN:?set exact Scala CLI 1.15.0 binary path}"
 SCALAFIX="${S1_4X_SCALAFIX_BIN:?set exact Scalafix 0.14.7 binary path}"
-SCALAFMT="${S1_4X_SCALAFMT_BIN:?set exact Scalafmt 3.11.4 binary path}"
+SCALAFMT_BIN="${S1_4X_SCALAFMT_BIN:?set exact Scalafmt 3.11.4 binary path}"
 HARD_COMPILER="${S1_4X_SCALA_HARD_COMPILER_RESULT:?set hard compiler result path}"
 TOOLCHAIN_RESULT="${S1_4X_SCALA_TOOLCHAIN_RESULT:?set typed toolchain identity result path}"
-SCALAFMT="${S1_4X_SCALA_SCALAFMT_RESULT:?set Scalafmt result path}"
+SCALAFMT_RESULT="${S1_4X_SCALA_SCALAFMT_RESULT:?set Scalafmt result path}"
 SEMANTIC="${S1_4X_SCALA_SEMANTIC_RESULT:?set semantic receipt path}"
 SOURCE_POLICY="${S1_4X_SCALA_SOURCE_POLICY_RESULT:?set source-policy result path}"
 JMH_RUN="${S1_4X_SCALA_JMH_SMOKE_RESULT:?set real JVM/JMH smoke result path}"
@@ -37,10 +37,10 @@ python3 "$SCALA_ROOT/tools/assemble_capability_results.py" \
   --merged-provenance "$S1_ROOT/contract/toolchain-provenance.v1.json" \
   --scala-cli-bin "$SCALA_CLI" \
   --scalafix-bin "$SCALAFIX" \
-  --scalafmt-bin "$SCALAFMT" \
+  --scalafmt-bin "$SCALAFMT_BIN" \
   --toolchain-result "$TOOLCHAIN_RESULT" \
   --hard-compiler "$HARD_COMPILER" \
-  --scalafmt "$SCALAFMT" \
+  --scalafmt "$SCALAFMT_RESULT" \
   --semantic "$SEMANTIC" \
   --source-policy "$SOURCE_POLICY" \
   --jmh-run "$JMH_RUN" \
