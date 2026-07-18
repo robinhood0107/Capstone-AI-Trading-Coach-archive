@@ -6,8 +6,10 @@ import hashlib
 import json
 import os
 import signal
+import shutil
 import subprocess
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -346,6 +348,72 @@ def test_runner_executes_sealed_verified_bytes_after_supplier_path_replacement(
             )
             assert stdout.read_text(encoding="utf-8") == "A\n"
             assert stderr.read_bytes() == b""
+
+
+def test_runner_executes_script_with_sealed_verified_bash_after_supplier_swap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bash_supplier = tmp_path / "bash"
+    shutil.copyfile("/usr/bin/bash", bash_supplier)
+    bash_supplier.chmod(0o700)
+    monkeypatch.setattr(
+        runner,
+        "FROZEN_BASH_IDENTITY",
+        {
+            "path": str(bash_supplier),
+            "sha256": sha256_file(bash_supplier),
+        },
+    )
+    wrapper = tmp_path / "wrapper"
+    wrapper.write_text(
+        "#!/usr/bin/bash\nprintf 'SEALED_BASH\\n'\n",
+        encoding="utf-8",
+    )
+    wrapper.chmod(0o700)
+    wrapper_identity = {
+        "path": str(wrapper),
+        "sha256": sha256_file(wrapper),
+    }
+    real_pin = runner._pin_executable
+    swapped = False
+
+    @contextmanager
+    def swap_after_interpreter_pin(
+        identity: dict[str, str],
+        *,
+        role: str,
+    ) -> Any:
+        nonlocal swapped
+        with real_pin(identity, role=role) as pinned:
+            if role == "processInterpreter":
+                replacement = tmp_path / "replacement-bash"
+                replacement.write_text(
+                    "#!/usr/bin/bash\nprintf 'FORGED_BASH\\n'\n",
+                    encoding="utf-8",
+                )
+                replacement.chmod(0o700)
+                replacement.replace(bash_supplier)
+                swapped = True
+            yield pinned
+
+    monkeypatch.setattr(runner, "_pin_executable", swap_after_interpreter_pin)
+    with real_pin(wrapper_identity, role="wrapper") as pinned_wrapper:
+        stdout = tmp_path / "stdout"
+        stderr = tmp_path / "stderr"
+        runner._run_process(
+            [str(wrapper)],
+            executable=pinned_wrapper,
+            cwd=tmp_path,
+            timeout_seconds=5,
+            stdout_path=stdout,
+            stderr_path=stderr,
+            environment=dict(os.environ),
+        )
+
+    assert swapped is True
+    assert stdout.read_text(encoding="utf-8") == "SEALED_BASH\n"
+    assert stderr.read_bytes() == b""
 
 
 def test_runner_executes_fd_bound_uv_dependency_after_path_replacement(
