@@ -98,6 +98,14 @@ def main() -> int:
         assert str(source_root) not in patch
         assert str(formatted_root) not in patch
 
+    with tempfile.TemporaryDirectory(prefix="s1-4x-scalafmt-root.") as directory:
+        temporary = runner.create_temporary_directory(directory)
+        try:
+            assert temporary.parent == Path(directory).resolve()
+            assert temporary.name.startswith("s1-4x-scalafmt.")
+        finally:
+            temporary.rmdir()
+
     runner_source = (TOOLS_ROOT / "run_scalafmt.py").read_text(encoding="utf-8")
     for required in (
         '"firstApply"',

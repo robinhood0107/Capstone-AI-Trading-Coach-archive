@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
+import sys
 from pathlib import Path
 
 
@@ -41,6 +43,20 @@ def script(name: str) -> str:
     return path.read_text(encoding="utf-8")
 
 
+def load_tool(name: str):
+    path = TOOLS_ROOT / f"{name}.py"
+    specification = importlib.util.spec_from_file_location(name, path)
+    assert specification is not None and specification.loader is not None
+    module = importlib.util.module_from_spec(specification)
+    sys.path.insert(0, str(TOOLS_ROOT))
+    try:
+        sys.modules[name] = module
+        specification.loader.exec_module(module)
+    finally:
+        sys.path.pop(0)
+    return module
+
+
 def main() -> int:
     profiles = json.loads(
         (SCALA_ROOT / "compiler-profiles.v1.json").read_text(encoding="utf-8")
@@ -51,15 +67,67 @@ def main() -> int:
     assert profiles["baseOptionGroups"] == BASE_OPTIONS
     assert list(profiles["profiles"]) == ["A", "B", "C"]
     assert profiles["profiles"]["A"]["additionalOptions"] == []
+    assert profiles["profiles"]["A"]["scalaCliArguments"] == []
     assert profiles["profiles"]["B"]["additionalOptions"] == ["-opt"]
+    assert profiles["profiles"]["B"]["scalaCliArguments"] == [
+        "--scalac-option=-opt"
+    ]
     assert profiles["profiles"]["C"]["additionalOptions"] == [
         "-opt",
         "-opt-inline:ai.trading.coach.s14x.**",
     ]
+    assert profiles["profiles"]["C"]["scalaCliArguments"] == [
+        "--scalac-option=-opt",
+        "--scalac-option=-opt-inline:ai.trading.coach.s14x.**",
+    ]
+    profile_assertion = script("assert-compiler-profiles.sh")
+    assert "scalaCliArguments" in profile_assertion
+    assert "--scalac-option=-opt-inline:ai.trading.coach.s14x.**" in (
+        profile_assertion
+    )
     assert len(profiles["warningNegativeFixtures"]) == 4
     for item in profiles["warningNegativeFixtures"]:
         assert (SCALA_ROOT / item["path"]).is_file()
         assert item["requiredOptions"][-1] == "-Werror"
+        assert item["expectedExitCode"] == 1
+        assert item["expectedDiagnosticPattern"]
+        assert item["forbiddenDiagnosticPattern"]
+
+    compiler_tool = load_tool("run_compiler_profile")
+    intended = compiler_tool.diagnostic_disposition(
+        b"-- Warning: unused import --",
+        expected_pattern="(?i)unused import",
+        forbidden_pattern="(?i)(syntax error|not found:)",
+    )
+    assert intended["status"] == "PASS"
+    unrelated = compiler_tool.diagnostic_disposition(
+        b"-- Error: syntax error --",
+        expected_pattern="(?i)unused import",
+        forbidden_pattern="(?i)(syntax error|not found:)",
+    )
+    assert unrelated["status"] == "FAIL"
+    crashed = compiler_tool.diagnostic_disposition(
+        b"unused import\nOutOfMemoryError",
+        expected_pattern="(?i)unused import",
+        forbidden_pattern="(?i)(internal compiler error|exception|out ?of ?memory)",
+    )
+    assert crashed["status"] == "FAIL"
+    clean_probe = compiler_tool.diagnostic_probe_disposition(
+        b"",
+        b"",
+        option="-Wsafe-init",
+        expected_pattern="(?i)(safe initialization|initialization)",
+        exit_code=0,
+    )
+    assert clean_probe["exitDisposition"] == "CLEAN_NO_BLOCKING_DIAGNOSTIC"
+    failed_probe = compiler_tool.diagnostic_probe_disposition(
+        b"",
+        b"OutOfMemoryError",
+        option="-Wsafe-init",
+        expected_pattern="(?i)(safe initialization|initialization)",
+        exit_code=137,
+    )
+    assert failed_probe["status"] == "FAIL"
 
     project = (SCALA_ROOT / "project.scala").read_text(encoding="utf-8")
     flattened = [option for group in BASE_OPTIONS for option in group]
@@ -79,13 +147,20 @@ def main() -> int:
     )
     for marker in (
         '"s1.4x-scala-hard-compiler-result-v1"',
-        '"s1.4x-scala-input-set-equality-result-v1"',
+        '"compileInputPaths"',
         '"portableArgv"',
         '"resolvedBinarySha256"',
         '"positiveFlags"',
         '"negativeWarnings"',
     ):
         assert marker in compiler_runner
+    negative_loop = compiler_runner.index("for index, fixture in enumerate(")
+    negative_process = compiler_runner.index(
+        'process_id = f"negative-',
+        negative_loop,
+    )
+    assert negative_process > negative_loop
+    assert compiler_runner.count('process_id = f"negative-') == 1
 
     correctness = script("run-correctness-profile.sh")
     for marker in (
@@ -94,6 +169,9 @@ def main() -> int:
         "source-inputs.v1.json",
         "canonical-comparison.json",
         "semantic-comparison.json",
+        "scala-profile-unit-test-result.v1.json",
+        "--require-tests",
+        "assemble_profile_correctness.py",
     ):
         assert marker in correctness
 
@@ -108,6 +186,7 @@ def main() -> int:
 
     compile_benchmarks = script("compile-benchmarks.sh")
     native_smoke = script("run-jmh-native-smoke.sh")
+    native_full = script("run-jmh-native-full.sh")
     assert "--jmh --jmh-version 1.37" in compile_benchmarks
     for marker in (
         "-l",
@@ -115,8 +194,17 @@ def main() -> int:
         "json",
         "validate-native-jmh",
         "S1_4X_EFFECTIVE_JVM_EVIDENCE_DIR",
+        "create-jvm-allowlist",
+        "--jvm-allowlist",
+        "--expected-measurement-iterations",
     ):
         assert marker in native_smoke
+    for marker in (
+        "assert-selected-profile.sh",
+        "--mode full",
+        "S1_4X_SCALA_SELECTED_PROFILE_RESULT",
+    ):
+        assert marker in native_full
 
     benchmark_invocation = (
         SCALA_ROOT
@@ -149,6 +237,43 @@ def main() -> int:
     assert "capability-smoke-plan.v1.json" in capability
     assert "feature-decisions.v1.json" in feature
     assert "lint-exceptions.v1.json" in feature
+    capability_runner = (
+        TOOLS_ROOT / "assemble_capability_results.py"
+    ).read_text(encoding="utf-8")
+    assert "assemble_input_set_result" in capability_runner
+    assert "scala-input-set-equality-result.v1.json" in capability_runner
+    assert "SCALA_CAPABILITY_EVIDENCE" not in capability_runner
+    toolchain_receipt = script("run-toolchain-identity.sh")
+    assert "scala-toolchain-identity-result.v1.json" in toolchain_receipt
+    profile_contract = script("test-profile-correctness.sh")
+    assert "test_profile_correctness.py" in profile_contract
+    source_policy = script("check-source-policy.sh")
+    assert 'S1_ROOT="$(cd -- "$SCALA_ROOT/.."' in source_policy
+    selected_profile_assertion = script("assert-selected-profile.sh")
+    assert "DUPLICATE_JSON_KEY" in selected_profile_assertion
+    assert "NONFINITE_JSON" in selected_profile_assertion
+
+    planned_features = json.loads(
+        (SCALA_ROOT.parent / "contract/feature-decisions.v1.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    planned_scala = {
+        item["featureId"]: item["decision"]
+        for item in planned_features["entries"]
+        if item["featureId"].startswith("scala.")
+    }
+    feature_evidence = json.loads(
+        (SCALA_ROOT / "feature-evidence.v1.json").read_text(encoding="utf-8")
+    )
+    assert {
+        item["featureId"]: item["decision"]
+        for item in feature_evidence["entries"]
+    } == planned_scala
+    assert all(
+        item["status"].startswith("pending-")
+        for item in feature_evidence["entries"]
+    )
 
     containerfile = (SCALA_ROOT / "Containerfile").read_text(encoding="utf-8")
     assert "ARG S1_4X_SCALA_BASE_IMAGE" in containerfile

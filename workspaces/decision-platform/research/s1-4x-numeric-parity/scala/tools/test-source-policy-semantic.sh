@@ -11,10 +11,13 @@ if [[ -n "$evidence_root" ]]; then
     exit 64
   }
 else
-  temporary="$(mktemp -d -t s1-4x-scala-semantic.XXXXXXXX)"
+  TEST_TMP_ROOT="${S1_4X_TEST_TMP_ROOT:-${S1_4X_CACHE_ROOT:-$HOME/.cache/s1-4x}/tmp}"
+  mkdir -p "$TEST_TMP_ROOT"
+  TEST_TMP_ROOT="$(realpath -- "$TEST_TMP_ROOT")"
+  temporary="$(mktemp -d -p "$TEST_TMP_ROOT" s1-4x-scala-semantic.XXXXXXXX)"
   evidence_root="$temporary/evidence"
   cleanup() {
-    [[ "$temporary" == /tmp/s1-4x-scala-semantic.* ]] || {
+    [[ "$temporary" == "$TEST_TMP_ROOT"/s1-4x-scala-semantic.* ]] || {
       printf 'refusing unsafe temporary cleanup: %s\n' "$temporary" >&2
       exit 1
     }

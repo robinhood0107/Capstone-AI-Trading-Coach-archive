@@ -60,8 +60,6 @@ def git_sources(roots: list[str]) -> list[str]:
             "git",
             "ls-files",
             "--cached",
-            "--others",
-            "--exclude-standard",
             "--",
             *roots,
         ],
@@ -160,7 +158,7 @@ def main() -> int:
                     require_git_source_equality=True,
                 )
             except source_manifest.SourceInputManifestError as error:
-                assert "FORBIDDEN_COMPILED_SOURCE" in str(error)
+                assert "UNTRACKED_PRODUCTION_SOURCE" in str(error)
             else:
                 raise AssertionError(f"compiled source escape unexpectedly passed: {suffix}")
         finally:

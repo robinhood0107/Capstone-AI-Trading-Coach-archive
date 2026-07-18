@@ -5,10 +5,13 @@ SCALA_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 S1_ROOT="$(cd -- "$SCALA_ROOT/.." && pwd -P)"
 PLAN="$S1_ROOT/benchmarks/benchmark-plan.v1.json"
 POLICY="$S1_ROOT/contract/scala-source-policy.v1.json"
-temporary="$(mktemp -d -t s1-4x-scala-policy.XXXXXXXX)"
+TEST_TMP_ROOT="${S1_4X_TEST_TMP_ROOT:-${S1_4X_CACHE_ROOT:-$HOME/.cache/s1-4x}/tmp}"
+mkdir -p "$TEST_TMP_ROOT"
+TEST_TMP_ROOT="$(realpath -- "$TEST_TMP_ROOT")"
+temporary="$(mktemp -d -p "$TEST_TMP_ROOT" s1-4x-scala-policy.XXXXXXXX)"
 
 cleanup() {
-  [[ "$temporary" == /tmp/s1-4x-scala-policy.* ]] || {
+  [[ "$temporary" == "$TEST_TMP_ROOT"/s1-4x-scala-policy.* ]] || {
     printf 'refusing unsafe temporary cleanup: %s\n' "$temporary" >&2
     exit 1
   }

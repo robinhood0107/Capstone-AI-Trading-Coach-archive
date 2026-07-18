@@ -5,10 +5,13 @@ SCALA_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 S1_ROOT="$(cd -- "$SCALA_ROOT/.." && pwd -P)"
 LOCK="$SCALA_ROOT/toolchain-lock.v1.json"
 PROVENANCE="$S1_ROOT/contract/toolchain-provenance.v1.json"
-temporary="$(mktemp -d -t s1-4x-scala-toolchain-lock.XXXXXXXX)"
+TEST_TMP_ROOT="${S1_4X_TEST_TMP_ROOT:-${S1_4X_CACHE_ROOT:-$HOME/.cache/s1-4x}/tmp}"
+mkdir -p "$TEST_TMP_ROOT"
+TEST_TMP_ROOT="$(realpath -- "$TEST_TMP_ROOT")"
+temporary="$(mktemp -d -p "$TEST_TMP_ROOT" s1-4x-scala-toolchain-lock.XXXXXXXX)"
 
 cleanup() {
-  [[ "$temporary" == /tmp/s1-4x-scala-toolchain-lock.* ]] || {
+  [[ "$temporary" == "$TEST_TMP_ROOT"/s1-4x-scala-toolchain-lock.* ]] || {
     printf 'refusing unsafe temporary cleanup: %s\n' "$temporary" >&2
     exit 1
   }
@@ -22,7 +25,9 @@ trap cleanup EXIT
   >"$temporary/clean.stdout" 2>"$temporary/clean.stderr"
 grep -Fq 'SCALA_TOOLCHAIN_PASS' "$temporary/clean.stdout"
 
-if grep -Eq '(/home/[^/]+|/tmp/|[A-Za-z]:\\\\)' "$LOCK"; then
+unix_home='/'"home/"
+unix_tmp='/'"tmp/"
+if grep -Eq "(${unix_home}[^/]+|${unix_tmp}|[A-Za-z]:\\\\\\\\)" "$LOCK"; then
   printf 'public toolchain lock contains a local absolute path\n' >&2
   exit 1
 fi

@@ -3,10 +3,13 @@ set -euo pipefail
 
 SCALA_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 RUNNER="$SCALA_ROOT/tools/run-property-evidence.sh"
-temporary="$(mktemp -d -t s1-4x-scala-wrapper.XXXXXXXX)"
+TEST_TMP_ROOT="${S1_4X_TEST_TMP_ROOT:-${S1_4X_CACHE_ROOT:-$HOME/.cache/s1-4x}/tmp}"
+mkdir -p "$TEST_TMP_ROOT"
+TEST_TMP_ROOT="$(realpath -- "$TEST_TMP_ROOT")"
+temporary="$(mktemp -d -p "$TEST_TMP_ROOT" s1-4x-scala-wrapper.XXXXXXXX)"
 
 cleanup() {
-  [[ "$temporary" == /tmp/s1-4x-scala-wrapper.* ]] || {
+  [[ "$temporary" == "$TEST_TMP_ROOT"/s1-4x-scala-wrapper.* ]] || {
     printf 'refusing unsafe temporary cleanup: %s\n' "$temporary" >&2
     exit 1
   }

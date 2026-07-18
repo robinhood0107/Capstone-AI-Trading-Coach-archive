@@ -3,12 +3,15 @@ set -euo pipefail
 
 SCALA_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 S1_ROOT="$(cd -- "$SCALA_ROOT/.." && pwd -P)"
-SCALA_CLI="${S1_4X_SCALA_CLI_BIN:-/home/pjjpj/.local/bin/scala-cli}"
+SCALA_CLI="${S1_4X_SCALA_CLI_BIN:?set exact Scala CLI 1.15.0 binary path from readiness packet}"
 PLAN="$S1_ROOT/benchmarks/benchmark-plan.v1.json"
-temporary="$(mktemp -d -t s1-4x-scala-setup.XXXXXXXX)"
+TEST_TMP_ROOT="${S1_4X_TEST_TMP_ROOT:-${S1_4X_CACHE_ROOT:-$HOME/.cache/s1-4x}/tmp}"
+mkdir -p "$TEST_TMP_ROOT"
+TEST_TMP_ROOT="$(realpath -- "$TEST_TMP_ROOT")"
+temporary="$(mktemp -d -p "$TEST_TMP_ROOT" s1-4x-scala-setup.XXXXXXXX)"
 
 cleanup() {
-  [[ "$temporary" == /tmp/s1-4x-scala-setup.* ]] || {
+  [[ "$temporary" == "$TEST_TMP_ROOT"/s1-4x-scala-setup.* ]] || {
     printf 'refusing unsafe temporary cleanup: %s\n' "$temporary" >&2
     exit 1
   }
