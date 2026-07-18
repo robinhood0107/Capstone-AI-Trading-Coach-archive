@@ -9,6 +9,7 @@ steps:
       space_surround: false
   - trailing_whitespace: {}
 columns: 100
-newline: native
+newline: lf
+exit_code: error_on_format
 language_extensions:
   - GHC2024

@@ -12,22 +12,56 @@
     - -XNoDeriveAnyClass
 - modules:
     - name:
+        - Control.Monad.IO.Class
         - Debug.Trace
         - Foreign
+        - Foreign.C
+        - Foreign.Ptr
         - GHC.IO.Unsafe
+        - System.Environment
+        - System.IO
         - System.IO.Unsafe
+        - System.Random
       within: []
 - functions:
     - name:
+        - "!!"
+        - Control.Exception.throw
+        - Control.Exception.throwIO
+        - Data.Either.fromLeft
+        - Data.Either.fromRight
+        - Data.Maybe.fromJust
         - error
+        - foldl1
+        - fromJust
+        - fromLeft
+        - fromRight
         - head
         - init
         - last
+        - maximum
+        - minimum
         - read
         - tail
+        - throw
+        - throwIO
         - undefined
         - unsafeCoerce
         - unsafeDupablePerformIO
         - unsafeInterleaveIO
         - unsafePerformIO
+      within: []
+- extensions:
+    - name:
+        - CPP
+        - DeriveAnyClass
+        - DerivingVia
+        - ForeignFunctionInterface
+        - GeneralizedNewtypeDeriving
+        - LinearTypes
+        - MagicHash
+        - Strict
+        - TemplateHaskell
+        - Trustworthy
+        - Unsafe
       within: []
