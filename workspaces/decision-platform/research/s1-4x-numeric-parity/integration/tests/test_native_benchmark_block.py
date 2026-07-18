@@ -1467,7 +1467,7 @@ class NativeBenchmarkBlockTests(TestCase):
 
         lock_tamper_evidence = evidence_for(raw_document)
         tampered_lock = json.loads(toolchain_lock.read_text(encoding="utf-8"))
-        tampered_lock["scalaCli"]["binarySha256"] = "0" * 64
+        tampered_lock["jdk"]["javaExecutableSha256"] = "0" * 64
         toolchain_lock.write_text(
             json.dumps(tampered_lock, sort_keys=True),
             encoding="utf-8",
