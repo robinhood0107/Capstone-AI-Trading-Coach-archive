@@ -45,7 +45,13 @@ jq -e '
   .jdk.javaHomePathId == "TEMURIN_25_0_3_9_LTS" and
   .scalaCli.pathId == "SCALA_CLI_1_15_0" and
   .scalafix.pathId == "SCALAFIX_0_14_7" and
-  .scalafmt.runnerPathId == "SCALA_CLI_1_15_0"
+  .scalafmt.runnerPathId == "SCALA_CLI_1_15_0" and
+  .scalafmt.archivePathId ==
+    "S1_4X_CACHE_ROOT/coursier/https/github.com/scalameta/scalafmt/releases/download/v3.11.4/scalafmt-x86_64-pc-linux.zip" and
+  .scalafmt.executablePathId ==
+    "COURSIER_ARCHIVE_CACHE/https/github.com/scalameta/scalafmt/releases/download/v3.11.4/scalafmt-x86_64-pc-linux.zip/scalafmt" and
+  .scalafmt.resolvedVersionOutput == "scalafmt 3.11.4" and
+  .scalafmt.networkPolicy == "OFFLINE_PINNED_LAUNCHER"
 ' "$LOCK" >/dev/null
 
 expect_tamper_rejected() {
@@ -71,6 +77,10 @@ expect_tamper_rejected scala-cli-sha \
   ".scalaCli.binarySha256 = $zero"
 expect_tamper_rejected scalafmt-config-sha \
   ".scalafmt.configSha256 = $zero"
+expect_tamper_rejected scalafmt-archive-sha \
+  ".scalafmt.archiveSha256 = $zero"
+expect_tamper_rejected scalafmt-executable-sha \
+  ".scalafmt.executableSha256 = $zero"
 expect_tamper_rejected scalafix-sha \
   ".scalafix.binarySha256 = $zero"
 expect_tamper_rejected stack-archive-sha \
@@ -78,4 +88,4 @@ expect_tamper_rejected stack-archive-sha \
 expect_tamper_rejected installed-stack-role \
   '.sharedDistributionProvenance.upstreamStandaloneAssetRole = "installed"'
 
-printf 'SCALA_TOOLCHAIN_LOCK_TEST_PASS tamperCases=7\n'
+printf 'SCALA_TOOLCHAIN_LOCK_TEST_PASS tamperCases=9\n'

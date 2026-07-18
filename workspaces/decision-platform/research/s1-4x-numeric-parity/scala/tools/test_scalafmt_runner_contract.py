@@ -25,6 +25,7 @@ def load_runner():
 def main() -> int:
     runner = load_runner()
     scala_cli = Path("/tool/scala-cli")
+    scalafmt_launcher = Path("/cache/scalafmt")
     config = SCALA_ROOT / ".scalafmt.conf"
     sources = [
         SCALA_ROOT / "project.scala",
@@ -32,12 +33,14 @@ def main() -> int:
     ]
     apply_command = runner.format_command(
         scala_cli=scala_cli,
+        scalafmt_launcher=scalafmt_launcher,
         config=config,
         sources=sources,
         check=False,
     )
     check_command = runner.format_command(
         scala_cli=scala_cli,
+        scalafmt_launcher=scalafmt_launcher,
         config=config,
         sources=sources,
         check=True,
@@ -50,6 +53,9 @@ def main() -> int:
         "3.11.4",
         "--scalafmt-conf",
         str(config),
+        "--scalafmt-launcher",
+        str(scalafmt_launcher),
+        "--offline",
     ]
     assert apply_command == [*prefix, *suffix]
     assert check_command == [*prefix, *suffix, "--check"]
@@ -66,8 +72,14 @@ def main() -> int:
         '"firstPassSourceSha256"',
         '"secondPassSourceSha256"',
         '"sourceInputManifestSha256"',
+        '"archivePathId"',
+        '"executablePathId"',
+        '"resolvedVersionOutput"',
+        '"resolutionLogUri"',
+        '"networkPolicy"',
     ):
         assert required in runner_source
+    assert '"OFFLINE_PINNED_LAUNCHER"' in runner_source
     assert "open(\"x\"" in runner_source
 
     print("SCALA_SCALAFMT_RUNNER_CONTRACT_TEST_PASS commands=2")
