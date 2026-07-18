@@ -325,7 +325,7 @@ def validate_managed_ignored_diagnostics(
 
 def _import_symbols(source: str, module: str) -> tuple[str, ...]:
     matched = re.search(
-        rf"(?ms)^import {re.escape(module)}\s*\((.*?)\)\s*$",
+        rf"(?ms)^import\s+{re.escape(module)}\s*\((.*?)\)\s*$",
         source,
     )
     if matched is None:
