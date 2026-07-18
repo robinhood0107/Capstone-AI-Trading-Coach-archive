@@ -829,6 +829,15 @@ def _terminate_process_group(process: subprocess.Popen[bytes]) -> None:
         raise ContractError("TIMEOUT_PROCESS_LEADER_NOT_REAPED")
 
 
+def _reject_surviving_process_group(process: subprocess.Popen[bytes]) -> None:
+    """leader가 끝난 뒤 남은 descendant를 정리하고 해당 block을 무효화한다."""
+
+    if not _process_group_exists(process.pid):
+        return
+    _terminate_process_group(process)
+    raise ContractError("NATIVE_PROCESS_GROUP_SURVIVED_EXIT")
+
+
 def _run_process(
     command: list[str],
     *,
@@ -885,6 +894,7 @@ def _run_process(
                     file=sys.stderr,
                     flush=True,
                 )
+    _reject_surviving_process_group(process)
     if return_code != 0:
         raise ContractError(f"NATIVE_PROCESS_FAILED:{return_code}")
 
