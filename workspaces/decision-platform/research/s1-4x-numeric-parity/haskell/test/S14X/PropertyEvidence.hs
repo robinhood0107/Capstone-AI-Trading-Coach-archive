@@ -6,14 +6,16 @@ module S14X.PropertyEvidence
 where
 
 import           Control.Monad (unless, when)
-import           Data.Aeson (FromJSON (parseJSON), Value, eitherDecodeFileStrict', encode, object,
-                             withObject, (.:), (.=))
+import           Data.Aeson (FromJSON (parseJSON), Value, eitherDecodeFileStrict',
+                             eitherDecodeStrict', encode, object, withObject, (.:), (.=))
 import           Data.ByteString (ByteString)
+import           Data.Char (isDigit)
 import           Data.List (sort)
 import           Data.Text (Text)
 import           Data.Time.Clock (UTCTime, getCurrentTime)
 import           Data.Time.Format (defaultTimeLocale, formatTime)
-import           System.Directory (doesDirectoryExist, doesFileExist, doesPathExist, listDirectory)
+import           System.Directory (doesDirectoryExist, doesPathExist, getExecutablePath,
+                                   listDirectory, pathIsSymbolicLink)
 import           System.FilePath (makeRelative, takeExtension, (</>))
 import           Test.QuickCheck (Args, Property, Result, chatty, isSuccess, maxDiscardRatio,
                                   maxShrinks, maxSuccess, numDiscarded, numTests, output,
@@ -64,6 +66,11 @@ data SeedExecution = SeedExecution
   }
   deriving stock (Eq, Show)
 
+newtype SelectedProfile = SelectedProfile
+  { selectedSourceTreeSha256 :: Text
+  }
+  deriving stock (Eq, Show)
+
 instance FromJSON SeedCorpus where
   parseJSON =
     withObject "SeedCorpus" $ \objectValue ->
@@ -94,10 +101,32 @@ instance FromJSON ErrorEntry where
         <*> objectValue .: "track"
         <*> objectValue .: "verificationMode"
 
+instance FromJSON SelectedProfile where
+  parseJSON =
+    withObject "SelectedProfile" $ \objectValue ->
+      SelectedProfile <$> objectValue .: "sourceTreeSha256"
+
 runPropertyEvidence :: [String] -> IO ()
 runPropertyEvidence arguments =
   case arguments of
-    [outputDirectory, haskellRoot, propertyPlanPath, seedCorpusPath, functionRegistryPath, errorRegistryPath, outerRunnerPath] ->
+    [ outputDirectory,
+      haskellRoot,
+      propertyPlanPath,
+      seedCorpusPath,
+      functionRegistryPath,
+      errorRegistryPath,
+      outerRunnerPath,
+      selectedProfilePath,
+      sourceManifestPath,
+      profileId,
+      profileOptions,
+      profileOptionsHash,
+      buildArgumentsHash,
+      selectedProfileHash,
+      expectedSourceManifestHash,
+      expectedSourceTreeHash,
+      expectedPropertyClosureHash
+      ] ->
       execute
         outputDirectory
         haskellRoot
@@ -106,9 +135,19 @@ runPropertyEvidence arguments =
         functionRegistryPath
         errorRegistryPath
         outerRunnerPath
+        selectedProfilePath
+        sourceManifestPath
+        profileId
+        profileOptions
+        profileOptionsHash
+        buildArgumentsHash
+        selectedProfileHash
+        expectedSourceManifestHash
+        expectedSourceTreeHash
+        expectedPropertyClosureHash
     _ ->
       fail
-        "property evidence requires: OUTPUT_DIR HASKELL_ROOT PROPERTY_PLAN SEED_CORPUS FUNCTION_REGISTRY ERROR_REGISTRY OUTER_RUNNER"
+        "property evidence requires: OUTPUT_DIR HASKELL_ROOT PROPERTY_PLAN SEED_CORPUS FUNCTION_REGISTRY ERROR_REGISTRY OUTER_RUNNER SELECTED_PROFILE SOURCE_MANIFEST PROFILE_ID PROFILE_OPTIONS PROFILE_OPTIONS_SHA256 BUILD_ARGV_SHA256 SELECTED_PROFILE_SHA256 SOURCE_MANIFEST_SHA256 SOURCE_TREE_SHA256 PROPERTY_CLOSURE_SHA256"
 
 execute ::
   FilePath ->
@@ -118,6 +157,16 @@ execute ::
   FilePath ->
   FilePath ->
   FilePath ->
+  FilePath ->
+  FilePath ->
+  String ->
+  String ->
+  String ->
+  String ->
+  String ->
+  String ->
+  String ->
+  String ->
   IO ()
 execute
   outputDirectory
@@ -126,7 +175,17 @@ execute
   seedCorpusPath
   functionRegistryPath
   errorRegistryPath
-  outerRunnerPath = do
+  outerRunnerPath
+  selectedProfilePath
+  sourceManifestPath
+  profileId
+  profileOptions
+  profileOptionsHash
+  buildArgumentsHash
+  selectedProfileHash
+  expectedSourceManifestHash
+  expectedSourceTreeHash
+  expectedPropertyClosureHash = do
     validateAbsoluteInputs
       [ outputDirectory,
         haskellRoot,
@@ -134,8 +193,21 @@ execute
         seedCorpusPath,
         functionRegistryPath,
         errorRegistryPath,
-        outerRunnerPath
+        outerRunnerPath,
+        selectedProfilePath,
+        sourceManifestPath
       ]
+    unless
+      ( selectedProfilePath == haskellRoot </> "selected-profile.v1.json"
+          && sourceManifestPath == haskellRoot </> "source-inputs.v1.json"
+      )
+      (fail "profile/manifest paths must be the fixed Haskell-root artifacts")
+    validateProfileIdentity profileId profileOptions profileOptionsHash
+    validateSha256 "build argv" buildArgumentsHash
+    validateSha256 "selected profile" selectedProfileHash
+    validateSha256 "source manifest" expectedSourceManifestHash
+    validateSha256 "source tree" expectedSourceTreeHash
+    validateSha256 "property closure" expectedPropertyClosureHash
     seedCorpus <- decodeFile seedCorpusPath
     functionRegistry <- decodeFile functionRegistryPath
     errorRegistry <- decodeFile errorRegistryPath
@@ -145,15 +217,46 @@ execute
     propertyPlanBytes <- BS.readFile propertyPlanPath
     seedCorpusBytes <- BS.readFile seedCorpusPath
     runnerBytes <- BS.readFile outerRunnerPath
-    closureHash <- sourceClosureSha256 haskellRoot
+    closureHash <-
+      validateExecutionClosure
+        haskellRoot
+        selectedProfilePath
+        sourceManifestPath
+        (Text.pack selectedProfileHash)
+        (Text.pack expectedSourceManifestHash)
+        (Text.pack expectedSourceTreeHash)
+        (Text.pack expectedPropertyClosureHash)
+    executablePath <- getExecutablePath
     startedAt <- getCurrentTime
     executions <- traverse (runOneProperty seeds) propertyCases
+    postExecutionClosureHash <-
+      validateExecutionClosure
+        haskellRoot
+        selectedProfilePath
+        sourceManifestPath
+        (Text.pack selectedProfileHash)
+        (Text.pack expectedSourceManifestHash)
+        (Text.pack expectedSourceTreeHash)
+        (Text.pack expectedPropertyClosureHash)
+    unless
+      (postExecutionClosureHash == closureHash)
+      (fail "property execution closure changed while properties were running")
     finishedAt <- getCurrentTime
     let propertyPlanHash = sha256Text propertyPlanBytes
         runnerHash = sha256Text runnerBytes
         seedCorpusHash = sha256Text seedCorpusBytes
-        commandArgumentsHash =
+        outerCommandArgumentsHash =
           canonicalOuterCommandSha256 outerRunnerPath outputDirectory
+        commandArgumentsHash =
+          sha256Text
+            ( LBS.toStrict
+                ( encode
+                    ( Text.pack executablePath
+                        : "--s1-4x-property-evidence"
+                        : fmap Text.pack arguments
+                    )
+                )
+            )
         propertyReportPath = outputDirectory </> "haskell-property-report.v1.json"
         registryReportPath = outputDirectory </> "haskell-registry-report.v1.json"
         executionReportPath = outputDirectory </> "haskell-property-execution-evidence.v1.json"
@@ -173,7 +276,15 @@ execute
           runnerHash
           closureHash
           commandArgumentsHash
+          outerCommandArgumentsHash
           seedCorpusHash
+          (Text.pack profileId)
+          (Text.pack profileOptions)
+          (Text.pack profileOptionsHash)
+          (Text.pack buildArgumentsHash)
+          (Text.pack selectedProfileHash)
+          (Text.pack expectedSourceManifestHash)
+          (Text.pack expectedSourceTreeHash)
           startedAt
           finishedAt
           seeds
@@ -228,6 +339,77 @@ validateSeedCorpus (SeedCorpus schemaVersion seeds) = do
            ]
     )
     (fail "seed corpus values mismatch")
+
+validateProfileIdentity :: String -> String -> String -> IO ()
+validateProfileIdentity profileId profileOptions profileOptionsHash = do
+  let expectedOptions =
+        case profileId of
+          "baseline-o0-fasm" -> ["-O0", "-fasm"]
+          "optimized-o2-fasm" -> ["-O2", "-fasm"]
+          _ -> []
+      actualOptions = words profileOptions
+      actualHash =
+        sha256Text
+          (LBS.toStrict (encode (fmap Text.pack actualOptions)))
+  unless (not (null expectedOptions) && actualOptions == expectedOptions)
+    (fail "selected profile id/options mismatch")
+  unless (Text.pack profileOptionsHash == actualHash)
+    (fail "selected profile options SHA-256 mismatch")
+
+validateSha256 :: String -> String -> IO ()
+validateSha256 label digest =
+  unless
+    (length digest == 64 && all isLowerHex digest)
+    (fail (label <> " SHA-256 must be lowercase hexadecimal"))
+  where
+    isLowerHex character =
+      isDigit character
+        || ('a' <= character && character <= 'f')
+
+validateExecutionClosure ::
+  FilePath ->
+  FilePath ->
+  FilePath ->
+  Text ->
+  Text ->
+  Text ->
+  Text ->
+  IO Text
+validateExecutionClosure
+  haskellRoot
+  selectedProfilePath
+  sourceManifestPath
+  expectedSelectedProfileHash
+  expectedSourceManifestHash
+  expectedSourceTreeHash
+  expectedPropertyClosureHash = do
+    selectedProfileBytes <- BS.readFile selectedProfilePath
+    sourceManifestBytes <- BS.readFile sourceManifestPath
+    unless
+      (sha256Text selectedProfileBytes == expectedSelectedProfileHash)
+      (fail "selected profile SHA-256 does not match the pre-build bytes")
+    unless
+      (sha256Text sourceManifestBytes == expectedSourceManifestHash)
+      (fail "source manifest SHA-256 does not match the pre-build bytes")
+    selectedProfile <-
+      case eitherDecodeStrict' selectedProfileBytes of
+        Left failure -> fail ("selected profile decode failed: " <> failure)
+        Right value -> pure value
+    unless
+      (selectedSourceTreeSha256 selectedProfile == expectedSourceTreeHash)
+      (fail "selected profile source-tree SHA-256 does not match the pre-build closure")
+    closureHash <- sourceClosureSha256 haskellRoot
+    unless
+      (closureHash == expectedPropertyClosureHash)
+      (fail "property source/config closure does not match the pre-build closure")
+    selectedProfileBytesAfter <- BS.readFile selectedProfilePath
+    sourceManifestBytesAfter <- BS.readFile sourceManifestPath
+    unless
+      ( selectedProfileBytesAfter == selectedProfileBytes
+          && sourceManifestBytesAfter == sourceManifestBytes
+      )
+      (fail "profile/manifest bytes changed during closure validation")
+    pure closureHash
 
 validateRegistries :: FunctionRegistry -> ErrorRegistry -> IO ()
 validateRegistries (FunctionRegistry functions) (ErrorRegistry errors) = do
@@ -340,6 +522,14 @@ executionReport ::
   Text ->
   Text ->
   Text ->
+  Text ->
+  Text ->
+  Text ->
+  Text ->
+  Text ->
+  Text ->
+  Text ->
+  Text ->
   UTCTime ->
   UTCTime ->
   [Int] ->
@@ -350,7 +540,15 @@ executionReport
   runnerHash
   closureHash
   commandArgumentsHash
+  outerCommandArgumentsHash
   seedCorpusHash
+  profileId
+  profileOptions
+  profileOptionsHash
+  buildArgumentsHash
+  selectedProfileHash
+  sourceManifestHash
+  sourceTreeHash
   startedAt
   finishedAt
   seeds
@@ -360,10 +558,19 @@ executionReport
         "implementation" .= ("haskell" :: Text),
         "propertyPlanSha256" .= propertyPlanHash,
         "framework" .= ("QuickCheck-2.15.0.1" :: Text),
-        "toolchainProfile" .= toolchainProfile,
+        "toolchainProfile" .= toolchainProfile profileId,
         "commandArgvSha256" .= commandArgumentsHash,
+        "outerCommandArgvSha256" .= outerCommandArgumentsHash,
+        "buildArgvSha256" .= buildArgumentsHash,
         "runnerSha256" .= runnerHash,
         "sourceClosureSha256" .= closureHash,
+        "sourceInputManifestSha256" .= sourceManifestHash,
+        "selectedProfileSha256" .= selectedProfileHash,
+        "sourceTreeSha256" .= sourceTreeHash,
+        "propertyClosureSha256" .= closureHash,
+        "profileGhcOptions" .= Text.words profileOptions,
+        "profileOptionsSha256" .= profileOptionsHash,
+        "stackRootPathId" .= ("S1_4X_CACHE_ROOT/stack-root" :: Text),
         "seedCorpusSha256" .= seedCorpusHash,
         "seedCount" .= length seeds,
         "minimumSuccessfulPerSeed" .= (42 :: Int),
@@ -423,9 +630,9 @@ canonicalOuterCommandSha256 runnerPath outputDirectory =
         )
     )
 
-toolchainProfile :: Text
-toolchainProfile =
-  implementationLabel <> "-baseline-o0-fasm"
+toolchainProfile :: Text -> Text
+toolchainProfile profileId =
+  implementationLabel <> "-" <> profileId
 
 publishJson :: FilePath -> Value -> IO ()
 publishJson path value = do
@@ -443,20 +650,22 @@ sourceClosureSha256 root = do
 candidateClosureFiles :: FilePath -> IO [FilePath]
 candidateClosureFiles root = do
   sourceFiles <- fmap concat (traverse (sourceFilesBelow root) ["src", "app", "test", "benchmark"])
-  configurationFiles <-
-    filterMFile
-      [ root </> "package.yaml",
-        root </> "stack.yaml",
-        root </> "stack-ghc-9.14.1.yaml",
-        root </> "stack.yaml.lock",
-        root </> "selected-profile.v1.json",
-        root </> "Containerfile"
-      ]
+  let configurationFiles =
+        [ root </> "package.yaml",
+          root </> "s1-4x-haskell.cabal",
+          root </> "stack.yaml",
+          root </> "stack-ghc-9.14.1.yaml",
+          root </> "stack.yaml.lock",
+          root </> "selected-profile.v1.json",
+          root </> "source-inputs.v1.json"
+        ]
   pure (sort (configurationFiles <> sourceFiles))
 
 sourceFilesBelow :: FilePath -> FilePath -> IO [FilePath]
 sourceFilesBelow root relative = do
   let directory = root </> relative
+  rootSymbolic <- pathIsSymbolicLink directory
+  when rootSymbolic (fail ("property source root symlink is forbidden: " <> directory))
   exists <- doesDirectoryExist directory
   if not exists
     then pure []
@@ -468,18 +677,17 @@ sourceFilesBelow root relative = do
       pure (concat nested)
     visit directory entry = do
       let path = directory </> entry
+      symbolic <- pathIsSymbolicLink path
+      when symbolic (fail ("property source symlink is forbidden: " <> path))
       isDirectory <- doesDirectoryExist path
       if isDirectory
         then walk path
         else pure [path | takeExtension path == ".hs"]
 
-filterMFile :: [FilePath] -> IO [FilePath]
-filterMFile paths = do
-  statuses <- traverse doesFileExist paths
-  pure [path | (path, True) <- zip paths statuses]
-
 closureEntry :: FilePath -> FilePath -> IO ByteString
 closureEntry root path = do
+  symbolic <- pathIsSymbolicLink path
+  when symbolic (fail ("property closure symlink is forbidden: " <> path))
   bytes <- BS.readFile path
   let relative = Text.pack (makeRelative root path)
       digest = sha256Text bytes

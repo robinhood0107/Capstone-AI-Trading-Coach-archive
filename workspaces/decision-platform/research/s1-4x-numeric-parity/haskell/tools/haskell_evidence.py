@@ -46,6 +46,15 @@ class ProfileSelection:
 
 CANDIDATE_ROOTS = ("src", "app", "test", "benchmark")
 CONFIGURATION_PATHS = ("package.yaml", "selected-profile.v1.json")
+PROPERTY_CLOSURE_CONFIGURATION_PATHS = (
+    "package.yaml",
+    "s1-4x-haskell.cabal",
+    "stack.yaml",
+    "stack.yaml.lock",
+    "stack-ghc-9.14.1.yaml",
+    "selected-profile.v1.json",
+    "source-inputs.v1.json",
+)
 FORBIDDEN_COMPILED_SUFFIXES = (".lhs", ".hsc", ".hs-boot")
 MANDATORY_INPUT_SETS = {
     "tracked": "files",
@@ -84,6 +93,40 @@ PROFILE_ORDER_BLOCKS = [
     ["optimized-o2-fasm", "baseline-o0-fasm"],
     ["baseline-o0-fasm", "optimized-o2-fasm"],
 ]
+PENDING_PROFILE_FIELDS = {
+    "schemaVersion",
+    "selectionStatus",
+    "profileId",
+    "ghcOptions",
+    "compilerVersion",
+    "compilerSha256",
+    "sourceTreeSha256",
+    "optionsSha256",
+    "qualificationPlanSha256",
+    "selectorConfigSha256",
+    "fallbackProfile",
+    "selectedBy",
+    "fullCorrectnessStatus",
+    "qualificationStatus",
+}
+FINAL_PROFILE_FIELDS = {
+    "schemaVersion",
+    "profileId",
+    "ghcOptions",
+    "compilerVersion",
+    "compilerSha256",
+    "sourceTreeSha256",
+    "optionsSha256",
+    "fullCorrectnessSha256",
+    "qualificationPlanSha256",
+    "qualificationArtifactSha256",
+    "selectorConfigSha256",
+    "fallbackProfile",
+    "selectedBy",
+}
+AUTHORITATIVE_GHC_SHA256 = (
+    "d0c0dd79a1bcc5dce3c9e73613c1be51f61b78d5ef7c0970ffe9f142a90a5e2c"
+)
 
 
 def canonical_json_bytes(value: Any, *, trailing_newline: bool = False) -> bytes:
@@ -418,6 +461,135 @@ def benchmark_source_tree_sha256(root: Path) -> str:
     """Profile artifact가 묶는 candidate source/build closure SHA-256."""
 
     return canonical_sha256(benchmark_source_tree_entries(root.resolve(strict=True)))
+
+
+def property_execution_closure_sha256(root: Path) -> str:
+    """Property binary와 evidence가 공유하는 current source/config bytes를 결속한다."""
+
+    root = root.resolve(strict=True)
+    paths = _candidate_source_paths(root)
+    for relative in PROPERTY_CLOSURE_CONFIGURATION_PATHS:
+        path = root / relative
+        if path.is_symlink() or not path.is_file():
+            raise EvidenceError(f"property closure input is missing or unsafe: {relative}")
+        paths.append(path)
+    entries: list[bytes] = []
+    for path in sorted(
+        paths,
+        key=lambda item: item.relative_to(root).as_posix().encode(),
+    ):
+        relative = path.relative_to(root).as_posix()
+        entries.append(
+            relative.encode("utf-8")
+            + b"\0"
+            + sha256_file(path).encode("ascii")
+            + b"\n"
+        )
+    return hashlib.sha256(b"".join(entries)).hexdigest()
+
+
+def _require_sha256(value: Any, *, field: str) -> str:
+    if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
+        raise EvidenceError(f"selected profile {field} is not lowercase SHA-256")
+    return value
+
+
+def validate_selected_profile_document(
+    document: Any,
+    *,
+    expected_compiler_sha256: str,
+    expected_source_tree_sha256: str,
+    expected_qualification_plan_sha256: str,
+    expected_selector_config_sha256: str,
+) -> dict[str, Any]:
+    """Pending/final profile의 options와 source/plan identity를 exact-object로 검증한다."""
+
+    if not isinstance(document, dict):
+        raise EvidenceError("selected profile must be an object")
+    schema_version = document.get("schemaVersion")
+    if schema_version == "s1.4x-haskell-selected-profile-pending-v1":
+        expected_fields = PENDING_PROFILE_FIELDS
+        expected_values = {
+            "selectionStatus": "PENDING_BASELINE",
+            "profileId": "baseline-o0-fasm",
+            "ghcOptions": PROFILE_OPTIONS["baseline-o0-fasm"],
+            "compilerVersion": "9.10.3",
+            "fallbackProfile": "baseline-o0-fasm",
+            "selectedBy": "pending-fail-closed-baseline",
+            "fullCorrectnessStatus": "NOT_RUN",
+            "qualificationStatus": "NOT_RUN",
+        }
+        if any(document.get(key) != value for key, value in expected_values.items()):
+            raise EvidenceError("pending baseline profile options/status drift")
+    elif schema_version == "s1.4x-haskell-selected-profile-v1":
+        expected_fields = FINAL_PROFILE_FIELDS
+        profile_id = document.get("profileId")
+        if profile_id not in PROFILE_OPTIONS:
+            raise EvidenceError("selected profile id is invalid")
+        if document.get("ghcOptions") != PROFILE_OPTIONS[profile_id]:
+            raise EvidenceError("selected profile options do not match profile id")
+        if document.get("compilerVersion") != "9.10.3":
+            raise EvidenceError("selected profile compiler version drift")
+        if document.get("fallbackProfile") != "baseline-o0-fasm":
+            raise EvidenceError("selected profile fallback drift")
+        if document.get("selectedBy") not in {
+            "frozen-criterion-selector",
+            "proven-fallback",
+        }:
+            raise EvidenceError("selected profile selector identity drift")
+        for field in ("fullCorrectnessSha256", "qualificationArtifactSha256"):
+            _require_sha256(document.get(field), field=field)
+    else:
+        raise EvidenceError("selected profile schema version drift")
+
+    if set(document) != expected_fields:
+        raise EvidenceError("selected profile field set drift")
+    expected_hashes = {
+        "compilerSha256": expected_compiler_sha256,
+        "sourceTreeSha256": expected_source_tree_sha256,
+        "qualificationPlanSha256": expected_qualification_plan_sha256,
+        "selectorConfigSha256": expected_selector_config_sha256,
+    }
+    for field, expected in expected_hashes.items():
+        _require_sha256(expected, field=f"expected {field}")
+        if document.get(field) != expected:
+            raise EvidenceError(f"selected profile {field} drift")
+    options = document.get("ghcOptions")
+    if not isinstance(options, list) or document.get("optionsSha256") != canonical_sha256(options):
+        raise EvidenceError("selected profile options SHA-256 drift")
+    return document
+
+
+def build_pending_selected_profile(
+    root: Path,
+    *,
+    qualification_plan: Path,
+) -> dict[str, Any]:
+    """Qualification 전에는 O0/fasm만 허용하는 fail-closed pending profile을 만든다."""
+
+    plan = strict_json_load(qualification_plan)
+    if not isinstance(plan, dict):
+        raise EvidenceError("benchmark qualification plan must be an object")
+    selector = plan.get("haskellProfileQualification")
+    if not isinstance(selector, dict):
+        raise EvidenceError("Haskell profile selector configuration is missing")
+    options = PROFILE_OPTIONS["baseline-o0-fasm"]
+    return {
+        "schemaVersion": "s1.4x-haskell-selected-profile-pending-v1",
+        "selectionStatus": "PENDING_BASELINE",
+        "profileId": "baseline-o0-fasm",
+        "ghcOptions": options,
+        "compilerVersion": "9.10.3",
+        "compilerSha256": AUTHORITATIVE_GHC_SHA256,
+        "sourceTreeSha256": benchmark_source_tree_sha256(root),
+        "optionsSha256": canonical_sha256(options),
+        "qualificationPlanSha256": sha256_file(qualification_plan),
+        "selectorConfigSha256": canonical_sha256(selector),
+        "fallbackProfile": "baseline-o0-fasm",
+        "selectedBy": "pending-fail-closed-baseline",
+        "fullCorrectnessStatus": "NOT_RUN",
+        "qualificationStatus": "NOT_RUN",
+    }
 
 
 def _parse_default_extensions(package_text: str) -> tuple[str, ...]:
@@ -1082,6 +1254,63 @@ def _source_tree_command(arguments: argparse.Namespace) -> None:
     )
 
 
+def _selected_profile_command(arguments: argparse.Namespace) -> None:
+    root = arguments.haskell_root.resolve(strict=True)
+    profile_path = arguments.profile.resolve(strict=False)
+    plan_path = arguments.qualification_plan.resolve(strict=True)
+    if arguments.write_pending:
+        atomic_write_json(
+            profile_path,
+            build_pending_selected_profile(root, qualification_plan=plan_path),
+        )
+    plan = strict_json_load(plan_path)
+    if not isinstance(plan, dict) or not isinstance(
+        plan.get("haskellProfileQualification"),
+        dict,
+    ):
+        raise EvidenceError("Haskell profile selector configuration is missing")
+    profile = strict_json_load(profile_path)
+    validate_selected_profile_document(
+        profile,
+        expected_compiler_sha256=AUTHORITATIVE_GHC_SHA256,
+        expected_source_tree_sha256=benchmark_source_tree_sha256(root),
+        expected_qualification_plan_sha256=sha256_file(plan_path),
+        expected_selector_config_sha256=canonical_sha256(
+            plan["haskellProfileQualification"]
+        ),
+    )
+    if profile_path.read_bytes() != canonical_json_bytes(profile, trailing_newline=True):
+        raise EvidenceError("selected profile is not canonical JSON")
+    print(
+        json.dumps(
+            {
+                "ghcOptions": profile["ghcOptions"],
+                "optionsSha256": profile["optionsSha256"],
+                "profileId": profile["profileId"],
+                "profilePath": str(profile_path),
+                "profileSha256": sha256_file(profile_path),
+                "schemaVersion": profile["schemaVersion"],
+                "sourceTreeSha256": profile["sourceTreeSha256"],
+                "status": "PASS",
+            },
+            sort_keys=True,
+        )
+    )
+
+
+def _property_closure_command(arguments: argparse.Namespace) -> None:
+    root = arguments.haskell_root.resolve(strict=True)
+    print(
+        json.dumps(
+            {
+                "propertyClosureSha256": property_execution_closure_sha256(root),
+                "status": "PASS",
+            },
+            sort_keys=True,
+        )
+    )
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -1110,6 +1339,17 @@ def _parser() -> argparse.ArgumentParser:
     source_tree = commands.add_parser("source-tree")
     source_tree.add_argument("--haskell-root", type=Path, required=True)
     source_tree.set_defaults(handler=_source_tree_command)
+
+    selected_profile = commands.add_parser("selected-profile")
+    selected_profile.add_argument("--haskell-root", type=Path, required=True)
+    selected_profile.add_argument("--profile", type=Path, required=True)
+    selected_profile.add_argument("--qualification-plan", type=Path, required=True)
+    selected_profile.add_argument("--write-pending", action="store_true")
+    selected_profile.set_defaults(handler=_selected_profile_command)
+
+    property_closure = commands.add_parser("property-closure")
+    property_closure.add_argument("--haskell-root", type=Path, required=True)
+    property_closure.set_defaults(handler=_property_closure_command)
     return parser
 
 

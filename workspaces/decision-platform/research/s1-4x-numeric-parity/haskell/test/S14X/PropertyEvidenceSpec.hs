@@ -23,4 +23,4 @@ canonicalOuterArgv =
 
 compilerIdentity :: IO ()
 compilerIdentity =
-  toolchainProfile @?= implementationLabel <> "-baseline-o0-fasm"
+  toolchainProfile "baseline-o0-fasm" @?= implementationLabel <> "-baseline-o0-fasm"
