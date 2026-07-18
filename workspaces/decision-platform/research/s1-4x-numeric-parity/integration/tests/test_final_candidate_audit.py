@@ -334,6 +334,14 @@ class FinalCandidateAuditTests(TestCase):
             '{"status":"PASS"}\n',
         )
         self._commit_file(
+            str(S1_4X_PREFIX / "reports/scorecard.md"),
+            "# Scorecard\n",
+        )
+        self._commit_file(
+            str(S1_4X_PREFIX / "reports/raw-evidence.sha256"),
+            f"{'0' * 64}  evidence.json\n",
+        )
+        self._commit_file(
             str(S1_4X_PREFIX / "README.md"),
             "# S1.4X\n",
         )
@@ -405,24 +413,23 @@ class FinalCandidateAuditTests(TestCase):
         for index, operation in enumerate(("delete", "rename", "type-change")):
             with self.subTest(operation=operation):
                 repository = self.temporary / f"invalid-status-{index}"
-                subject = _initialize_repository(repository)
-                source = (
-                    repository
-                    / S1_4X_PREFIX
-                    / "integration/final_candidate_audit.py"
-                )
-                relative_source = str(source.relative_to(repository))
+                _initialize_repository(repository)
+                report = repository / S1_4X_PREFIX / "reports/status.json"
+                report.parent.mkdir(parents=True)
+                report.write_text("{}\n", encoding="utf-8")
+                relative_report = str(report.relative_to(repository))
+                _git(repository, "add", "--", relative_report)
+                _git(repository, "commit", "-m", "seed allowed report")
+                subject = _git(repository, "rev-parse", "HEAD")
                 if operation == "delete":
-                    _git(repository, "rm", "--", relative_source)
+                    _git(repository, "rm", "--", relative_report)
                 elif operation == "rename":
-                    renamed = str(
-                        S1_4X_PREFIX / "integration/renamed_audit.py"
-                    )
-                    _git(repository, "mv", "--", relative_source, renamed)
+                    renamed = str(S1_4X_PREFIX / "reports/renamed.json")
+                    _git(repository, "mv", "--", relative_report, renamed)
                 else:
-                    source.unlink()
-                    source.symlink_to("replacement.py")
-                    _git(repository, "add", "--", relative_source)
+                    report.unlink()
+                    report.symlink_to("replacement.json")
+                    _git(repository, "add", "--", relative_report)
                 _git(repository, "commit", "-m", f"invalid {operation}")
                 with self.assertRaises(FinalAuditError):
                     _validate_subject(repository, subject)
