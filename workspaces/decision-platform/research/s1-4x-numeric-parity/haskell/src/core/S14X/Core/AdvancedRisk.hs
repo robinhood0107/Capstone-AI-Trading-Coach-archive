@@ -287,19 +287,19 @@ weightedCorrelationSum ::
   Integer ->
   Either StableError Double
 weightedCorrelationSum centered gammaZero aggregationPeriods =
-  go 1 0.0
+  finiteResearchResult (sumVector weightedTerms)
   where
     observations = fromIntegral (U.length centered)
-    go lag total
-      | lag >= aggregationPeriods = finiteResearchResult total
-      | otherwise =
-          let offset = fromInteger lag
-              gammaLag =
-                sumVector
-                  (U.zipWith (*) (U.drop offset centered) centered)
-                  / observations
-              weight = 1.0 - fromInteger lag / fromInteger aggregationPeriods
-           in go (lag + 1) (total + weight * (gammaLag / gammaZero))
+    -- aggregationPeriods는 호출자가 vector 길이보다 작게 검증하므로 Int 변환이 안전하다.
+    weightedTerms = U.generate (fromInteger aggregationPeriods - 1) weightedTerm
+    weightedTerm index =
+      let lag = index + 1
+          gammaLag =
+            sumVector
+              (U.zipWith (*) (U.drop lag centered) centered)
+              / observations
+          weight = 1.0 - fromIntegral lag / fromInteger aggregationPeriods
+       in weight * (gammaLag / gammaZero)
 
 validatedPsrInputs ::
   Double ->
