@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import errno
 import fcntl
 import hashlib
 import json
@@ -68,6 +69,8 @@ F_SEAL_SEAL = getattr(fcntl, "F_SEAL_SEAL", 0x0001)
 F_SEAL_SHRINK = getattr(fcntl, "F_SEAL_SHRINK", 0x0002)
 F_SEAL_GROW = getattr(fcntl, "F_SEAL_GROW", 0x0004)
 F_SEAL_WRITE = getattr(fcntl, "F_SEAL_WRITE", 0x0008)
+PR_SET_CHILD_SUBREAPER = 36
+PR_GET_CHILD_SUBREAPER = 37
 FROZEN_BASH_IDENTITY = {
     "path": "/usr/bin/bash",
     "sha256": "3efccc187bafa75ff1e37d246270ab3e7aa559f242c7a52bf3ec2a1b5450bdbd",
@@ -101,6 +104,23 @@ class PinnedExecutable:
     binding: dict[str, str]
     descriptor: int
     required_seals: int
+
+
+@dataclass(frozen=True, order=True)
+class ProcessIdentity:
+    """PID 재사용과 기존 외부 process를 구분하는 Linux process identity다."""
+
+    pid: int
+    start_time_ticks: int
+
+
+@dataclass(frozen=True)
+class ProcessRecord:
+    """한 번의 /proc snapshot에서 읽은 process 계보와 상태다."""
+
+    identity: ProcessIdentity
+    parent_pid: int
+    state: str
 
 
 class WaitableProcess(Protocol):
@@ -307,9 +327,12 @@ def _strict_command_manifest(
         or not isinstance(boundary_commands, dict)
         or set(boundary_commands) != set(BOUNDARY_IDS)
         or not isinstance(allowed_executables, dict)
-        or set(allowed_executables) != {"hostValidator", "boundaries"}
+        or set(allowed_executables)
+        != {"hostValidator", "boundaries", "runtimeDependencies"}
         or not isinstance(allowed_executables["boundaries"], dict)
         or set(allowed_executables["boundaries"]) != set(BOUNDARY_IDS)
+        or not isinstance(allowed_executables["runtimeDependencies"], dict)
+        or set(allowed_executables["runtimeDependencies"]) != {"uv"}
     ):
         raise ContractError("INVALID_COMMAND_MANIFEST_COMMANDS")
     if sum(argument.count("{host_report}") for argument in host_command) != 1:
@@ -345,6 +368,13 @@ def _strict_command_manifest(
             raise ContractError(
                 f"BOUNDARY_COMMAND_TEMPLATE_MISMATCH:{boundary_id}"
             )
+    uv_identity = allowed_executables["runtimeDependencies"]["uv"]
+    uv_path = uv_identity.get("path") if isinstance(uv_identity, dict) else ""
+    _validate_executable_identity(
+        [uv_path] if isinstance(uv_path, str) else [""],
+        uv_identity,
+        role="runtimeDependency:uv",
+    )
     return manifest
 
 
@@ -552,12 +582,19 @@ def _verify_source_commit_binding(
         raise ContractError("CURRENT_SOURCE_WORKTREE_DIRTY")
 
 
-def _benchmark_environment() -> dict[str, str]:
+def _benchmark_environment(
+    runtime_dependencies: dict[str, PinnedExecutable],
+) -> dict[str, str]:
     """Benchmark child에 필요한 값만 전달해 ambient code/tool 주입을 제거한다."""
 
     home = os.environ.get("HOME")
     if not home or not Path(home).is_absolute():
         raise ContractError("BENCHMARK_HOME_INVALID")
+    if set(runtime_dependencies) != {"uv"}:
+        raise ContractError("BENCHMARK_RUNTIME_DEPENDENCY_SET_MISMATCH")
+    uv = runtime_dependencies["uv"]
+    if uv.descriptor < 0:
+        raise ContractError("BENCHMARK_RUNTIME_DEPENDENCY_INVALID:uv")
     return {
         "HOME": home,
         "LANG": "C.UTF-8",
@@ -568,6 +605,7 @@ def _benchmark_environment() -> dict[str, str]:
         "TEMP": "/tmp",
         **THREAD_ENVIRONMENT,
         "S1_4X_THREAD_COUNT": "1",
+        "S1_4X_UV_BIN": f"/proc/self/fd/{uv.descriptor}",
     }
 
 
@@ -770,6 +808,344 @@ def _verify_measurement_qualification(
     return sha256_file(path)
 
 
+def _read_process_record(pid: int) -> ProcessRecord | None:
+    """동일 stat read에서 PPID와 starttime을 얻어 PID 재사용을 구분한다."""
+
+    if pid <= 0:
+        raise ContractError("INVALID_DESCENDANT_PROCESS_ID")
+    try:
+        payload = Path(f"/proc/{pid}/stat").read_bytes()
+    except (FileNotFoundError, ProcessLookupError):
+        return None
+    except PermissionError as exc:
+        raise ContractError("DESCENDANT_PROC_STAT_DENIED") from exc
+    except OSError as exc:
+        raise ContractError("DESCENDANT_PROC_STAT_FAILED") from exc
+    if len(payload) > 1_048_576:
+        raise ContractError("INVALID_DESCENDANT_PROC_STAT")
+    try:
+        document = payload.decode("ascii", errors="strict")
+    except UnicodeError as exc:
+        raise ContractError("INVALID_DESCENDANT_PROC_STAT") from exc
+    closing_parenthesis = document.rfind(")")
+    if (
+        not document.startswith(f"{pid} (")
+        or closing_parenthesis < len(str(pid)) + 2
+    ):
+        raise ContractError("INVALID_DESCENDANT_PROC_STAT")
+    fields = document[closing_parenthesis + 2 :].split()
+    if len(fields) < 20 or len(fields[0]) != 1:
+        raise ContractError("INVALID_DESCENDANT_PROC_STAT")
+    try:
+        parent_pid = int(fields[1])
+        start_time_ticks = int(fields[19])
+    except ValueError as exc:
+        raise ContractError("INVALID_DESCENDANT_PROC_STAT") from exc
+    if parent_pid < 0 or start_time_ticks <= 0:
+        raise ContractError("INVALID_DESCENDANT_PROC_STAT")
+    return ProcessRecord(
+        identity=ProcessIdentity(pid=pid, start_time_ticks=start_time_ticks),
+        parent_pid=parent_pid,
+        state=fields[0],
+    )
+
+
+def _read_launch_leader_record(pid: int) -> ProcessRecord | None:
+    """launch 직후 leader identity read를 테스트 가능한 단일 경계로 둔다."""
+
+    return _read_process_record(pid)
+
+
+def _process_snapshot() -> dict[int, ProcessRecord]:
+    """현재 PID namespace를 한 번 훑어 추적 대상의 parent chain을 복원한다."""
+
+    snapshot: dict[int, ProcessRecord] = {}
+    try:
+        with os.scandir("/proc") as directory:
+            entries = tuple(directory)
+    except (FileNotFoundError, PermissionError, OSError) as exc:
+        raise ContractError("DESCENDANT_PROC_SCAN_UNAVAILABLE") from exc
+    for entry in entries:
+        if not entry.name.isascii() or not entry.name.isdecimal():
+            continue
+        record = _read_process_record(int(entry.name))
+        if record is not None:
+            snapshot[record.identity.pid] = record
+    return snapshot
+
+
+def _child_subreaper_state() -> bool:
+    state = ctypes.c_int(0)
+    try:
+        function: Any = ctypes.CDLL(None, use_errno=True).prctl
+    except (AttributeError, OSError) as exc:
+        raise ContractError("CHILD_SUBREAPER_UNAVAILABLE") from exc
+    function.restype = ctypes.c_int
+    result = int(
+        function(
+            ctypes.c_int(PR_GET_CHILD_SUBREAPER),
+            ctypes.byref(state),
+            ctypes.c_ulong(0),
+            ctypes.c_ulong(0),
+            ctypes.c_ulong(0),
+        )
+    )
+    if result != 0:
+        error_number = ctypes.get_errno()
+        raise ContractError(
+            f"CHILD_SUBREAPER_QUERY_FAILED:{error_number}"
+        )
+    return state.value == 1
+
+
+def _set_child_subreaper(enabled: bool) -> None:
+    try:
+        function: Any = ctypes.CDLL(None, use_errno=True).prctl
+    except (AttributeError, OSError) as exc:
+        raise ContractError("CHILD_SUBREAPER_UNAVAILABLE") from exc
+    function.restype = ctypes.c_int
+    result = int(
+        function(
+            ctypes.c_int(PR_SET_CHILD_SUBREAPER),
+            ctypes.c_ulong(1 if enabled else 0),
+            ctypes.c_ulong(0),
+            ctypes.c_ulong(0),
+            ctypes.c_ulong(0),
+        )
+    )
+    if result != 0:
+        error_number = ctypes.get_errno()
+        raise ContractError(
+            f"CHILD_SUBREAPER_CONFIGURATION_FAILED:{error_number}"
+        )
+
+
+@contextmanager
+def _child_subreaper_scope() -> Iterator[None]:
+    """setsid/double-fork 자식이 PID 1로 빠지기 전에 현재 runner로 재부모화한다."""
+
+    if sys.platform != "linux" or not Path("/proc/self/stat").is_file():
+        raise ContractError("CHILD_SUBREAPER_UNAVAILABLE")
+    previously_enabled = _child_subreaper_state()
+    changed = False
+    try:
+        if not previously_enabled:
+            _set_child_subreaper(True)
+            changed = True
+            if not _child_subreaper_state():
+                raise ContractError("CHILD_SUBREAPER_CONFIGURATION_FAILED")
+        yield
+    finally:
+        if changed:
+            _set_child_subreaper(False)
+            if _child_subreaper_state():
+                raise ContractError("CHILD_SUBREAPER_RESTORE_FAILED")
+
+
+class DescendantTracker:
+    """leader 계보와 subreaper로 돌아온 새 자식을 exact PID/starttime으로 추적한다."""
+
+    def __init__(
+        self,
+        *,
+        root: ProcessIdentity,
+        leader: ProcessIdentity | None,
+        baseline_direct_children: frozenset[ProcessIdentity],
+        baseline_processes: frozenset[ProcessIdentity],
+        minimum_start_time_ticks: int,
+    ) -> None:
+        self.root = root
+        self.leader = leader
+        self.baseline_direct_children = baseline_direct_children
+        self.baseline_processes = baseline_processes
+        self.minimum_start_time_ticks = minimum_start_time_ticks
+        self.tracked: set[ProcessIdentity] = (
+            set() if leader is None else {leader}
+        )
+
+    def _refresh(self) -> dict[int, ProcessRecord]:
+        snapshot = _process_snapshot()
+        root_record = snapshot.get(self.root.pid)
+        if root_record is None or root_record.identity != self.root:
+            raise ContractError("DESCENDANT_TRACKER_ROOT_IDENTITY_CHANGED")
+
+        # subreaper 전환 뒤 현재 runner의 새 direct child가 된 orphan도 원래
+        # PGID/session과 무관하게 이 실행에서 만들어진 descendant로 취급한다.
+        for record in snapshot.values():
+            if (
+                record.parent_pid == self.root.pid
+                and record.identity not in self.baseline_direct_children
+                and record.identity not in self.baseline_processes
+                and record.identity.start_time_ticks >= self.minimum_start_time_ticks
+            ):
+                self.tracked.add(record.identity)
+
+        while True:
+            live_parent_pids: set[int] = set()
+            for identity in self.tracked:
+                current_record = snapshot.get(identity.pid)
+                if (
+                    current_record is not None
+                    and current_record.identity == identity
+                ):
+                    live_parent_pids.add(identity.pid)
+            discovered = {
+                record.identity
+                for record in snapshot.values()
+                if record.parent_pid in live_parent_pids
+            }
+            new_identities = discovered - self.tracked
+            if not new_identities:
+                break
+            self.tracked.update(new_identities)
+        return snapshot
+
+    def descendant_identities(self) -> tuple[ProcessIdentity, ...]:
+        snapshot = self._refresh()
+        descendants: list[ProcessIdentity] = []
+        for identity in self.tracked:
+            current_record = snapshot.get(identity.pid)
+            if (
+                (self.leader is None or identity != self.leader)
+                and current_record is not None
+                and current_record.identity == identity
+            ):
+                descendants.append(identity)
+        return tuple(sorted(descendants))
+
+    def reap_adopted_children(self) -> None:
+        """subreaper의 direct zombie만 exact PID로 회수해 다른 child를 건드리지 않는다."""
+
+        snapshot = self._refresh()
+        for identity in sorted(self.tracked):
+            if self.leader is not None and identity == self.leader:
+                continue
+            record = snapshot.get(identity.pid)
+            if (
+                record is None
+                or record.identity != identity
+                or record.parent_pid != self.root.pid
+                or record.state != "Z"
+            ):
+                continue
+            confirmed = _read_process_record(identity.pid)
+            if (
+                confirmed is None
+                or confirmed.identity != identity
+                or confirmed.parent_pid != self.root.pid
+                or confirmed.state != "Z"
+            ):
+                continue
+            try:
+                os.waitpid(identity.pid, os.WNOHANG)
+            except ChildProcessError:
+                continue
+            except OSError as exc:
+                raise ContractError("DESCENDANT_PROCESS_REAP_FAILED") from exc
+
+
+def _signal_process_identity(identity: ProcessIdentity, sent_signal: int) -> None:
+    """starttime 재검증과 pidfd를 결합해 재사용된 PID에는 signal을 보내지 않는다."""
+
+    current = _read_process_record(identity.pid)
+    if current is None or current.identity != identity:
+        return
+    pidfd_open = getattr(os, "pidfd_open", None)
+    pidfd_send_signal = getattr(signal, "pidfd_send_signal", None)
+    descriptor = -1
+    try:
+        if callable(pidfd_open):
+            descriptor = int(pidfd_open(identity.pid, 0))
+        else:
+            try:
+                libc_pidfd_open: Any = ctypes.CDLL(
+                    None,
+                    use_errno=True,
+                ).pidfd_open
+            except (AttributeError, OSError) as exc:
+                raise ContractError("DESCENDANT_PIDFD_UNAVAILABLE") from exc
+            libc_pidfd_open.argtypes = (ctypes.c_int, ctypes.c_uint)
+            libc_pidfd_open.restype = ctypes.c_int
+            descriptor = int(libc_pidfd_open(identity.pid, 0))
+            if descriptor < 0:
+                error_number = ctypes.get_errno()
+                if error_number == errno.ESRCH:
+                    return
+                raise OSError(error_number, os.strerror(error_number))
+        confirmed = _read_process_record(identity.pid)
+        if confirmed is None or confirmed.identity != identity:
+            return
+        if callable(pidfd_send_signal):
+            pidfd_send_signal(descriptor, sent_signal, None, 0)
+        else:
+            try:
+                libc_pidfd_send_signal: Any = ctypes.CDLL(
+                    None,
+                    use_errno=True,
+                ).pidfd_send_signal
+            except (AttributeError, OSError) as exc:
+                raise ContractError("DESCENDANT_PIDFD_UNAVAILABLE") from exc
+            libc_pidfd_send_signal.argtypes = (
+                ctypes.c_int,
+                ctypes.c_int,
+                ctypes.c_void_p,
+                ctypes.c_uint,
+            )
+            libc_pidfd_send_signal.restype = ctypes.c_int
+            result = int(
+                libc_pidfd_send_signal(
+                    descriptor,
+                    sent_signal,
+                    None,
+                    0,
+                )
+            )
+            if result != 0:
+                error_number = ctypes.get_errno()
+                if error_number == errno.ESRCH:
+                    return
+                raise OSError(error_number, os.strerror(error_number))
+    except ProcessLookupError:
+        return
+    except PermissionError as exc:
+        raise ContractError("DESCENDANT_PROCESS_SIGNAL_DENIED") from exc
+    except OSError as exc:
+        raise ContractError("DESCENDANT_PROCESS_SIGNAL_FAILED") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def _signal_descendants(
+    tracker: DescendantTracker,
+    sent_signal: int,
+) -> tuple[ProcessIdentity, ...]:
+    identities = tracker.descendant_identities()
+    for identity in identities:
+        _signal_process_identity(identity, sent_signal)
+    return identities
+
+
+def _wait_for_descendants_exit(
+    tracker: DescendantTracker,
+    *,
+    deadline: float,
+    sent_signal: int,
+) -> bool:
+    """deadline 동안 새로 fork/reparent된 대상까지 같은 signal로 반복 봉쇄한다."""
+
+    while True:
+        tracker.reap_adopted_children()
+        _signal_descendants(tracker, sent_signal)
+        tracker.reap_adopted_children()
+        if not tracker.descendant_identities():
+            return True
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        time.sleep(min(0.05, remaining))
+
+
 def _process_group_exists(process_group_id: int) -> bool:
     """signal 0 probe에서 ESRCH만 정상 종료로 해석한다."""
 
@@ -828,37 +1204,75 @@ def _wait_for_leader(
     return True
 
 
-def _terminate_process_group(process: WaitableProcess) -> None:
+def _terminate_process_group(
+    process: WaitableProcess,
+    tracker: DescendantTracker | None = None,
+) -> None:
     """timeout 뒤 leader와 같은 session의 모든 descendant를 bounded 종료한다."""
 
     term_deadline = time.monotonic() + 5.0
     _signal_process_group(process.pid, signal.SIGTERM)
+    if tracker is not None:
+        _signal_descendants(tracker, signal.SIGTERM)
     leader_reaped = _wait_for_leader(
         process,
         timeout_seconds=max(0.0, term_deadline - time.monotonic()),
     )
-    group_exited = _wait_for_process_group_exit(
-        process.pid,
-        max(0.0, term_deadline - time.monotonic()),
+    group_exited = (
+        _wait_for_process_group_exit(
+            process.pid,
+            max(0.0, term_deadline - time.monotonic()),
+        )
+        if tracker is None
+        else True
     )
-    if leader_reaped and group_exited:
+    descendants_exited = (
+        True
+        if tracker is None
+        else _wait_for_descendants_exit(
+            tracker,
+            deadline=term_deadline,
+            sent_signal=signal.SIGTERM,
+        )
+    )
+    if leader_reaped and group_exited and descendants_exited:
         return
 
     # leader와 process-group 대기를 직렬로 각각 5초씩 허용하지 않고 하나의 TERM
     # deadline을 공유하여 SIGKILL이 최초 signal 후 5초를 넘기지 않게 한다.
     kill_deadline = time.monotonic() + 5.0
-    _signal_process_group(process.pid, signal.SIGKILL)
+    if tracker is None or not leader_reaped:
+        # leader가 이미 reaped된 뒤에는 같은 숫자의 PID/PGID가 재사용될 수 있으므로
+        # exact starttime tracker만 사용한다.
+        _signal_process_group(process.pid, signal.SIGKILL)
+    if tracker is not None:
+        _signal_descendants(tracker, signal.SIGKILL)
     if not leader_reaped:
         leader_reaped = _wait_for_leader(
             process,
             timeout_seconds=max(0.0, kill_deadline - time.monotonic()),
         )
-    group_exited = _wait_for_process_group_exit(
-        process.pid,
-        max(0.0, kill_deadline - time.monotonic()),
+    group_exited = (
+        _wait_for_process_group_exit(
+            process.pid,
+            max(0.0, kill_deadline - time.monotonic()),
+        )
+        if tracker is None
+        else True
+    )
+    descendants_exited = (
+        True
+        if tracker is None
+        else _wait_for_descendants_exit(
+            tracker,
+            deadline=kill_deadline,
+            sent_signal=signal.SIGKILL,
+        )
     )
     if not group_exited:
         raise ContractError("TIMEOUT_PROCESS_GROUP_SURVIVED_SIGKILL")
+    if not descendants_exited:
+        raise ContractError("TIMEOUT_DESCENDANTS_SURVIVED_SIGKILL")
     if not leader_reaped:
         raise ContractError("TIMEOUT_PROCESS_LEADER_NOT_REAPED")
 
@@ -872,10 +1286,45 @@ def _reject_surviving_process_group(process: WaitableProcess) -> None:
     raise ContractError("NATIVE_PROCESS_GROUP_SURVIVED_EXIT")
 
 
+def _terminate_descendants(tracker: DescendantTracker) -> None:
+    """정상 leader 종료 뒤 PGID/session을 이탈한 descendant만 bounded 종료한다."""
+
+    term_deadline = time.monotonic() + 5.0
+    _signal_descendants(tracker, signal.SIGTERM)
+    if _wait_for_descendants_exit(
+        tracker,
+        deadline=term_deadline,
+        sent_signal=signal.SIGTERM,
+    ):
+        return
+    kill_deadline = time.monotonic() + 5.0
+    _signal_descendants(tracker, signal.SIGKILL)
+    if not _wait_for_descendants_exit(
+        tracker,
+        deadline=kill_deadline,
+        sent_signal=signal.SIGKILL,
+    ):
+        raise ContractError("NATIVE_DESCENDANTS_SURVIVED_SIGKILL")
+
+
+def _reject_surviving_processes(
+    process: WaitableProcess,
+    tracker: DescendantTracker,
+) -> None:
+    """정상 exit 뒤 하나라도 남은 tracked descendant를 청소하고 block을 거부한다."""
+
+    del process
+    if not tracker.descendant_identities():
+        return
+    _terminate_descendants(tracker)
+    raise ContractError("NATIVE_DESCENDANTS_SURVIVED_EXIT")
+
+
 def _run_process(
     command: list[str],
     *,
     executable: PinnedExecutable,
+    inherited_executables: tuple[PinnedExecutable, ...] = (),
     cwd: Path,
     timeout_seconds: int,
     stdout_path: Path,
@@ -884,53 +1333,103 @@ def _run_process(
 ) -> None:
     if command[0] != executable.binding["path"]:
         raise ContractError("PINNED_EXECUTABLE_BINDING_MISMATCH")
-    try:
-        actual_seals = fcntl.fcntl(executable.descriptor, F_GET_SEALS)
-    except OSError as exc:
-        raise ContractError("PINNED_EXECUTABLE_UNAVAILABLE") from exc
-    if actual_seals & executable.required_seals != executable.required_seals:
-        raise ContractError("PINNED_EXECUTABLE_SEALS_CHANGED")
-    with stdout_path.open("xb") as stdout, stderr_path.open("xb") as stderr:
+    pinned_executables = (executable, *inherited_executables)
+    descriptors = tuple(item.descriptor for item in pinned_executables)
+    if (
+        any(descriptor < 0 for descriptor in descriptors)
+        or len(descriptors) != len(set(descriptors))
+    ):
+        raise ContractError("PINNED_EXECUTABLE_DESCRIPTOR_SET_INVALID")
+    for pinned in pinned_executables:
         try:
-            process = subprocess.Popen(
-                command,
-                executable=f"/proc/self/fd/{executable.descriptor}",
-                cwd=cwd,
-                env=environment,
-                stdin=subprocess.DEVNULL,
-                stdout=stdout,
-                stderr=stderr,
-                start_new_session=True,
-                pass_fds=(executable.descriptor,),
-            )
+            actual_seals = fcntl.fcntl(pinned.descriptor, F_GET_SEALS)
         except OSError as exc:
-            raise ContractError("PINNED_EXECUTABLE_LAUNCH_FAILED") from exc
-        deadline = time.monotonic() + timeout_seconds
-        while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                _terminate_process_group(process)
-                raise ContractError("PERFORMANCE_DEADLINE_EXCEEDED")
+            raise ContractError("PINNED_EXECUTABLE_UNAVAILABLE") from exc
+        if actual_seals & pinned.required_seals != pinned.required_seals:
+            raise ContractError("PINNED_EXECUTABLE_SEALS_CHANGED")
+
+    with _child_subreaper_scope():
+        launch_snapshot = _process_snapshot()
+        root_record = launch_snapshot.get(os.getpid())
+        if root_record is None:
+            raise ContractError("DESCENDANT_TRACKER_ROOT_IDENTITY_MISSING")
+        baseline_direct_children = frozenset(
+            record.identity
+            for record in launch_snapshot.values()
+            if record.parent_pid == root_record.identity.pid
+        )
+        baseline_processes = frozenset(
+            record.identity for record in launch_snapshot.values()
+        )
+        minimum_start_time_ticks = max(
+            identity.start_time_ticks for identity in baseline_processes
+        )
+        with stdout_path.open("xb") as stdout, stderr_path.open("xb") as stderr:
             try:
-                return_code = process.wait(timeout=min(60.0, remaining))
-                break
-            except subprocess.TimeoutExpired:
-                # 장기 block을 중복 실행하지 않고 60초마다 생존 상태만 외부에 알린다.
-                print(
-                    json.dumps(
-                        {
-                            "event": "PROCESS_STILL_RUNNING",
-                            "pid": process.pid,
-                            "remainingSeconds": max(0, int(remaining)),
-                        },
-                        sort_keys=True,
-                    ),
-                    file=sys.stderr,
-                    flush=True,
+                process = subprocess.Popen(
+                    command,
+                    executable=f"/proc/self/fd/{executable.descriptor}",
+                    cwd=cwd,
+                    env=environment,
+                    stdin=subprocess.DEVNULL,
+                    stdout=stdout,
+                    stderr=stderr,
+                    start_new_session=True,
+                    pass_fds=descriptors,
                 )
-    _reject_surviving_process_group(process)
-    if return_code != 0:
-        raise ContractError(f"NATIVE_PROCESS_FAILED:{return_code}")
+            except OSError as exc:
+                raise ContractError("PINNED_EXECUTABLE_LAUNCH_FAILED") from exc
+            leader_record = _read_launch_leader_record(process.pid)
+            leader_identity: ProcessIdentity | None = None
+            if (
+                leader_record is not None
+                and leader_record.parent_pid == root_record.identity.pid
+                and leader_record.identity not in baseline_processes
+                and leader_record.identity.start_time_ticks
+                >= minimum_start_time_ticks
+            ):
+                leader_identity = leader_record.identity
+            tracker = DescendantTracker(
+                root=root_record.identity,
+                leader=leader_identity,
+                baseline_direct_children=baseline_direct_children,
+                baseline_processes=baseline_processes,
+                minimum_start_time_ticks=minimum_start_time_ticks,
+            )
+            if leader_identity is None:
+                try:
+                    process.wait(timeout=0)
+                except subprocess.TimeoutExpired:
+                    _terminate_process_group(process, tracker)
+                if tracker.descendant_identities():
+                    _terminate_descendants(tracker)
+                raise ContractError("NATIVE_PROCESS_LEADER_IDENTITY_INVALID")
+            deadline = time.monotonic() + timeout_seconds
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    _terminate_process_group(process, tracker)
+                    raise ContractError("PERFORMANCE_DEADLINE_EXCEEDED")
+                try:
+                    return_code = process.wait(timeout=min(60.0, remaining))
+                    break
+                except subprocess.TimeoutExpired:
+                    # 장기 block을 중복 실행하지 않고 60초마다 생존 상태만 외부에 알린다.
+                    print(
+                        json.dumps(
+                            {
+                                "event": "PROCESS_STILL_RUNNING",
+                                "pid": process.pid,
+                                "remainingSeconds": max(0, int(remaining)),
+                            },
+                            sort_keys=True,
+                        ),
+                        file=sys.stderr,
+                        flush=True,
+                    )
+        _reject_surviving_processes(process, tracker)
+        if return_code != 0:
+            raise ContractError(f"NATIVE_PROCESS_FAILED:{return_code}")
 
 
 def _pin_current_process(cpu_set: set[int]) -> None:
@@ -1035,11 +1534,23 @@ def execute_schedule(
                 "boundaries"
             ].items()
         }
+        runtime_executables = {
+            dependency_id: executable_stack.enter_context(
+                _pin_executable(
+                    identity,
+                    role=f"runtimeDependency:{dependency_id}",
+                )
+            )
+            for dependency_id, identity in manifest["allowedExecutables"][
+                "runtimeDependencies"
+            ].items()
+        }
+        inherited_executables = tuple(runtime_executables.values())
         run_directory = reserve_directory(output_root / run_id)
         _pin_current_process(set(plan["execution"]["cpuSet"]))
         total_deadline = time.monotonic() + plan["execution"]["totalRunTimeoutSeconds"]
         valid_performance_timeouts = 0
-        environment = _benchmark_environment()
+        environment = _benchmark_environment(runtime_executables)
         for block in schedule:
             remaining_total = total_deadline - time.monotonic()
             if remaining_total <= 0:
@@ -1070,6 +1581,7 @@ def execute_schedule(
                 _run_process(
                     host_command,
                     executable=host_executable,
+                    inherited_executables=inherited_executables,
                     cwd=repo_root,
                     timeout_seconds=min(
                         plan["environmentValidity"]["maxQuietWaitSeconds"],
@@ -1121,6 +1633,7 @@ def execute_schedule(
                 _run_process(
                     native_command,
                     executable=native_executable,
+                    inherited_executables=inherited_executables,
                     cwd=repo_root,
                     timeout_seconds=block.timeout_seconds,
                     stdout_path=output_directory / "native-wrapper.stdout",
