@@ -28,7 +28,17 @@ binary manifest, finite value, negative zero, result ID·순서, process exit와
 ```bash
 ROOT="$(git rev-parse --show-toplevel)"
 S1_4X="$ROOT/workspaces/decision-platform/research/s1-4x-numeric-parity"
-RUN_PARENT="$(mktemp -d)"
+CACHE_ROOT="${S1_4X_CACHE_ROOT:-$HOME/.cache/s1-4x}"
+UV_BIN="${S1_4X_UV_BIN:?set the verified absolute uv executable path}"
+mkdir -p "$CACHE_ROOT/tmp" "$CACHE_ROOT/uv" "$CACHE_ROOT/coursier" \
+  "$CACHE_ROOT/stack-root"
+export TMPDIR="$CACHE_ROOT/tmp"
+export TEMP="$TMPDIR"
+export TMP="$TMPDIR"
+export UV_CACHE_DIR="$CACHE_ROOT/uv"
+export COURSIER_CACHE="$CACHE_ROOT/coursier"
+export STACK_ROOT="$CACHE_ROOT/stack-root"
+RUN_PARENT="$(mktemp -d "$TMPDIR/s1-4x-integration.XXXXXX")"
 
 "$S1_4X/integration/tools/run-integration-correctness.sh" \
   "$RUN_PARENT/integration-correctness"
@@ -107,12 +117,11 @@ Command manifest는 shell-free argv, 실행 파일 절대 경로와 SHA-256, sub
 ORACLE="$S1_4X/oracle"
 PLAN="$S1_4X/benchmarks/benchmark-plan.v1.json"
 SUBJECT="$(git -C "$ROOT" rev-parse HEAD)"
-BENCH_PARENT="$(mktemp -d)"
+BENCH_PARENT="$(mktemp -d "$TMPDIR/s1-4x-benchmark.XXXXXX")"
 SCALA_BLOCK_WRAPPER="${SCALA_BLOCK_WRAPPER:?set the absolute Scala block wrapper path}"
 HASKELL_BLOCK_WRAPPER="${HASKELL_BLOCK_WRAPPER:?set the absolute Haskell block wrapper path}"
 
-TMPDIR=/tmp TEMP=/tmp TMP=/tmp \
-  /home/pjjpj/.local/bin/uv run --frozen --no-config --project "$ORACLE" \
+"$UV_BIN" run --frozen --no-config --project "$ORACLE" \
   python "$S1_4X/integration/prepare_benchmark_commands.py" \
   --repo-root "$ROOT" \
   --benchmark-subject-commit "$SUBJECT" \
@@ -120,7 +129,7 @@ TMPDIR=/tmp TEMP=/tmp TMP=/tmp \
   --python-wrapper "$S1_4X/integration/tools/run-python-benchmark-block.sh" \
   --scala-wrapper "$SCALA_BLOCK_WRAPPER" \
   --haskell-wrapper "$HASKELL_BLOCK_WRAPPER" \
-  --uv /home/pjjpj/.local/bin/uv \
+  --uv "$UV_BIN" \
   --output "$BENCH_PARENT/commands.json" \
   --sidecar "$BENCH_PARENT/commands.sha256"
 ```
@@ -133,8 +142,7 @@ wrapper byte hash와 `benchmarkSubjectCommit == candidateSourceCommit`을 다시
 ```bash
 COMMAND_SHA256="$(awk '{print $1}' "$BENCH_PARENT/commands.sha256")"
 
-TMPDIR=/tmp TEMP=/tmp TMP=/tmp \
-  uv run --frozen --project "$ORACLE" \
+"$UV_BIN" run --frozen --no-config --project "$ORACLE" \
   python "$S1_4X/integration/run_rotated_blocks.py" run \
   --plan "$PLAN" \
   --commands "$BENCH_PARENT/commands.json" \
@@ -185,16 +193,14 @@ subject는 현재 `HEAD`의 ancestor여야 하고 worktree·index·untracked 상
 ```bash
 AUDIT_ROOT="$BENCH_PARENT/final-audit"
 
-TMPDIR=/tmp TEMP=/tmp TMP=/tmp \
-  uv run --frozen --project "$ORACLE" \
+"$UV_BIN" run --frozen --no-config --project "$ORACLE" \
   python "$S1_4X/integration/final_candidate_audit.py" generate \
   --repository-root "$ROOT" \
   --benchmark-subject-commit "$SUBJECT" \
   --evidence-root "$AUDIT_ROOT/evidence" \
   --output "$AUDIT_ROOT/final-candidate-audit.json"
 
-TMPDIR=/tmp TEMP=/tmp TMP=/tmp \
-  uv run --frozen --project "$ORACLE" \
+"$UV_BIN" run --frozen --no-config --project "$ORACLE" \
   python "$S1_4X/integration/final_candidate_audit.py" validate \
   --repository-root "$ROOT" \
   --benchmark-subject-commit "$SUBJECT" \
@@ -211,8 +217,7 @@ Finalizer는 87개 block completeness, native raw statistics, timeout 분류, in
 host identity, typed audit를 한 번 더 검증하고 네 portable report를 쓴다.
 
 ```bash
-TMPDIR=/tmp TEMP=/tmp TMP=/tmp \
-  uv run --frozen --project "$ORACLE" \
+"$UV_BIN" run --frozen --no-config --project "$ORACLE" \
   python "$S1_4X/integration/finalize_benchmark_run.py" \
   --plan "$PLAN" \
   --run-directory "$BENCH_PARENT/run/s1-4x-full-local" \
@@ -239,15 +244,11 @@ TMPDIR=/tmp TEMP=/tmp TMP=/tmp \
 ```bash
 (
   cd "$ORACLE"
-  TMPDIR=/tmp TEMP=/tmp TMP=/tmp \
-    uv run --frozen python -m unittest discover \
+  "$UV_BIN" run --frozen --no-config python -m unittest discover \
     -s ../integration/tests -p 'test_*.py'
-  TMPDIR=/tmp TEMP=/tmp TMP=/tmp \
-    uv run --frozen ruff check . ../benchmarks ../integration
-  TMPDIR=/tmp TEMP=/tmp TMP=/tmp \
-    uv run --frozen mypy . ../benchmarks
-  TMPDIR=/tmp TEMP=/tmp TMP=/tmp \
-    uv run --frozen mypy --strict --explicit-package-bases \
+  "$UV_BIN" run --frozen --no-config ruff check . ../benchmarks ../integration
+  "$UV_BIN" run --frozen --no-config mypy . ../benchmarks
+  "$UV_BIN" run --frozen --no-config mypy --strict --explicit-package-bases \
     --follow-imports=silent --disable-error-code unused-ignore \
     ../integration/*.py
 )
