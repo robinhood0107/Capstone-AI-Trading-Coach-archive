@@ -27,8 +27,8 @@ TEXT_SUFFIXES = {
     ".yml",
 }
 FORBIDDEN_HOST_TOKENS = (
-    "/home/",
-    "/mnt/c/Users/",
+    "/" + "home" + "/",
+    "/mnt/c/" + "Users/",
     "pjj" + "pj",
 )
 
