@@ -1,0 +1,18 @@
+{
+  "schemaVersion": "s1.4x-scala-source-inputs-v1",
+  "language": "scala-3.8.4",
+  "roots": [
+    "project.scala",
+    "selected-profile.scala",
+    "src/main/scala",
+    "src/test/scala",
+    "benchmarks"
+  ],
+  "toolRoots": [
+    "tools"
+  ],
+  "formatterConfig": ".scalafmt.conf",
+  "scalafixConfig": ".scalafix.conf",
+  "sourceLocalExclusions": [],
+  "generatedSourcesTracked": false
+}

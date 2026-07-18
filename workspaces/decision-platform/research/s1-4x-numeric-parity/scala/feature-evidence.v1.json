@@ -1,0 +1,26 @@
+{
+  "schemaVersion": "s1.4x-scala-feature-evidence-v1",
+  "language": "scala-3.8.4",
+  "entries": [
+    {
+      "featureId": "scala.closed-enum-adt",
+      "decision": "ADOPT",
+      "status": "scaffolded"
+    },
+    {
+      "featureId": "scala.opaque-validation-boundaries",
+      "decision": "ADOPT",
+      "status": "scaffolded"
+    },
+    {
+      "featureId": "scala.optimizer-profile-b-c",
+      "decision": "CONDITIONAL",
+      "status": "pending-qualification"
+    },
+    {
+      "featureId": "scala.experimental-unsafe-native",
+      "decision": "REJECT",
+      "status": "enforced-by-source-policy"
+    }
+  ]
+}
