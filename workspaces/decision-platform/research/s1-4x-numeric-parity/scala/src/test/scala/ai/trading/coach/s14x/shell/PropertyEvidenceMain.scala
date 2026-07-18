@@ -30,11 +30,11 @@ object PropertyEvidenceMain:
       s1Root: Path,
       profile: String,
       commandArgvSha256: String,
-      runnerSource: Path,
+      runnerPath: Path,
   )
 
-  private final case class PropertyExecution(
-      propertyId: String,
+  private final case class SeedExecution(
+      seedIndex: Int,
       successful: Int,
       discarded: Int,
       attempted: Int,
@@ -44,25 +44,38 @@ object PropertyEvidenceMain:
       status: String,
   )
 
+  private final case class PropertyExecution(
+      propertyId: String,
+      successful: Int,
+      discarded: Int,
+      attempted: Int,
+      shrinks: Int,
+      seedExecutions: Vector[SeedExecution],
+      status: String,
+  )
+
   private def parseCli(arguments: Vector[String]): Either[String, Cli] =
     val pairs =
       if arguments.size == 10 then arguments.grouped(2).toVector else Vector.empty
     val options = pairs.collect { case Vector(name, value) => name -> value }.toMap
     val expected =
-      Set("--output-dir", "--s1-root", "--profile", "--command-argv-sha256", "--runner-source")
+      Set("--output-dir", "--s1-root", "--profile", "--command-argv-sha256", "--runner-path")
     if options.keySet != expected then Left("property evidence CLI mismatch")
     else
       val outputDir = Path.of(options.getOrElse("--output-dir", "")).toAbsolutePath.normalize()
       val s1Root = Path.of(options.getOrElse("--s1-root", "")).toAbsolutePath.normalize()
       val profile = options.getOrElse("--profile", "")
       val commandSha = options.getOrElse("--command-argv-sha256", "")
-      val runnerSource =
-        Path.of(options.getOrElse("--runner-source", "")).toAbsolutePath.normalize()
+      val runnerPath =
+        Path.of(options.getOrElse("--runner-path", "")).toAbsolutePath.normalize()
       if !Set("A", "B", "C").contains(profile) then Left("unknown Scala profile")
       else if !Sha256Pattern.matches(commandSha) then Left("command argv SHA mismatch")
-      else if !Files.isDirectory(s1Root) || !Files.isRegularFile(runnerSource) then
+      else if !Files.isDirectory(s1Root) ||
+        !Files.isRegularFile(runnerPath) ||
+        Files.isSymbolicLink(runnerPath)
+      then
         Left("property evidence input path mismatch")
-      else Right(Cli(outputDir, s1Root, profile, commandSha, runnerSource))
+      else Right(Cli(outputDir, s1Root, profile, commandSha, runnerPath))
 
   private def sha256(path: Path): String =
     sha256Bytes(Files.readAllBytes(path))
@@ -113,15 +126,16 @@ object PropertyEvidenceMain:
       case proved: Test.Proved        => proved.args.map(_.shrinks).sum
       case _                          => 0
 
-  private def executeProperty(
-      name: String,
+  private def executeSeed(
       property: Prop,
       seedValue: Long,
-  ): PropertyExecution =
+      seedIndex: Int,
+      minimumSuccessful: Int,
+  ): SeedExecution =
     val seed = Seed(seedValue)
     val parameters =
       Test.Parameters.default
-        .withMinSuccessfulTests(1000)
+        .withMinSuccessfulTests(minimumSuccessful)
         .withMaxDiscardRatio(0.1f)
         .withWorkers(1)
         .withInitialSeed(seed)
@@ -129,13 +143,12 @@ object PropertyEvidenceMain:
     val attempted = result.succeeded + result.discarded
     val status =
       if result.passed &&
-        result.succeeded >= 1000 &&
-        result.discarded <= 100 &&
+        result.succeeded == minimumSuccessful &&
         attempted == result.succeeded + result.discarded
       then "PASS"
       else "FAIL"
-    PropertyExecution(
-      propertyId(name),
+    SeedExecution(
+      seedIndex,
       result.succeeded,
       result.discarded,
       attempted,
@@ -145,6 +158,49 @@ object PropertyEvidenceMain:
       status,
     )
 
+  private def executeProperty(
+      name: String,
+      property: Prop,
+      seeds: Vector[Long],
+      minimumSuccessfulPerSeed: Int,
+  ): PropertyExecution =
+    val seedExecutions = seeds.zipWithIndex.map { case (seed, index) =>
+      executeSeed(property, seed, index, minimumSuccessfulPerSeed)
+    }
+    val successful = seedExecutions.map(_.successful).sum
+    val discarded = seedExecutions.map(_.discarded).sum
+    val attempted = seedExecutions.map(_.attempted).sum
+    val shrinkCount = seedExecutions.map(_.shrinks).sum
+    val status =
+      if seedExecutions.size == 24 &&
+        seedExecutions.forall(_.status == "PASS") &&
+        successful == seedExecutions.size * minimumSuccessfulPerSeed &&
+        discarded <= 100 &&
+        attempted == successful + discarded
+      then "PASS"
+      else "FAIL"
+    PropertyExecution(
+      propertyId(name),
+      successful,
+      discarded,
+      attempted,
+      shrinkCount,
+      seedExecutions,
+      status,
+    )
+
+  private def seedNode(value: SeedExecution): ObjectNode =
+    val node = ContractDecoder.mapper.createObjectNode()
+    node.put("seedIndex", value.seedIndex)
+    node.put("originalSeed", value.seed)
+    node.put("successfulTests", value.successful)
+    node.put("discardedTests", value.discarded)
+    node.put("attemptedTests", value.attempted)
+    node.put("replayToken", value.replayToken)
+    node.put("shrinks", value.shrinks)
+    node.put("status", value.status)
+    node
+
   private def propertyNode(value: PropertyExecution, detailed: Boolean): ObjectNode =
     val node = ContractDecoder.mapper.createObjectNode()
     node.put("propertyId", value.propertyId)
@@ -152,9 +208,12 @@ object PropertyEvidenceMain:
     node.put("discardedTests", value.discarded)
     if detailed then
       val _ = node.put("attemptedTests", value.attempted)
-      val _ = node.put("originalSeed", value.seed)
-      val _ = node.put("replayToken", value.replayToken)
       val _ = node.put("shrinks", value.shrinks)
+      val _ = node.put("seedCount", value.seedExecutions.size)
+      val seeds = value.seedExecutions.foldLeft(ContractDecoder.mapper.createArrayNode()) {
+        (array, execution) => array.add(seedNode(execution))
+      }
+      val _ = node.set[ArrayNode]("seedExecutions", seeds)
     node.put("status", value.status)
     node
 
@@ -222,24 +281,37 @@ object PropertyEvidenceMain:
     val seedRoot = ContractDecoder.mapper.readTree(Files.readString(seedCorpus))
     val seeds = seedRoot.path("seeds").elements().asScala.toVector.map(_.longValue())
     val registered = FrozenPropertyPlan.properties.toVector
+    val propertyPlanRoot =
+      ContractDecoder.mapper.readTree(Files.readString(propertyPlan))
     val expectedIds =
-      ContractDecoder.mapper
-        .readTree(Files.readString(propertyPlan))
+      propertyPlanRoot
         .path("properties")
         .elements()
         .asScala
         .toVector
         .map(_.path("propertyId").textValue())
     val registeredIds = registered.map((name, _) => propertyId(name))
+    val minimumSuccessful = propertyPlanRoot.path("minimumSuccessfulPerProperty").intValue()
+    val maximumDiscarded = propertyPlanRoot.path("maximumDiscardedPerProperty").intValue()
+    val minimumSuccessfulPerSeed =
+      if seeds.nonEmpty then (minimumSuccessful + seeds.size - 1) / seeds.size else 0
     val closureValid =
+      seedRoot.path("schemaVersion").textValue() == "s1.4x-property-seeds-v1" &&
+        seedRoot.path("generator").textValue() == "numpy-pcg64" &&
+        seedRoot.path("generatorVersion").textValue() == "numpy-2.5.1" &&
+        propertyPlanRoot.path("seedCount").intValue() == 24 &&
+        minimumSuccessful == 1000 &&
+        maximumDiscarded == 100 &&
+        minimumSuccessfulPerSeed == 42 &&
       seeds.size == 24 &&
+        seeds.distinct.size == seeds.size &&
         expectedIds.size == 25 &&
         registeredIds == expectedIds &&
         registeredIds.distinct.size == registeredIds.size
     val executions =
       if closureValid then
-        registered.zipWithIndex.map { case ((name, property), index) =>
-          executeProperty(name, property, seeds(index % seeds.size))
+        registered.map { case (name, property) =>
+          executeProperty(name, property, seeds, minimumSuccessfulPerSeed)
         }
       else Vector.empty
     val propertyStatus =
@@ -261,10 +333,13 @@ object PropertyEvidenceMain:
     executionReport.put("schemaVersion", "s1.4x-candidate-property-execution-v1")
     executionReport.put("implementation", Implementation)
     executionReport.put("propertyPlanSha256", propertyPlanSha)
+    executionReport.put("seedCorpusSha256", sha256(seedCorpus))
+    executionReport.put("seedCount", seeds.size)
+    executionReport.put("minimumSuccessfulPerSeed", minimumSuccessfulPerSeed)
     executionReport.put("framework", "scala-check-1.19.0")
     executionReport.put("toolchainProfile", cli.profile)
     executionReport.put("commandArgvSha256", cli.commandArgvSha256)
-    executionReport.put("runnerSha256", sha256(cli.runnerSource))
+    executionReport.put("runnerSha256", sha256(cli.runnerPath))
     executionReport.put("sourceClosureSha256", sourceClosure(scalaRoot))
     executionReport.put("startedAt", startedAt)
     executionReport.put("finishedAt", finishedAt)
