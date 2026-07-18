@@ -30,6 +30,7 @@ import S14X.Core.Models
     IndependenceResult (IndependenceResult),
     TrialProvenance (TrialProvenance),
   )
+import S14X.Core.NumericPrimitives (normalCdf, normalInverseCdf)
 import S14X.Core.ProductionMetrics
   ( annualizedVolatility,
     cagr,
@@ -50,6 +51,7 @@ tests =
     "pure-core"
     [ testCase "production hand fixtures" productionHandFixtures,
       testCase "advanced hand fixtures" advancedHandFixtures,
+      testCase "AS241 inverse and erfc CDF preserve extreme tails" normalDistributionPrimitives,
       testCase "stable validation precedence" stableErrors,
       testCase "backtest records preserve exact integer fields" backtestRecords
     ]
@@ -102,6 +104,17 @@ advancedHandFixtures = do
     0.8097031129023626
     (deflatedSharpeRatio 1.0 6 0.0 3.0 2 1.0 provenance)
 
+normalDistributionPrimitives :: IO ()
+normalDistributionPrimitives = do
+  assertDoubleClose 0.0 (normalInverseCdf 0.5)
+  assertDoubleClose (-1.9599639845400538) (normalInverseCdf 0.025)
+  assertDoubleClose 1.9599639845400536 (normalInverseCdf 0.975)
+  assertDoubleClose (-9.262340089798405) (normalInverseCdf 1.0e-20)
+  assertDoubleClose (-37.54067492154595) (normalInverseCdf 1.0e-308)
+  assertDoubleClose 6.22096057427182e-16 (normalCdf (-8.0))
+  assertDoubleClose 0.5 (normalCdf 0.0)
+  assertDoubleClose 0.9999999999999993 (normalCdf 8.0)
+
 stableErrors :: IO ()
 stableErrors = do
   simpleReturns (U.fromList [100.0]) @?= Left InputTooShort
@@ -137,6 +150,12 @@ assertScalarClose expected actual =
       assertBool
         ("expected " <> show expected <> ", got " <> show value)
         (abs (value - expected) <= 1.0e-12 * max 1.0 (max (abs value) (abs expected)))
+
+assertDoubleClose :: Double -> Double -> IO ()
+assertDoubleClose expected actual =
+  assertBool
+    ("expected " <> show expected <> ", got " <> show actual)
+    (abs (actual - expected) <= 1.0e-14 * max 1.0 (max (abs actual) (abs expected)))
 
 assertVectorClose :: [Double] -> Either StableError (U.Vector Double) -> IO ()
 assertVectorClose expected actual =
