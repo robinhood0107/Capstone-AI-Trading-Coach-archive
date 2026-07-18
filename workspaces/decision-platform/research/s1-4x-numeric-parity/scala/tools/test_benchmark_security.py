@@ -124,16 +124,25 @@ def main() -> int:
         cache_root.mkdir()
         block = root / "block"
         block.mkdir()
+        expect_error(
+            module,
+            lambda: module.deterministic_scala_environment(
+                cache_root=cache_root,
+                block_directory=block,
+                java_home=Path("/opt/jdk"),
+                base_environment={
+                    "COURSIER_CACHE": "/ambient/cache",
+                    "COURSIER_REPOSITORIES": "https://example.invalid",
+                    "SCALA_CLI_HOME": "/ambient/scala-cli",
+                },
+            ),
+            "ambient Scala/Coursier configuration passed",
+        )
         environment, closure = module.deterministic_scala_environment(
             cache_root=cache_root,
             block_directory=block,
             java_home=Path("/opt/jdk"),
-            base_environment={
-                "COURSIER_CACHE": "/ambient/cache",
-                "COURSIER_REPOSITORIES": "https://example.invalid",
-                "SCALA_CLI_HOME": "/ambient/scala-cli",
-                "JAVA_TOOL_OPTIONS": "-Xmx9g",
-            },
+            base_environment={"LANG": "C.UTF-8"},
         )
         assert environment["COURSIER_CACHE"] == str(
             cache_root / "coursier"
@@ -147,8 +156,6 @@ def main() -> int:
         assert environment["SCALA_CLI_CONFIG"] == str(
             block / "scala-cli-home/config.json"
         )
-        assert "COURSIER_REPOSITORIES" not in environment
-        assert "JAVA_TOOL_OPTIONS" not in environment
         assert closure["coursierCachePathId"] == "CACHE_ROOT/coursier"
         assert closure["scalaWorkspacePathId"].startswith(
             "CACHE_ROOT/scala-workspaces/"
@@ -156,7 +163,8 @@ def main() -> int:
 
     print(
         "SCALA_BENCHMARK_SECURITY_TEST_PASS "
-        "dirty=REJECT ignoredBuild=REJECT fdPin=PASS cacheIsolation=PASS"
+        "dirty=REJECT ignoredBuild=REJECT fdPin=PASS ambient=REJECT "
+        "cacheIsolation=PASS"
     )
     return 0
 

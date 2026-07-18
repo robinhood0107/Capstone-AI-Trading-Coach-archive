@@ -145,6 +145,18 @@ def main() -> int:
             ),
             "symlink build receipt passed",
         )
+        parent_link = Path(directory) / "parent-link"
+        parent_link.symlink_to(Path(directory), target_is_directory=True)
+        expect_error(
+            module,
+            lambda: module.load_build_receipt(
+                parent_link / path.name,
+                expected_docker_identity=identity,
+                inspected_image_id=image_id,
+                inspected_labels=labels,
+            ),
+            "symlink-parent build receipt passed",
+        )
 
     print(
         "SCALA_OCI_EVIDENCE_TEST_PASS "

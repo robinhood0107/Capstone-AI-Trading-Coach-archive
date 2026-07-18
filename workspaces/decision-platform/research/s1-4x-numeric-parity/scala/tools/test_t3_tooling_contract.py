@@ -189,6 +189,8 @@ def main() -> int:
     native_smoke = script("run-jmh-native-smoke.sh")
     native_full = script("run-jmh-native-full.sh")
     assert "--jmh --jmh-version 1.37" in compile_benchmarks
+    assert "S1_4X_SCALA_CLI_EXEC_PATH" in compile_benchmarks
+    assert '--workspace "$S1_4X_SCALA_WORKSPACE"' in compile_benchmarks
     for marker in (
         "-l",
         "-rf",
@@ -203,6 +205,8 @@ def main() -> int:
         "SCALA_CLI_HOME",
         "commandToolClosureSha256",
         "environmentValuesSha256",
+        "workspace_index = runtime_argv.index(\"--workspace\")",
+        "runtime_argv[3:workspace_index]",
     ):
         assert marker in native_smoke
     assert "S1_4X_MEASUREMENT_READY_MARKER" in native_smoke
