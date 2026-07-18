@@ -251,6 +251,13 @@ def main() -> int:
     capability = script("assemble-capability-results.sh")
     feature = script("assemble-feature-results.sh")
     assert "capability-smoke-plan.v1.json" in capability
+    for marker in (
+        'SCALAFMT_BIN="${S1_4X_SCALAFMT_BIN:?',
+        'SCALAFMT_RESULT="${S1_4X_SCALA_SCALAFMT_RESULT:?',
+        '--scalafmt-bin "$SCALAFMT_BIN"',
+        '--scalafmt "$SCALAFMT_RESULT"',
+    ):
+        assert marker in capability
     assert "feature-decisions.v1.json" in feature
     assert "lint-exceptions.v1.json" in feature
     capability_runner = (
