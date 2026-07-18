@@ -1,12 +1,23 @@
-#!/usr/bin/env bash
+#!/usr/bin/bash
 set -euo pipefail
 
 # Frozen runner가 전달한 shell-free argv를 research uv env의 한 Python process에 위임한다.
-ROOT="$(git rev-parse --show-toplevel)"
+unset BASH_ENV ENV CDPATH PYTHONPATH PYTHONHOME JAVA_TOOL_OPTIONS _JAVA_OPTIONS
+unset JDK_JAVA_OPTIONS GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0
+export PATH=/usr/bin:/bin
+export LANG=C.UTF-8
+export LC_ALL=C.UTF-8
+export GIT_CONFIG_NOSYSTEM=1
+export GIT_CONFIG_GLOBAL=/dev/null
+export GIT_OPTIONAL_LOCKS=0
+export GIT_TERMINAL_PROMPT=0
+readonly GIT_BIN=/usr/bin/git
+readonly UV_BIN=/home/pjjpj/.local/bin/uv
+
+ROOT="$("$GIT_BIN" -c core.fsmonitor=false rev-parse --show-toplevel)"
 S1_4X="$ROOT/workspaces/decision-platform/research/s1-4x-numeric-parity"
 PRODUCTION="$ROOT/workspaces/decision-platform/python-services"
 RESEARCH="$ROOT/workspaces/decision-platform/research/s1-4r-jax-risk"
-UV_BIN="${S1_4X_UV_BIN:-$(command -v uv)}"
 
 BOUNDARY=""
 EXPECT_BOUNDARY=false
@@ -30,7 +41,7 @@ export UV_PYTHON=3.12.13
 export JAX_PLATFORMS=cpu
 export JAX_ENABLE_X64=1
 
-exec "$UV_BIN" run --frozen --project "$PROJECT" \
+exec "$UV_BIN" run --frozen --no-config --project "$PROJECT" \
   python "$S1_4X/integration/python_benchmark_block.py" \
   --repo-root "$ROOT" \
   "$@"

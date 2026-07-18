@@ -12,41 +12,17 @@ from pathlib import Path
 
 from benchmark_commands import (
     BOUNDARY_IDS,
+    boundary_command_template,
     build_manifest,
+    host_command_template,
     write_manifest_exclusive,
 )
-from executable_identity import inspect_executable_path
+from executable_identity import inspect_executable_identity, inspect_executable_path
 
 
 def _identity(path: Path) -> dict[str, str]:
     inspected = inspect_executable_path(path, role="prepare")
     return {"path": inspected.path, "sha256": inspected.sha256}
-
-
-def _boundary_command(path: str, boundary: str) -> list[str]:
-    return [
-        path,
-        "--plan",
-        "{plan}",
-        "--block-dir",
-        "{block_dir}",
-        "--qualification",
-        "{qualification}",
-        "--boundary",
-        boundary,
-        "--selector",
-        "{selector_id}",
-        "--family",
-        "{family_id}",
-        "--rotation",
-        "{rotation_id}",
-        "--outer-repetition",
-        "{outer_repetition}",
-        "--run-id",
-        "{run_id}",
-        "--benchmark-subject-commit",
-        "{benchmark_subject_commit}",
-    ]
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -66,12 +42,38 @@ def main(argv: Sequence[str] | None = None) -> int:
     arguments = _parser().parse_args(argv)
     try:
         repo = arguments.repo_root.resolve(strict=True)
+        git = inspect_executable_identity(
+            {
+                "path": "/usr/bin/git",
+                "sha256": (
+                    "5516c9f362c29376ab9a499a33082f9f611941d8c75930c880e30ad109e39c9a"
+                ),
+            },
+            role="prepareGit",
+        ).path
         completed = subprocess.run(
-            ["git", "rev-parse", "--verify", "HEAD"],
+            [
+                git,
+                "-c",
+                "core.fsmonitor=false",
+                "rev-parse",
+                "--verify",
+                "HEAD",
+            ],
             cwd=repo,
             capture_output=True,
             check=False,
             text=True,
+            env={
+                "HOME": "/home/pjjpj",
+                "LANG": "C.UTF-8",
+                "LC_ALL": "C.UTF-8",
+                "PATH": "/usr/bin:/bin",
+                "GIT_CONFIG_NOSYSTEM": "1",
+                "GIT_CONFIG_GLOBAL": "/dev/null",
+                "GIT_OPTIONAL_LOCKS": "0",
+                "GIT_TERMINAL_PROMPT": "0",
+            },
             timeout=10,
         )
         subject = arguments.benchmark_subject_commit
@@ -94,15 +96,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         manifest = build_manifest(
             benchmark_subject_commit=subject,
             candidate_source_commit=subject,
-            host_validator_command=[
-                identities["host"]["path"],
-                "--output",
-                "{host_report}",
-                "--allowed-process-root-pid",
-                "{allowed_process_root_pid}",
-            ],
+            host_validator_command=host_command_template(
+                identities["host"]["path"]
+            ),
             boundary_commands={
-                boundary: _boundary_command(
+                boundary: boundary_command_template(
                     boundary_identity[boundary]["path"],
                     boundary,
                 )

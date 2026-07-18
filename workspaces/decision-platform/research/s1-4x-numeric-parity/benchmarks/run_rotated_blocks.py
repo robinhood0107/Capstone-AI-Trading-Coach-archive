@@ -25,6 +25,7 @@ from benchmark_contract import ContractError, sha256_file, strict_json_load
 from executable_identity import (
     ExecutableIdentityError,
     inspect_executable_identity,
+    inspect_regular_file_path,
 )
 from validate_benchmark_report import DEFAULT_PLAN, validate_block_result, validate_plan
 
@@ -63,6 +64,14 @@ F_SEAL_SEAL = getattr(fcntl, "F_SEAL_SEAL", 0x0001)
 F_SEAL_SHRINK = getattr(fcntl, "F_SEAL_SHRINK", 0x0002)
 F_SEAL_GROW = getattr(fcntl, "F_SEAL_GROW", 0x0004)
 F_SEAL_WRITE = getattr(fcntl, "F_SEAL_WRITE", 0x0008)
+FROZEN_BASH_IDENTITY = {
+    "path": "/usr/bin/bash",
+    "sha256": "3efccc187bafa75ff1e37d246270ab3e7aa559f242c7a52bf3ec2a1b5450bdbd",
+}
+FROZEN_GIT_IDENTITY = {
+    "path": "/usr/bin/git",
+    "sha256": "5516c9f362c29376ab9a499a33082f9f611941d8c75930c880e30ad109e39c9a",
+}
 
 
 @dataclass(frozen=True)
@@ -171,6 +180,70 @@ def block_directory(run_directory: Path, block: ScheduledBlock) -> Path:
     )
 
 
+def _strict_json_load_bytes(payload: bytes) -> Any:
+    """한 FD에서 읽은 manifest snapshot을 duplicate/non-finite 거부로 파싱한다."""
+
+    def unique(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ContractError(f"DUPLICATE_JSON_KEY:{key}")
+            result[key] = value
+        return result
+
+    def reject_constant(token: str) -> Any:
+        raise ContractError(f"NON_FINITE_JSON:{token}")
+
+    try:
+        return json.loads(
+            payload.decode("utf-8", errors="strict"),
+            object_pairs_hook=unique,
+            parse_constant=reject_constant,
+        )
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise ContractError("INVALID_COMMAND_MANIFEST_JSON") from exc
+
+
+def _host_command_template(executable: str) -> list[str]:
+    """Runner가 허용하는 host validator의 exact argv다."""
+
+    return [
+        executable,
+        "--output",
+        "{host_report}",
+        "--allowed-process-root-pid",
+        "{allowed_process_root_pid}",
+    ]
+
+
+def _boundary_command_template(executable: str, boundary_id: str) -> list[str]:
+    """모든 native boundary가 공유하는 exact argv 순서다."""
+
+    return [
+        executable,
+        "--plan",
+        "{plan}",
+        "--block-dir",
+        "{block_dir}",
+        "--qualification",
+        "{qualification}",
+        "--boundary",
+        boundary_id,
+        "--selector",
+        "{selector_id}",
+        "--family",
+        "{family_id}",
+        "--rotation",
+        "{rotation_id}",
+        "--outer-repetition",
+        "{outer_repetition}",
+        "--run-id",
+        "{run_id}",
+        "--benchmark-subject-commit",
+        "{benchmark_subject_commit}",
+    ]
+
+
 def _strict_command_manifest(
     path: Path,
     *,
@@ -180,13 +253,15 @@ def _strict_command_manifest(
 ) -> dict[str, Any]:
     """사전 동결 digest와 commit에 묶인 shell-free command allowlist만 수락한다."""
 
-    if path.is_symlink() or not path.is_file():
-        raise ContractError("COMMAND_MANIFEST_NOT_REGULAR_FILE")
     if SHA256_PATTERN.fullmatch(expected_sha256) is None:
         raise ContractError("INVALID_EXPECTED_COMMAND_MANIFEST_SHA256")
-    if sha256_file(path) != expected_sha256:
+    try:
+        snapshot = inspect_regular_file_path(path, role="commandManifest")
+    except ExecutableIdentityError as exc:
+        raise ContractError("COMMAND_MANIFEST_NOT_REGULAR_FILE") from exc
+    if snapshot.sha256 != expected_sha256:
         raise ContractError("COMMAND_MANIFEST_SHA256_MISMATCH")
-    manifest = strict_json_load(path)
+    manifest = _strict_json_load_bytes(snapshot.payload)
     if not isinstance(manifest, dict) or set(manifest) != {
         "schemaVersion",
         "benchmarkSubjectCommit",
@@ -230,6 +305,8 @@ def _strict_command_manifest(
         allowed_executables["hostValidator"],
         role="hostValidator",
     )
+    if host_command != _host_command_template(host_command[0]):
+        raise ContractError("HOST_COMMAND_TEMPLATE_MISMATCH")
     for boundary_id, command in boundary_commands.items():
         if (
             not isinstance(command, list)
@@ -248,6 +325,10 @@ def _strict_command_manifest(
             allowed_executables["boundaries"][boundary_id],
             role=boundary_id,
         )
+        if command != _boundary_command_template(command[0], boundary_id):
+            raise ContractError(
+                f"BOUNDARY_COMMAND_TEMPLATE_MISMATCH:{boundary_id}"
+            )
     return manifest
 
 
@@ -282,6 +363,17 @@ def _pin_executable(
         inspected = inspect_executable_identity(identity, role=role)
     except ExecutableIdentityError as exc:
         raise ContractError(str(exc)) from exc
+    if inspected.payload.startswith(b"#!"):
+        first_line = inspected.payload.splitlines(keepends=True)[:1]
+        if first_line != [b"#!/usr/bin/bash\n"]:
+            raise ContractError(f"COMMAND_SCRIPT_INTERPRETER_MISMATCH:{role}")
+        try:
+            inspect_executable_identity(
+                FROZEN_BASH_IDENTITY,
+                role=f"{role}:interpreter",
+            )
+        except ExecutableIdentityError as exc:
+            raise ContractError(str(exc)) from exc
     # Linux uapi constants; CPython builds do not expose both names consistently.
     memfd_cloexec = getattr(os, "MFD_CLOEXEC", 0x0001)
     memfd_allow_sealing = getattr(os, "MFD_ALLOW_SEALING", 0x0002)
@@ -370,13 +462,39 @@ def _verify_source_commit_binding(
     candidate_source_commit: str,
 ) -> None:
     try:
+        git = inspect_executable_identity(
+            FROZEN_GIT_IDENTITY,
+            role="sourceBindingGit",
+        ).path
+    except ExecutableIdentityError as exc:
+        raise ContractError(str(exc)) from exc
+    git_environment = {
+        "HOME": os.environ.get("HOME", ""),
+        "LANG": "C.UTF-8",
+        "LC_ALL": "C.UTF-8",
+        "PATH": "/usr/bin:/bin",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_OPTIONAL_LOCKS": "0",
+        "GIT_TERMINAL_PROMPT": "0",
+    }
+    try:
         resolved_root = repo_root.resolve(strict=True)
         completed = subprocess.run(
-            ["git", "rev-parse", "--show-toplevel", "--verify", "HEAD"],
+            [
+                git,
+                "-c",
+                "core.fsmonitor=false",
+                "rev-parse",
+                "--show-toplevel",
+                "--verify",
+                "HEAD",
+            ],
             cwd=resolved_root,
             check=False,
             capture_output=True,
             text=True,
+            env=git_environment,
             timeout=10,
         )
     except (OSError, subprocess.SubprocessError) as exc:
@@ -394,7 +512,9 @@ def _verify_source_commit_binding(
     try:
         status = subprocess.run(
             [
-                "git",
+                git,
+                "-c",
+                "core.fsmonitor=false",
                 "-c",
                 "core.quotepath=false",
                 "status",
@@ -405,6 +525,7 @@ def _verify_source_commit_binding(
             cwd=resolved_root,
             check=False,
             capture_output=True,
+            env=git_environment,
             timeout=10,
         )
     except (OSError, subprocess.SubprocessError) as exc:
@@ -413,6 +534,25 @@ def _verify_source_commit_binding(
         raise ContractError("CURRENT_SOURCE_WORKTREE_STATUS_FAILED")
     if status.stdout:
         raise ContractError("CURRENT_SOURCE_WORKTREE_DIRTY")
+
+
+def _benchmark_environment() -> dict[str, str]:
+    """Benchmark child에 필요한 값만 전달해 ambient code/tool 주입을 제거한다."""
+
+    home = os.environ.get("HOME")
+    if not home or not Path(home).is_absolute():
+        raise ContractError("BENCHMARK_HOME_INVALID")
+    return {
+        "HOME": home,
+        "LANG": "C.UTF-8",
+        "LC_ALL": "C.UTF-8",
+        "PATH": "/usr/bin:/bin",
+        "TMP": "/tmp",
+        "TMPDIR": "/tmp",
+        "TEMP": "/tmp",
+        **THREAD_ENVIRONMENT,
+        "S1_4X_THREAD_COUNT": "1",
+    }
 
 
 def _expected_host_policy(plan: dict[str, Any], *, root_pid: int) -> dict[str, Any]:
@@ -612,6 +752,83 @@ def _verify_measurement_qualification(
     return sha256_file(path)
 
 
+def _process_group_exists(process_group_id: int) -> bool:
+    """signal 0 probe에서 ESRCH만 정상 종료로 해석한다."""
+
+    if process_group_id <= 0:
+        raise ContractError("INVALID_TIMEOUT_PROCESS_GROUP")
+    try:
+        os.killpg(process_group_id, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError as exc:
+        raise ContractError("TIMEOUT_PROCESS_GROUP_PROBE_DENIED") from exc
+    except OSError as exc:
+        raise ContractError("TIMEOUT_PROCESS_GROUP_PROBE_FAILED") from exc
+    return True
+
+
+def _signal_process_group(process_group_id: int, sent_signal: int) -> None:
+    """이미 사라진 group은 멱등 성공으로 두고 다른 signal 오류는 숨기지 않는다."""
+
+    try:
+        os.killpg(process_group_id, sent_signal)
+    except ProcessLookupError:
+        return
+    except PermissionError as exc:
+        raise ContractError("TIMEOUT_PROCESS_GROUP_SIGNAL_DENIED") from exc
+    except OSError as exc:
+        raise ContractError("TIMEOUT_PROCESS_GROUP_SIGNAL_FAILED") from exc
+
+
+def _wait_for_process_group_exit(
+    process_group_id: int,
+    timeout_seconds: float,
+) -> bool:
+    """leader 종료와 별개로 descendant가 모두 사라질 때까지 짧게 확인한다."""
+
+    deadline = time.monotonic() + timeout_seconds
+    while _process_group_exists(process_group_id):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        time.sleep(min(0.05, remaining))
+    return True
+
+
+def _wait_for_leader(
+    process: subprocess.Popen[bytes],
+    *,
+    timeout_seconds: float,
+) -> bool:
+    try:
+        process.wait(timeout=timeout_seconds)
+    except subprocess.TimeoutExpired:
+        return False
+    except OSError as exc:
+        raise ContractError("TIMEOUT_PROCESS_LEADER_WAIT_FAILED") from exc
+    return True
+
+
+def _terminate_process_group(process: subprocess.Popen[bytes]) -> None:
+    """timeout 뒤 leader와 같은 session의 모든 descendant를 bounded 종료한다."""
+
+    _signal_process_group(process.pid, signal.SIGTERM)
+    leader_reaped = _wait_for_leader(process, timeout_seconds=5)
+    group_exited = _wait_for_process_group_exit(process.pid, 5)
+    if leader_reaped and group_exited:
+        return
+
+    _signal_process_group(process.pid, signal.SIGKILL)
+    if not leader_reaped:
+        leader_reaped = _wait_for_leader(process, timeout_seconds=5)
+    group_exited = _wait_for_process_group_exit(process.pid, 5)
+    if not group_exited:
+        raise ContractError("TIMEOUT_PROCESS_GROUP_SURVIVED_SIGKILL")
+    if not leader_reaped:
+        raise ContractError("TIMEOUT_PROCESS_LEADER_NOT_REAPED")
+
+
 def _run_process(
     command: list[str],
     *,
@@ -649,12 +866,7 @@ def _run_process(
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                os.killpg(process.pid, signal.SIGTERM)
-                try:
-                    process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    os.killpg(process.pid, signal.SIGKILL)
-                    process.wait(timeout=5)
+                _terminate_process_group(process)
                 raise ContractError("PERFORMANCE_DEADLINE_EXCEEDED")
             try:
                 return_code = process.wait(timeout=min(60.0, remaining))
@@ -761,9 +973,8 @@ def execute_schedule(
         candidate_source_commit=candidate_source_commit,
     )
     plan_sha256 = sha256_file(plan_path)
-    command_manifest_sha256 = sha256_file(command_manifest_path)
-    if command_manifest_sha256 != expected_command_manifest_sha256:
-        raise ContractError("COMMAND_MANIFEST_CHANGED_DURING_VALIDATION")
+    # Manifest hash와 semantic parse가 같은 FD snapshot을 사용했으므로 그 digest를 재사용한다.
+    command_manifest_sha256 = expected_command_manifest_sha256
     executable_stack = ExitStack()
     try:
         host_executable = executable_stack.enter_context(
@@ -784,9 +995,7 @@ def execute_schedule(
         _pin_current_process(set(plan["execution"]["cpuSet"]))
         total_deadline = time.monotonic() + plan["execution"]["totalRunTimeoutSeconds"]
         valid_performance_timeouts = 0
-        environment = dict(os.environ)
-        environment.update(THREAD_ENVIRONMENT)
-        environment["S1_4X_THREAD_COUNT"] = "1"
+        environment = _benchmark_environment()
         for block in schedule:
             remaining_total = total_deadline - time.monotonic()
             if remaining_total <= 0:

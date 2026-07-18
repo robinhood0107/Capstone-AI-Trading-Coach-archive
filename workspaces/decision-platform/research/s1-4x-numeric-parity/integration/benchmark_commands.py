@@ -11,6 +11,7 @@ import re
 import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
+from string import Formatter
 from typing import Any
 
 BENCHMARKS_DIRECTORY = Path(__file__).resolve().parents[1] / "benchmarks"
@@ -22,6 +23,7 @@ from executable_identity import (  # noqa: E402
 )
 from executable_identity import (  # noqa: E402
     inspect_executable_identity,
+    inspect_regular_file_path,
 )
 
 BOUNDARY_IDS = (
@@ -36,7 +38,7 @@ SHA256 = re.compile(r"^[0-9a-f]{64}$")
 COMMIT = re.compile(r"^[0-9a-f]{40}$")
 
 
-def _strict_json_load(path: Path) -> Any:
+def _strict_json_load_bytes(payload: bytes) -> Any:
     def unique(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
         result: dict[str, Any] = {}
         for key, value in pairs:
@@ -50,7 +52,7 @@ def _strict_json_load(path: Path) -> Any:
 
     try:
         return json.loads(
-            path.read_text(encoding="utf-8", errors="strict"),
+            payload.decode("utf-8", errors="strict"),
             object_pairs_hook=unique,
             parse_constant=reject_constant,
         )
@@ -58,12 +60,12 @@ def _strict_json_load(path: Path) -> Any:
         raise CommandManifestError("INVALID_JSON_FILE") from exc
 
 
-def _file_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for block in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
+def _strict_json_load(path: Path) -> Any:
+    try:
+        snapshot = inspect_regular_file_path(path, role="commandManifestInput")
+    except ValueError as exc:
+        raise CommandManifestError(str(exc)) from exc
+    return _strict_json_load_bytes(snapshot.payload)
 
 
 def _validate_identity(
@@ -83,6 +85,76 @@ def _validate_identity(
     ):
         raise CommandManifestError(f"COMMAND_EXECUTABLE_MISMATCH:{role}")
     inspect_executable_identity(identity, role=role)
+
+
+def host_command_template(executable: str) -> list[str]:
+    """Host validator wrapper의 frozen shell-free argv다."""
+
+    return [
+        executable,
+        "--output",
+        "{host_report}",
+        "--allowed-process-root-pid",
+        "{allowed_process_root_pid}",
+    ]
+
+
+def boundary_command_template(executable: str, boundary: str) -> list[str]:
+    """모든 native boundary wrapper가 공유하는 frozen argv 순서다."""
+
+    return [
+        executable,
+        "--plan",
+        "{plan}",
+        "--block-dir",
+        "{block_dir}",
+        "--qualification",
+        "{qualification}",
+        "--boundary",
+        boundary,
+        "--selector",
+        "{selector_id}",
+        "--family",
+        "{family_id}",
+        "--rotation",
+        "{rotation_id}",
+        "--outer-repetition",
+        "{outer_repetition}",
+        "--run-id",
+        "{run_id}",
+        "--benchmark-subject-commit",
+        "{benchmark_subject_commit}",
+    ]
+
+
+def _validate_placeholder_grammar(command: Sequence[str], *, error: str) -> None:
+    allowed = {
+        "host_report",
+        "allowed_process_root_pid",
+        "plan",
+        "block_dir",
+        "qualification",
+        "selector_id",
+        "family_id",
+        "rotation_id",
+        "outer_repetition",
+        "run_id",
+        "benchmark_subject_commit",
+    }
+    for argument in command:
+        try:
+            for _, field, format_spec, conversion in Formatter().parse(argument):
+                if field is None:
+                    continue
+                if (
+                    field not in allowed
+                    or not field.isidentifier()
+                    or format_spec
+                    or conversion is not None
+                ):
+                    raise CommandManifestError(error)
+        except ValueError as exc:
+            raise CommandManifestError(error) from exc
 
 
 def validate_manifest(value: Any) -> dict[str, Any]:
@@ -122,11 +194,10 @@ def validate_manifest(value: Any) -> dict[str, Any]:
         or set(identities["boundaries"]) != set(BOUNDARY_IDS)
     ):
         raise CommandManifestError("MANIFEST_COMMANDS_INVALID")
-    if sum(item.count("{host_report}") for item in host) != 1:
-        raise CommandManifestError("HOST_REPORT_PLACEHOLDER_COUNT")
-    if any("{qualification}" in item for item in host):
-        raise CommandManifestError("QUALIFICATION_IN_HOST_COMMAND")
     _validate_identity(host, identities["hostValidator"], role="hostValidator")
+    _validate_placeholder_grammar(host, error="HOST_COMMAND_TEMPLATE_MISMATCH")
+    if host != host_command_template(host[0]):
+        raise CommandManifestError("HOST_COMMAND_TEMPLATE_MISMATCH")
     for boundary in BOUNDARY_IDS:
         command = boundaries[boundary]
         if (
@@ -135,17 +206,19 @@ def validate_manifest(value: Any) -> dict[str, Any]:
             or not all(isinstance(item, str) and item for item in command)
         ):
             raise CommandManifestError(f"BOUNDARY_COMMAND_INVALID:{boundary}")
-        if sum(item.count("{qualification}") for item in command) != 1:
-            raise CommandManifestError(
-                f"QUALIFICATION_PLACEHOLDER_COUNT:{boundary}"
-            )
-        if any("{host_report}" in item for item in command):
-            raise CommandManifestError(f"HOST_REPORT_IN_BOUNDARY:{boundary}")
         _validate_identity(
             command,
             identities["boundaries"][boundary],
             role=boundary,
         )
+        _validate_placeholder_grammar(
+            command,
+            error=f"BOUNDARY_COMMAND_TEMPLATE_MISMATCH:{boundary}",
+        )
+        if command != boundary_command_template(command[0], boundary):
+            raise CommandManifestError(
+                f"BOUNDARY_COMMAND_TEMPLATE_MISMATCH:{boundary}"
+            )
     return value
 
 
@@ -223,11 +296,13 @@ def validate_manifest_file(path: Path, expected_sha256: str) -> dict[str, Any]:
 
     if SHA256.fullmatch(expected_sha256) is None:
         raise CommandManifestError("EXPECTED_SHA256_INVALID")
-    if path.is_symlink() or not path.is_file():
-        raise CommandManifestError("MANIFEST_NOT_REGULAR_FILE")
-    if _file_sha256(path) != expected_sha256:
+    try:
+        snapshot = inspect_regular_file_path(path, role="commandManifest")
+    except ValueError as exc:
+        raise CommandManifestError(str(exc)) from exc
+    if snapshot.sha256 != expected_sha256:
         raise CommandManifestError("MANIFEST_SHA256_MISMATCH")
-    return validate_manifest(_strict_json_load(path))
+    return validate_manifest(_strict_json_load_bytes(snapshot.payload))
 
 
 def _parser() -> argparse.ArgumentParser:

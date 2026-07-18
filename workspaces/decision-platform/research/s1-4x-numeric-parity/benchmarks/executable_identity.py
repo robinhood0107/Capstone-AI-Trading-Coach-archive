@@ -147,21 +147,25 @@ def _open_regular_without_symlinks(path: Path, *, role: str) -> int:
         os.close(directory_fd)
 
 
-def inspect_executable_path(path: Path, *, role: str) -> InspectedExecutable:
-    """현재 사용자에게 실행 가능한 symlink-free regular file의 바이트를 읽는다."""
-
+def _inspect_regular_path(
+    path: Path,
+    *,
+    role: str,
+    require_executable: bool,
+) -> InspectedExecutable:
     absolute = Path(os.path.abspath(path))
     descriptor = _open_regular_without_symlinks(absolute, role=role)
     try:
-        access_options: dict[str, bool] = {}
-        if os.access in os.supports_effective_ids:
-            access_options["effective_ids"] = True
-        if not os.access(
-            f"/proc/self/fd/{descriptor}",
-            os.X_OK,
-            **access_options,
-        ):
-            raise _identity_error("COMMAND_EXECUTABLE_NOT_EXECUTABLE", role)
+        if require_executable:
+            access_options: dict[str, bool] = {}
+            if os.access in os.supports_effective_ids:
+                access_options["effective_ids"] = True
+            if not os.access(
+                f"/proc/self/fd/{descriptor}",
+                os.X_OK,
+                **access_options,
+            ):
+                raise _identity_error("COMMAND_EXECUTABLE_NOT_EXECUTABLE", role)
         chunks: list[bytes] = []
         while True:
             block = os.read(descriptor, 1024 * 1024)
@@ -184,6 +188,26 @@ def inspect_executable_path(path: Path, *, role: str) -> InspectedExecutable:
         resolved_path=str(absolute),
         sha256=digest,
         payload=payload,
+    )
+
+
+def inspect_regular_file_path(path: Path, *, role: str) -> InspectedExecutable:
+    """Symlink-free regular file의 단일 FD snapshot을 읽어 hash와 bytes를 함께 반환한다."""
+
+    return _inspect_regular_path(
+        path,
+        role=role,
+        require_executable=False,
+    )
+
+
+def inspect_executable_path(path: Path, *, role: str) -> InspectedExecutable:
+    """현재 사용자에게 실행 가능한 symlink-free regular file의 바이트를 읽는다."""
+
+    return _inspect_regular_path(
+        path,
+        role=role,
+        require_executable=True,
     )
 
 
