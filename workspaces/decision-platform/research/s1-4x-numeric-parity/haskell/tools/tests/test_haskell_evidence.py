@@ -259,6 +259,61 @@ value = Maybe.fromJust
         self.assertEqual(fallback.profile_id, "baseline-o0-fasm")
         self.assertEqual(fallback.selected_by, "proven-fallback")
 
+    def test_profile_selector_rejects_coerced_or_nonfinite_ratio_values(self) -> None:
+        cases = [f"case-{index}" for index in range(7)]
+        valid = [
+            {
+                "orderBlock": index,
+                "ratios": {case_id: 0.95 for case_id in cases},
+            }
+            for index in range(4)
+        ]
+        for invalid in (True, "0.95", 1, float("nan"), float("inf")):
+            with self.subTest(invalid=invalid):
+                blocks = json.loads(json.dumps(valid))
+                blocks[0]["ratios"][cases[0]] = invalid
+                with self.assertRaisesRegex(
+                    haskell_evidence.EvidenceError,
+                    "qualification ratio must be a finite JSON decimal",
+                ):
+                    haskell_evidence.select_haskell_profile(
+                        blocks,
+                        qualification_case_order=cases,
+                    )
+
+    def test_profile_selector_rejects_unknown_block_fields_and_boolean_index(
+        self,
+    ) -> None:
+        cases = [f"case-{index}" for index in range(7)]
+        valid = [
+            {
+                "orderBlock": index,
+                "ratios": {case_id: 0.95 for case_id in cases},
+            }
+            for index in range(4)
+        ]
+        extra = json.loads(json.dumps(valid))
+        extra[0]["claimedAggregate"] = 0.1
+        with self.assertRaisesRegex(
+            haskell_evidence.EvidenceError,
+            "qualification block field set",
+        ):
+            haskell_evidence.select_haskell_profile(
+                extra,
+                qualification_case_order=cases,
+            )
+
+        boolean_index = json.loads(json.dumps(valid))
+        boolean_index[1]["orderBlock"] = True
+        with self.assertRaisesRegex(
+            haskell_evidence.EvidenceError,
+            "qualification order block index type",
+        ):
+            haskell_evidence.select_haskell_profile(
+                boolean_index,
+                qualification_case_order=cases,
+            )
+
     def test_cabal_projection_rejects_the_stale_single_library_shape(self) -> None:
         stale = """
 library
