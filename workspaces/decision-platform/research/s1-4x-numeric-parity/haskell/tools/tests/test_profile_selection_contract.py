@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -40,6 +41,169 @@ SPECIFICATION_NAME = "profile_workflow"
 
 
 class ProfileSelectionContractTests(unittest.TestCase):
+    @staticmethod
+    def _git(repository: Path, *arguments: str) -> str:
+        completed = subprocess.run(
+            ["/usr/bin/git", "-C", str(repository), *arguments],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return completed.stdout.strip()
+
+    def _profile_repository(
+        self,
+        temporary: str,
+    ) -> tuple[Path, Path, Path, str]:
+        repository = Path(temporary) / "repository"
+        profile = repository / "haskell/selected-profile.v1.json"
+        manifest = repository / "haskell/source-inputs.v1.json"
+        profile.parent.mkdir(parents=True)
+        profile.write_text(
+            '{"schemaVersion":"s1.4x-haskell-selected-profile-pending-v1"}\n',
+            encoding="utf-8",
+        )
+        manifest.write_text('{"state":"pending"}\n', encoding="utf-8")
+        self._git(repository, "init")
+        self._git(repository, "config", "user.email", "test@example.invalid")
+        self._git(repository, "config", "user.name", "S1.4X Test")
+        self._git(repository, "add", ".")
+        self._git(repository, "commit", "-m", "pending profile subject")
+        return repository, profile, manifest, self._git(
+            repository,
+            "rev-parse",
+            "HEAD",
+        )
+
+    def test_selected_profile_materialize_commit_check_is_non_circular(
+        self,
+    ) -> None:
+        helper = load_helper()
+        with tempfile.TemporaryDirectory() as temporary:
+            repository, profile, manifest, subject = self._profile_repository(
+                temporary
+            )
+            materialize = helper.resolve_selected_profile_commit_fixed_point(
+                repository,
+                mode="materialize",
+                expected_subject_commit=subject,
+                profile_relative_path="haskell/selected-profile.v1.json",
+                manifest_relative_path="haskell/source-inputs.v1.json",
+            )
+            self.assertEqual(
+                materialize,
+                {
+                    "currentCommit": subject,
+                    "materializationCommit": None,
+                    "preMaterializationSubjectCommit": subject,
+                },
+            )
+
+            profile.write_text(
+                '{"schemaVersion":"s1.4x-haskell-selected-profile-v1"}\n',
+                encoding="utf-8",
+            )
+            manifest.write_text('{"state":"final"}\n', encoding="utf-8")
+            self._git(repository, "add", ".")
+            self._git(repository, "commit", "-m", "materialize selected profile")
+            materialization_commit = self._git(
+                repository,
+                "rev-parse",
+                "HEAD",
+            )
+            check = helper.resolve_selected_profile_commit_fixed_point(
+                repository,
+                mode="check",
+                expected_subject_commit=subject,
+                profile_relative_path="haskell/selected-profile.v1.json",
+                manifest_relative_path="haskell/source-inputs.v1.json",
+            )
+            self.assertEqual(
+                check,
+                {
+                    "currentCommit": materialization_commit,
+                    "materializationCommit": materialization_commit,
+                    "preMaterializationSubjectCommit": subject,
+                },
+            )
+
+            report = repository / "reports/post-profile.txt"
+            report.parent.mkdir()
+            report.write_text("report-only descendant\n", encoding="utf-8")
+            self._git(repository, "add", ".")
+            self._git(repository, "commit", "-m", "report-only descendant")
+            descendant = helper.resolve_selected_profile_commit_fixed_point(
+                repository,
+                mode="check",
+                expected_subject_commit=subject,
+                profile_relative_path="haskell/selected-profile.v1.json",
+                manifest_relative_path="haskell/source-inputs.v1.json",
+            )
+            self.assertEqual(
+                descendant["materializationCommit"],
+                materialization_commit,
+            )
+
+    def test_selected_profile_commit_rejects_extra_or_later_profile_edits(
+        self,
+    ) -> None:
+        helper = load_helper()
+        with tempfile.TemporaryDirectory() as temporary:
+            repository, profile, manifest, subject = self._profile_repository(
+                temporary
+            )
+            profile.write_text(
+                '{"schemaVersion":"s1.4x-haskell-selected-profile-v1"}\n',
+                encoding="utf-8",
+            )
+            manifest.write_text('{"state":"final"}\n', encoding="utf-8")
+            (repository / "unrelated.txt").write_text(
+                "must not share the materialization commit\n",
+                encoding="utf-8",
+            )
+            self._git(repository, "add", ".")
+            self._git(repository, "commit", "-m", "invalid mixed materialization")
+            with self.assertRaisesRegex(
+                helper.WorkflowError,
+                "SELECTED_PROFILE_MATERIALIZATION_COMMIT_INVALID",
+            ):
+                helper.resolve_selected_profile_commit_fixed_point(
+                    repository,
+                    mode="check",
+                    expected_subject_commit=subject,
+                    profile_relative_path="haskell/selected-profile.v1.json",
+                    manifest_relative_path="haskell/source-inputs.v1.json",
+                )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            repository, profile, manifest, subject = self._profile_repository(
+                temporary
+            )
+            profile.write_text(
+                '{"schemaVersion":"s1.4x-haskell-selected-profile-v1"}\n',
+                encoding="utf-8",
+            )
+            manifest.write_text('{"state":"final"}\n', encoding="utf-8")
+            self._git(repository, "add", ".")
+            self._git(repository, "commit", "-m", "materialize selected profile")
+            profile.write_text(
+                '{"schemaVersion":"s1.4x-haskell-selected-profile-v1","drift":true}\n',
+                encoding="utf-8",
+            )
+            self._git(repository, "add", ".")
+            self._git(repository, "commit", "-m", "later profile drift")
+            with self.assertRaisesRegex(
+                helper.WorkflowError,
+                "SELECTED_PROFILE_MATERIALIZATION_COMMIT_INVALID",
+            ):
+                helper.resolve_selected_profile_commit_fixed_point(
+                    repository,
+                    mode="check",
+                    expected_subject_commit=subject,
+                    profile_relative_path="haskell/selected-profile.v1.json",
+                    manifest_relative_path="haskell/source-inputs.v1.json",
+                )
+
     def test_profile_marker_is_exact_same_snapshot_and_single_transition(self) -> None:
         helper = load_helper()
         with tempfile.TemporaryDirectory() as temporary:
