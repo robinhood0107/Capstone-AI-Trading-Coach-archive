@@ -76,9 +76,9 @@ final class S1_4XForbiddenSymbols
     "scala.scalanative" -> "scala/scalanative/",
   )
 
-  private def matchPolicy(symbol: Symbol): Option[String] =
-    if symbol == Symbol.None then None
-    else
+  private def matchPolicy(symbol: Symbol): Option[String] = {
+    if (symbol == Symbol.None) None
+    else {
       forbiddenMatchers
         .collectFirst {
           case (policyName, matcher) if matcher.matches(symbol) => policyName
@@ -89,6 +89,8 @@ final class S1_4XForbiddenSymbols
               policyName
           }
         )
+    }
+  }
 
   private def symbolPatches(tree: Tree, symbols: List[Symbol]): List[Patch] =
     symbols.distinct.flatMap { symbol =>

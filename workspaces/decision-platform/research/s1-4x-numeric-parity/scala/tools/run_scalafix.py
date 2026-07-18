@@ -187,6 +187,49 @@ def process_evidence(
     return {**value, "evidenceSha256": canonical_sha256(value)}
 
 
+def clean_semantic_commands(
+    *,
+    scalafix: Path,
+    scala_root: Path,
+    scalafix_config: Path,
+    rule_source: Path,
+    classpath: str,
+    semanticdb_root: Path,
+    sources: list[Path],
+) -> dict[str, list[str]]:
+    """Built-in semantic rule과 custom source rule을 별도 process로 강제한다."""
+
+    common = [
+        str(scalafix),
+        "--check",
+        "--scala-version",
+        "3.8.4",
+        "--classpath",
+        classpath,
+        "--sourceroot",
+        str(scala_root),
+        "--semanticdb-targetroots",
+        str(semanticdb_root),
+        "--config",
+        str(scalafix_config),
+    ]
+    files = ["--files", *map(str, sources)]
+    return {
+        "explicit-result-types": [
+            *common,
+            "--rules",
+            "ExplicitResultTypes",
+            *files,
+        ],
+        "custom-rule": [
+            *common,
+            "--rules",
+            f"file:{rule_source}",
+            *files,
+        ],
+    }
+
+
 def validate_paths(arguments: argparse.Namespace) -> None:
     for name in ("scala_root", "policy", "fixture_matrix", "scala_cli", "scalafix"):
         path = getattr(arguments, name)
@@ -330,35 +373,35 @@ def run(arguments: argparse.Namespace) -> Path:
     if not semanticdb_files or any(path.is_symlink() for path in semanticdb_files):
         raise SemanticPolicyError("SEMANTICDB_OUTPUT_MISSING")
 
-    semantic_command = [
-        str(scalafix),
-        "--check",
-        "--scala-version",
-        "3.8.4",
-        "--classpath",
-        classpath,
-        "--sourceroot",
-        str(scala_root),
-        "--semanticdb-targetroots",
-        str(semanticdb_root),
-        "--config",
-        str(scalafix_config),
-        "--rules",
-        "DisableSyntax",
-        "ExplicitResultTypes",
-        f"file:{rule_source}",
-        "--files",
-        *map(str, sources),
-    ]
-    semantic = run_process(
-        semantic_command,
+    semantic_commands = clean_semantic_commands(
+        scalafix=scalafix,
+        scala_root=scala_root,
+        scalafix_config=scalafix_config,
+        rule_source=rule_source,
+        classpath=classpath,
+        semanticdb_root=semanticdb_root,
+        sources=sources,
+    )
+    explicit_result_types_command = semantic_commands["explicit-result-types"]
+    explicit_result_types = run_process(
+        explicit_result_types_command,
         cwd=scala_root,
         environment=environment,
         log_root=log_root,
-        log_id="clean-semantic-rules",
+        log_id="clean-explicit-result-types",
     )
-    if semantic.returncode != 0:
-        raise SemanticPolicyError("CLEAN_SEMANTIC_RULE_FAILED")
+    if explicit_result_types.returncode != 0:
+        raise SemanticPolicyError("CLEAN_EXPLICIT_RESULT_TYPES_FAILED")
+    custom_rule_command = semantic_commands["custom-rule"]
+    custom_rule = run_process(
+        custom_rule_command,
+        cwd=scala_root,
+        environment=environment,
+        log_root=log_root,
+        log_id="clean-custom-semantic-rule",
+    )
+    if custom_rule.returncode != 0:
+        raise SemanticPolicyError("CLEAN_CUSTOM_SEMANTIC_RULE_FAILED")
 
     semantic_fixtures = [
         item
@@ -541,7 +584,11 @@ def run(arguments: argparse.Namespace) -> Path:
             "binaryPath": str(scalafix),
             "binarySha256": sha256_file(scalafix),
             "version": "0.14.7",
-            "commandArgvSha256": canonical_sha256(semantic_command),
+            "commandArgvSha256": canonical_sha256(semantic_commands),
+            "explicitResultTypesCommandArgvSha256": canonical_sha256(
+                explicit_result_types_command
+            ),
+            "customRuleCommandArgvSha256": canonical_sha256(custom_rule_command),
             "syntacticCommandArgvSha256": canonical_sha256(syntactic_command),
         },
         "rule": {
@@ -553,7 +600,14 @@ def run(arguments: argparse.Namespace) -> Path:
             "startedAt": started_at,
             "finishedAt": finished_at,
             "cleanSyntactic": process_evidence(syntactic_command, syntactic),
-            "cleanSemantic": process_evidence(semantic_command, semantic),
+            "cleanExplicitResultTypes": process_evidence(
+                explicit_result_types_command,
+                explicit_result_types,
+            ),
+            "cleanCustomSemanticRule": process_evidence(
+                custom_rule_command,
+                custom_rule,
+            ),
         },
         "negativeMatrix": negative_results,
         "status": "PASS",
