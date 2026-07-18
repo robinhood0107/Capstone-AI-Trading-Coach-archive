@@ -245,8 +245,14 @@ def main() -> int:
     native_smoke = script("run-jmh-native-smoke.sh")
     native_full = script("run-jmh-native-full.sh")
     assert "--jmh --jmh-version 1.37" in compile_benchmarks
+    assert "--print-classpath" in compile_benchmarks
+    assert "precompile_jmh_generated_java.py" in compile_benchmarks
+    assert "scala-jmh-generated-java-precompile.v1.json" in (
+        compile_benchmarks
+    )
     assert "S1_4X_SCALA_CLI_EXEC_PATH" in compile_benchmarks
     assert '--workspace "$S1_4X_SCALA_WORKSPACE"' in compile_benchmarks
+    assert "--server=true" not in compile_benchmarks
     for marker in (
         "-l",
         "-rf",
@@ -265,8 +271,20 @@ def main() -> int:
         "workspace_index = runtime_argv.index(\"--workspace\")",
         "runtime_argv[3:workspace_index]",
         '"-jvm", "PINNED_JAVA_FD"',
+        'JAVAC_EXECUTABLE="${JAVA_HOME:?JAVA_HOME is required}/bin/javac"',
+        "S1_4X_SCALA_JAVAC_PINNED_FD_PATH",
+        '--classpath "$precompiled_classes"',
+        "generatedJavaPrecompileReceiptSha256",
+        "JVM_FORK_FILE_COUNT_MISMATCH:expected=",
     ):
         assert marker in native_smoke
+    assert "--server=true" not in native_smoke
+    assert native_smoke.index("--server=false") < native_smoke.index(
+        '--classpath "$precompiled_classes"'
+    )
+    assert native_smoke.index('"-jvm", "PINNED_JAVA_FD"') > (
+        native_smoke.index("S1_4X_SCALA_JAVAC_PINNED_FD_PATH")
+    )
     assert "S1_4X_MEASUREMENT_READY_MARKER" in native_smoke
     assert "measurementReadyMarkerSha256" in native_smoke
     benchmark_invocation = (
