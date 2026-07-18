@@ -30,7 +30,12 @@ import S14X.Core.Models
     IndependenceResult (IndependenceResult),
     TrialProvenance (TrialProvenance),
   )
-import S14X.Core.NumericPrimitives (normalCdf, normalInverseCdf)
+import S14X.Core.NumericPrimitives
+  ( meanVector,
+    normalCdf,
+    normalInverseCdf,
+    sumVector,
+  )
 import S14X.Core.ProductionMetrics
   ( annualizedVolatility,
     cagr,
@@ -52,6 +57,7 @@ tests =
     [ testCase "production hand fixtures" productionHandFixtures,
       testCase "advanced hand fixtures" advancedHandFixtures,
       testCase "AS241 inverse and erfc CDF preserve extreme tails" normalDistributionPrimitives,
+      testCase "compensated sum preserves cancellation residuals" compensatedSummation,
       testCase "stable validation precedence" stableErrors,
       testCase "backtest records preserve exact integer fields" backtestRecords
     ]
@@ -114,6 +120,14 @@ normalDistributionPrimitives = do
   assertDoubleClose 6.22096057427182e-16 (normalCdf (-8.0))
   assertDoubleClose 0.5 (normalCdf 0.0)
   assertDoubleClose 0.9999999999999993 (normalCdf 8.0)
+
+compensatedSummation :: IO ()
+compensatedSummation = do
+  let cancellation = U.fromList [1.0e16, 1.0, -1.0e16]
+      scaleAware = U.fromList [1.0e308, -1.0e308, 1.0]
+  sumVector cancellation @?= 1.0
+  meanVector cancellation @?= (1.0 / 3.0)
+  sumVector scaleAware @?= 1.0
 
 stableErrors :: IO ()
 stableErrors = do
