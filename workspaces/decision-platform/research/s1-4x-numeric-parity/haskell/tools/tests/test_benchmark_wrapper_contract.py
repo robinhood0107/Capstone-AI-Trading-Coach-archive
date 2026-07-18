@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import stat
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -52,7 +55,6 @@ class BenchmarkWrapperContractTests(unittest.TestCase):
             "BASH_SOURCE",
             'readlink -f "$0"',
             'realpath "$0"',
-            "/proc/self/",
             "/proc/$$/",
         ):
             self.assertNotIn(forbidden, source)
@@ -199,6 +201,222 @@ class BenchmarkWrapperContractTests(unittest.TestCase):
         self.assertIn('HOME="/nonexistent"', source)
         self.assertIn('S1_4X_CACHE_ROOT="$CACHE_ROOT"', source)
         self.assertNotIn('RUNTIME_HOME="${HOME:', source)
+
+    def test_wrapper_helper_stack_ghc_chain_inherits_pinned_fds(self) -> None:
+        def write_executable(path: Path, source: str) -> None:
+            path.write_text(source, encoding="utf-8")
+            path.chmod(0o755)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            marker = root / "ghc-reached.txt"
+            fake_python = root / "benchmark-python"
+            ghcup = root / "ghcup"
+            stack = root / "stack"
+            ghc = root / "ghc"
+            passthrough = root / "other-tool"
+            shared_prelude = (
+                "#!/usr/bin/python3\n"
+                "import os\n"
+                "import subprocess\n"
+                "import sys\n"
+                "fds = tuple(int(value) for value in "
+                "os.environ['TEST_PASS_FDS'].split(','))\n"
+            )
+            write_executable(
+                ghcup,
+                shared_prelude
+                + "separator = sys.argv.index('--')\n"
+                + "completed = subprocess.run("
+                + "sys.argv[separator + 1:], check=False, pass_fds=fds)\n"
+                + "raise SystemExit(completed.returncode)\n",
+            )
+            write_executable(
+                stack,
+                shared_prelude
+                + "import shutil\n"
+                + "from pathlib import Path\n"
+                + "target = shutil.which('ghc')\n"
+                + "if target != os.environ['TEST_GHC_SHIM']:\n"
+                + "    raise SystemExit(91)\n"
+                + "for name in ('ghc-pkg', 'runghc', 'haddock'):\n"
+                + "    auxiliary = Path(target).with_name(name)\n"
+                + "    if not auxiliary.exists():\n"
+                + "        raise SystemExit(92)\n"
+                + "    probe = subprocess.run("
+                + "[str(auxiliary), '--probe'], check=False, pass_fds=fds)\n"
+                + "    if probe.returncode != 0:\n"
+                + "        raise SystemExit(93)\n"
+                + "completed = subprocess.run("
+                + "[target, '--probe'], check=False, pass_fds=fds)\n"
+                + "raise SystemExit(completed.returncode)\n",
+            )
+            write_executable(
+                ghc,
+                "#!/usr/bin/python3\n"
+                "import os\n"
+                "from pathlib import Path\n"
+                "Path(os.environ['TEST_MARKER']).write_text("
+                "os.readlink(os.environ['TEST_GHC_SHIM']), encoding='utf-8')\n",
+            )
+            for auxiliary_name in ("ghc-pkg", "runghc", "haddock"):
+                write_executable(
+                    root / auxiliary_name,
+                    "#!/usr/bin/python3\nraise SystemExit(0)\n",
+                )
+            write_executable(
+                passthrough,
+                "#!/usr/bin/python3\nraise SystemExit(0)\n",
+            )
+            write_executable(
+                fake_python,
+                "#!/usr/bin/python3\n"
+                "import importlib.util\n"
+                "import os\n"
+                "import sys\n"
+                "from pathlib import Path\n"
+                "helper_path = Path(sys.argv[1])\n"
+                "spec = importlib.util.spec_from_file_location("
+                "'outer_fd_probe_helper', helper_path)\n"
+                "if spec is None or spec.loader is None:\n"
+                "    raise SystemExit(81)\n"
+                "module = importlib.util.module_from_spec(spec)\n"
+                "sys.modules[spec.name] = module\n"
+                "spec.loader.exec_module(module)\n"
+                "pinned = tuple(module.pinned_executable_environment("
+                "prefix, label=label) for prefix, label in ("
+                "('S1_4X_GHCUP', 'GHCUP'),"
+                "('S1_4X_STACK', 'STACK'),"
+                "('S1_4X_AUTHORITATIVE_GHC', 'AUTHORITATIVE_GHC')))\n"
+                "ghcup, stack, ghc = pinned\n"
+                "stack_root = Path(os.environ['S1_4X_CACHE_ROOT']) / "
+                "'outer-helper-probe'\n"
+                "stack_root.mkdir(mode=0o700)\n"
+                "tool_path, shim = module.prepare_authoritative_ghc_shim("
+                "stack_root=stack_root, authoritative_ghc=ghc)\n"
+                "marker = Path(sys.argv[sys.argv.index('--plan') + 1])\n"
+                "environment = dict(os.environ)\n"
+                "environment.update({"
+                "'TEST_PASS_FDS': ','.join(str(item.descriptor) "
+                "for item in pinned),"
+                "'TEST_GHC_SHIM': str(shim),"
+                "'TEST_MARKER': str(marker)})\n"
+                "command = module.build_stack_benchmark_command("
+                "ghcup_bin=ghcup.fd_path, stack_bin=stack.fd_path, "
+                "tool_path=tool_path, stack_yaml=stack_root / 'stack.yaml', "
+                "stack_root=stack_root, work_dir=Path('.stack-work') / "
+                "'s1-4x' / stack_root.name, "
+                "profile_options=['-O0', '-fasm'], time_limit_seconds=5, "
+                "native_report=stack_root / 'raw.json', "
+                "criterion_prefix='probe/')\n"
+                "completed = module.run_pinned_subprocess("
+                "command, cwd=stack_root, environment=environment, "
+                "pinned_executables=pinned, capture_output=True)\n"
+                "raise SystemExit(completed.returncode)\n",
+            )
+            tool_paths = (ghcup, stack, ghc, passthrough, passthrough, passthrough)
+            descriptors = [os.open(path, os.O_RDONLY) for path in tool_paths]
+            evidence_paths = []
+            evidence_descriptors = []
+            for name in ("baseline", "optimized", "qualification"):
+                path = root / f"{name}.json"
+                path.write_text('{"status":"PASS"}\n', encoding="utf-8")
+                evidence_paths.append(path)
+                evidence_descriptors.append(os.open(path, os.O_RDONLY))
+            try:
+                environment = {
+                    "PATH": "/usr/bin:/bin",
+                    "S1_4X_BENCHMARK_PYTHON_BIN": str(fake_python),
+                    "S1_4X_BENCHMARK_PYTHON_SHA256": hashlib.sha256(
+                        fake_python.read_bytes()
+                    ).hexdigest(),
+                    "S1_4X_CACHE_ROOT": str(root),
+                }
+                for prefix, path, descriptor in zip(
+                    (
+                        "S1_4X_GHCUP",
+                        "S1_4X_STACK",
+                        "S1_4X_AUTHORITATIVE_GHC",
+                        "S1_4X_LATEST_GHC",
+                        "S1_4X_HLINT",
+                        "S1_4X_STYLISH",
+                    ),
+                    tool_paths,
+                    descriptors,
+                    strict=True,
+                ):
+                    environment.update(
+                        {
+                            f"{prefix}_BIN": str(path),
+                            f"{prefix}_SHA256": hashlib.sha256(
+                                path.read_bytes()
+                            ).hexdigest(),
+                            f"{prefix}_PINNED_FD_PATH": (
+                                f"/proc/self/fd/{descriptor}"
+                            ),
+                        }
+                    )
+                for prefix, path, descriptor in zip(
+                    (
+                        "S1_4X_HASKELL_BASELINE_CORRECTNESS",
+                        "S1_4X_HASKELL_OPTIMIZED_CORRECTNESS",
+                        "S1_4X_HASKELL_QUALIFICATION_ARTIFACT",
+                    ),
+                    evidence_paths,
+                    evidence_descriptors,
+                    strict=True,
+                ):
+                    environment.update(
+                        {
+                            prefix: f"/proc/self/fd/{descriptor}",
+                            f"{prefix}_SHA256": hashlib.sha256(
+                                path.read_bytes()
+                            ).hexdigest(),
+                            f"{prefix}_SOURCE_PATH": str(path),
+                        }
+                    )
+                completed = subprocess.run(
+                    [
+                        str(WRAPPER),
+                        "--plan",
+                        str(marker),
+                        "--block-dir",
+                        str(root / "block"),
+                        "--qualification",
+                        str(root / "timeout-qualification.json"),
+                        "--boundary",
+                        "haskell",
+                        "--selector",
+                        "haskell/probe",
+                        "--family",
+                        "probe",
+                        "--rotation",
+                        "R1",
+                        "--outer-repetition",
+                        "1",
+                        "--run-id",
+                        "fd-probe",
+                        "--benchmark-subject-commit",
+                        "a" * 40,
+                    ],
+                    cwd=HASKELL_ROOT.parents[4],
+                    env=environment,
+                    check=False,
+                    capture_output=True,
+                    pass_fds=tuple(descriptors + evidence_descriptors),
+                )
+                self.assertEqual(
+                    completed.returncode,
+                    0,
+                    completed.stderr.decode("utf-8", errors="replace"),
+                )
+                self.assertEqual(
+                    marker.read_text(encoding="utf-8"),
+                    f"/proc/self/fd/{descriptors[2]}",
+                )
+            finally:
+                for descriptor in descriptors + evidence_descriptors:
+                    os.close(descriptor)
 
 
 if __name__ == "__main__":
