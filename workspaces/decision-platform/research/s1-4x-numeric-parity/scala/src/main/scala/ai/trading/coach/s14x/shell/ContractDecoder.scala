@@ -134,10 +134,12 @@ object ContractDecoder:
             arguments.size() <= 8 =>
         val objectArguments = arguments.deepCopy[ObjectNode]()
         val argumentFields = fields(objectArguments)
-        val (required, optional) = ArgumentContract(functionId)
-        if required.subsetOf(argumentFields) && argumentFields.subsetOf(required ++ optional) then
-          Right(CanonicalCase(fixtureId, functionId, objectArguments))
-        else Left(TransportError("request_invalid", fixtureId = Some(fixtureId)))
+        ArgumentContract.get(functionId) match
+          case Some((required, optional))
+              if required.subsetOf(argumentFields) &&
+                argumentFields.subsetOf(required ++ optional) =>
+            Right(CanonicalCase(fixtureId, functionId, objectArguments))
+          case _ => Left(TransportError("request_invalid", fixtureId = Some(fixtureId)))
       case _ => Left(TransportError("request_invalid", fixtureId = fixture))
 
   /** UTF-8 decode 후 호출되며 duplicate key와 integer -0을 tree materialization 전에 거부한다. */
