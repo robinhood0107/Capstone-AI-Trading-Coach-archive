@@ -205,8 +205,8 @@ final class BenchmarkInvocation private (
     val valid =
       try
         prepared.exists(value => runPrepared(value).isFinite) &&
-        JvmForkEvidence.record() &&
-        JvmForkEvidence.markMeasurementReady()
+          JvmForkEvidence.record() &&
+          JvmForkEvidence.markMeasurementReady()
       catch case NonFatal(_) => false
     if !valid then System.exit(70)
 

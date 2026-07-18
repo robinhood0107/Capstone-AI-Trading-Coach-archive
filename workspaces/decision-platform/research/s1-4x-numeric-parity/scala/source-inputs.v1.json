@@ -4,7 +4,7 @@
   "files": {
     "benchmarks/scala/ai/trading/coach/s14x/benchmark/BenchmarkInvocation.scala": {
       "role": "benchmark",
-      "sha256": "8e8e7e11ab7b46857df243a3f46d3fa301a6564536837310b375aa5cc293be5a"
+      "sha256": "03ec06d95537a9503602b457665030a1df2c2b45d426474f856f341b12e12658"
     },
     "benchmarks/scala/ai/trading/coach/s14x/benchmark/BenchmarkSetupProbeMain.scala": {
       "role": "benchmark",
@@ -12,7 +12,7 @@
     },
     "benchmarks/scala/ai/trading/coach/s14x/benchmark/JvmForkEvidence.scala": {
       "role": "benchmark",
-      "sha256": "30a403376553eb49fb4aee4e4d2331d539e2505652d95554eef7706c83e78815"
+      "sha256": "7c7ebe5691c48bfddfaf37a6a25939189f8fd7b4e2ed4a443b4f16a4c603da90"
     },
     "benchmarks/scala/s1_4x/benchmarks/classical_path_risk/ClassicalPathRiskBenchmark.scala": {
       "role": "benchmark",
@@ -127,5 +127,5 @@
     "lint": "files",
     "profileRun": "files"
   },
-  "canonicalManifestSha256": "adda61b3865104f9d89f1ffa55050c17443a010b37ab6e354b0425490ab018b1"
+  "canonicalManifestSha256": "7e02690a712c1fc9720b332b26c597789a9324e0c671a13df78c1de596abd0e6"
 }

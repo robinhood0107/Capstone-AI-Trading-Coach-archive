@@ -13,8 +13,8 @@ import java.security.MessageDigest
 import scala.jdk.CollectionConverters.*
 import scala.util.control.NonFatal
 
-/** 각 실제 JMH fork의 RuntimeMXBean JVM argument와 exact JDK identity를 timing 전에 exclusive JSON으로 남긴다. 로컬 절대
-  * 경로와 환경값은 기록하지 않고 portable path ID와 hash만 보존한다.
+/** 각 실제 JMH fork의 RuntimeMXBean JVM argument와 exact JDK identity를 timing 전에 exclusive JSON으로 남긴다.
+  * 로컬 절대 경로와 환경값은 기록하지 않고 portable path ID와 hash만 보존한다.
   */
 object JvmForkEvidence:
   private val Mapper = ObjectMapper()
@@ -63,16 +63,12 @@ object JvmForkEvidence:
   private def environmentHash: String =
     sha256(
       canonicalPairs(
-        EnvironmentNames.map(name =>
-          name -> sys.env.get(name).fold("UNSET")(_ => "SET")
-        )
+        EnvironmentNames.map(name => name -> sys.env.get(name).fold("UNSET")(_ => "SET"))
       )
     )
 
   private def stableProperties: Vector[(String, String)] =
-    StablePropertyNames.map(name =>
-      name -> Option(System.getProperty(name)).getOrElse("UNSET")
-    )
+    StablePropertyNames.map(name => name -> Option(System.getProperty(name)).getOrElse("UNSET"))
 
   private def ambientJvmOptions: Vector[(String, String)] =
     AmbientJvmOptionNames.map(name => name -> sys.env.getOrElse(name, "UNSET"))
