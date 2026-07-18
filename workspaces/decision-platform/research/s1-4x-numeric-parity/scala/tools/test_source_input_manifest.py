@@ -29,6 +29,7 @@ INPUT_SET_KEYS = {
     "lint",
     "profileRun",
 }
+FORBIDDEN_COMPILED_SUFFIXES = (".sc", ".java", ".kt", ".kts")
 
 
 def strict_json(path: Path) -> dict[str, Any]:
@@ -146,9 +147,29 @@ def main() -> int:
     else:
         raise AssertionError("stale source hash unexpectedly passed")
 
+    for suffix in FORBIDDEN_COMPILED_SUFFIXES:
+        escaped = SCALA_ROOT / "benchmarks" / f"SourceInputEscape{suffix}"
+        assert not escaped.exists(), escaped
+        try:
+            escaped.write_text("final class SourceInputEscape {}\n", encoding="utf-8")
+            try:
+                source_manifest.validated_source_files(
+                    SCALA_ROOT,
+                    manifest,
+                    policy=policy,
+                    require_git_source_equality=True,
+                )
+            except source_manifest.SourceInputManifestError as error:
+                assert "FORBIDDEN_COMPILED_SOURCE" in str(error)
+            else:
+                raise AssertionError(f"compiled source escape unexpectedly passed: {suffix}")
+        finally:
+            escaped.unlink(missing_ok=True)
+
     print(
         "SCALA_SOURCE_INPUT_MANIFEST_TEST_PASS "
-        f"files={len(expected_paths)} inputSets={len(INPUT_SET_KEYS)}"
+        f"files={len(expected_paths)} inputSets={len(INPUT_SET_KEYS)} "
+        f"forbiddenSuffixes={len(FORBIDDEN_COMPILED_SUFFIXES)}"
     )
     return 0
 
