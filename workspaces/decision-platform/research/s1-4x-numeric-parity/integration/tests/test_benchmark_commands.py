@@ -292,6 +292,13 @@ class BenchmarkCommandManifestTests(TestCase):
                 self.assertNotIn("command -v", source)
                 self.assertIn("S1_4X_UV_BIN", source)
                 self.assertIn("/proc/self/fd/", source)
+        python_source = wrappers[1].read_text(encoding="utf-8")
+        self.assertIn(
+            "S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH",
+            python_source,
+        )
+        self.assertIn("S1_4X_BENCHMARK_PYTHON_SHA256", python_source)
+        self.assertIn("export UV_PYTHON=", python_source)
 
     def test_prepare_command_does_not_embed_a_local_user_home(self) -> None:
         source = (INTEGRATION / "prepare_benchmark_commands.py").read_text(
