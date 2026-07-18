@@ -179,6 +179,34 @@ class CompatibilityEvidenceTests(unittest.TestCase):
         ):
             compatibility_evidence.validate_result_binding(altered, self.evidence)
 
+    def test_historical_and_canonical_command_contracts_stay_separate(self) -> None:
+        execution = self.evidence["execution"]
+        historical = execution["historicalCommand"]
+        canonical = execution["canonicalReproducer"]
+        self.assertEqual(execution["rolloutCallId"], "call_0AtmO5VLjaiRGKBkS7iRyb0H")
+        self.assertEqual(execution["timeoutMs"], 900000)
+        self.assertEqual(
+            historical["shellSetup"],
+            {
+                "directoryMode": "0700",
+                "outputPathTemplate": "CACHE_ROOT/haskell-evidence/$RUN_ID",
+                "runIdExpression": (
+                    "ghc914-solve-$(date -u +%Y%m%dT%H%M%SZ)"
+                ),
+                "stackRootPathId": "CACHE_ROOT/stack-root-ghc914",
+            },
+        )
+        self.assertIn("S1_4X_GHC_914_BIN", historical["legacyEnvironment"])
+        self.assertIn(
+            "S1_4X_LATEST_GHC_BIN",
+            canonical["requiredEnvironment"],
+        )
+        self.assertNotIn(
+            "S1_4X_GHC_914_BIN",
+            canonical["requiredEnvironment"],
+        )
+        self.assertEqual(historical["argv"], canonical["argv"])
+
 
 if __name__ == "__main__":
     unittest.main()
