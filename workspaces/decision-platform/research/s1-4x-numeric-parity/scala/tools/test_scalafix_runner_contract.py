@@ -47,6 +47,31 @@ def main() -> int:
 
     runner = load_runner()
     sources = [SCALA_ROOT / "project.scala", SCALA_ROOT / "selected-profile.scala"]
+    test_dependencies = runner.project_test_dependencies(
+        SCALA_ROOT / "project.scala"
+    )
+    assert test_dependencies == [
+        "org.scalameta::munit:1.3.0",
+        "org.scalameta::munit-scalacheck:1.3.0",
+        "org.scalacheck::scalacheck:1.19.0",
+    ]
+    compile_command = runner.clean_semanticdb_compile_command(
+        scala_cli=Path("/tool/scala-cli"),
+        scala_root=SCALA_ROOT,
+        semanticdb_root=Path("/evidence/semanticdb"),
+        sources=sources,
+        test_dependencies=test_dependencies,
+    )
+    assert "--test" in compile_command
+    assert compile_command.count("--dependency") == len(test_dependencies)
+    for dependency in test_dependencies:
+        offset = compile_command.index(dependency)
+        assert compile_command[offset - 1 : offset + 1] == [
+            "--dependency",
+            dependency,
+        ]
+    assert all(str(source_path) in compile_command for source_path in sources)
+
     commands = runner.clean_semantic_commands(
         scalafix=Path("/tool/scalafix"),
         scala_root=SCALA_ROOT,
@@ -74,7 +99,10 @@ def main() -> int:
     ):
         assert required_receipt_field in runner_source
 
-    print("SCALA_SCALAFIX_RUNNER_CONTRACT_TEST_PASS cleanSemanticCommands=2")
+    print(
+        "SCALA_SCALAFIX_RUNNER_CONTRACT_TEST_PASS "
+        "cleanSemanticCommands=2 testDependencies=3"
+    )
     return 0
 
 
