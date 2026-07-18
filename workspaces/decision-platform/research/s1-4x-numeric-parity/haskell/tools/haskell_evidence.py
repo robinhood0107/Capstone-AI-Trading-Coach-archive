@@ -105,6 +105,23 @@ def canonical_sha256(value: Any) -> str:
     return hashlib.sha256(canonical_json_bytes(value)).hexdigest()
 
 
+def canonical_source_manifest_sha256(files: Mapping[str, Mapping[str, str]]) -> str:
+    """LC_ALL=C `sha256sum` line closure와 같은 path-sorted manifest SHA-256."""
+
+    lines: list[str] = []
+    for path in sorted(files, key=str.encode):
+        metadata = files[path]
+        digest = metadata.get("sha256")
+        if (
+            not isinstance(digest, str)
+            or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+            or "\n" in path
+        ):
+            raise EvidenceError("invalid source manifest line input")
+        lines.append(f"{digest}  {path}\n")
+    return hashlib.sha256("".join(lines).encode("utf-8")).hexdigest()
+
+
 def sha256_file(path: Path) -> str:
     """regular file bytes의 lowercase SHA-256을 계산한다."""
 
@@ -241,8 +258,8 @@ def _candidate_source_paths(root: Path) -> list[Path]:
     return selected
 
 
-def _tracked_candidate_paths(root: Path) -> set[str]:
-    """Git index에서 Haskell source/config path closure를 읽는다."""
+def _git_candidate_path_sets(root: Path) -> tuple[set[str], set[str]]:
+    """Git cached+untracked closure를 함께 읽고 untracked escape를 분리한다."""
 
     try:
         repo_root = Path(
@@ -254,26 +271,50 @@ def _tracked_candidate_paths(root: Path) -> set[str]:
             ).stdout.strip()
         ).resolve(strict=True)
         relative_root = root.resolve(strict=True).relative_to(repo_root).as_posix()
+        if relative_root == ".":
+            relative_root = ""
         pathspecs = [
-            f"{relative_root}/{candidate_root}" for candidate_root in CANDIDATE_ROOTS
-        ] + [f"{relative_root}/{path}" for path in CONFIGURATION_PATHS]
-        completed = subprocess.run(
-            ["git", "-C", str(repo_root), "ls-files", "-z", "--", *pathspecs],
+            f"{relative_root}/{candidate_root}".lstrip("/")
+            for candidate_root in CANDIDATE_ROOTS
+        ] + [f"{relative_root}/{path}".lstrip("/") for path in CONFIGURATION_PATHS]
+        combined = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repo_root),
+                "ls-files",
+                "-z",
+                "--cached",
+                "--others",
+                "--exclude-standard",
+                "--",
+                *pathspecs,
+            ],
+            check=True,
+            capture_output=True,
+        )
+        cached = subprocess.run(
+            ["git", "-C", str(repo_root), "ls-files", "-z", "--cached", "--", *pathspecs],
             check=True,
             capture_output=True,
         )
     except (OSError, subprocess.CalledProcessError, ValueError) as exc:
         raise EvidenceError("unable to enumerate tracked Haskell inputs") from exc
-    prefix = relative_root + "/"
-    result: set[str] = set()
-    for raw_path in completed.stdout.split(b"\0"):
-        if not raw_path:
-            continue
-        path = raw_path.decode("utf-8")
-        if not path.startswith(prefix):
-            raise EvidenceError(f"tracked input escaped Haskell root: {path}")
-        result.add(path[len(prefix) :])
-    return result
+    prefix = f"{relative_root}/" if relative_root else ""
+    def normalize(payload: bytes) -> set[str]:
+        result: set[str] = set()
+        for raw_path in payload.split(b"\0"):
+            if not raw_path:
+                continue
+            path = raw_path.decode("utf-8")
+            if prefix and not path.startswith(prefix):
+                raise EvidenceError(f"candidate input escaped Haskell root: {path}")
+            result.add(path[len(prefix) :])
+        return result
+
+    combined_paths = normalize(combined.stdout)
+    cached_paths = normalize(cached.stdout)
+    return cached_paths, combined_paths - cached_paths
 
 
 def _role_for_path(relative: str) -> str:
@@ -303,7 +344,12 @@ def build_source_manifest(
         if path.is_symlink() or not path.is_file():
             raise EvidenceError(f"required configuration input is missing: {relative}")
         expected.add(relative)
-    actual_tracked = _tracked_candidate_paths(root) if tracked_paths is None else tracked_paths
+    if tracked_paths is None:
+        actual_tracked, untracked = _git_candidate_path_sets(root)
+        if untracked:
+            raise EvidenceError(f"untracked candidate input: {sorted(untracked)}")
+    else:
+        actual_tracked = tracked_paths
     forbidden = sorted(
         path for path in actual_tracked if path.endswith(FORBIDDEN_COMPILED_SUFFIXES)
     )
@@ -327,7 +373,7 @@ def build_source_manifest(
         "language": "haskell",
         "files": files,
         "inputSets": dict(MANDATORY_INPUT_SETS),
-        "canonicalManifestSha256": canonical_sha256(files),
+        "canonicalManifestSha256": canonical_source_manifest_sha256(files),
     }
 
 
