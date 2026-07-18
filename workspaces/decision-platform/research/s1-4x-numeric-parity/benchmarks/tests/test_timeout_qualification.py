@@ -155,6 +155,30 @@ def test_runner_executes_sealed_verified_bytes_after_supplier_path_replacement(
             assert stderr.read_bytes() == b""
 
 
+def test_runner_rejects_path_resolved_script_interpreter(
+    tmp_path: Path,
+) -> None:
+    supplied = tmp_path / "wrapper"
+    supplied.write_text(
+        "#!/usr/bin/env bash\nprintf 'untrusted interpreter\\n'\n",
+        encoding="utf-8",
+    )
+    supplied.chmod(0o700)
+
+    with pytest.raises(
+        ContractError,
+        match="COMMAND_SCRIPT_INTERPRETER_MISMATCH",
+    ):
+        with runner._pin_executable(
+            {
+                "path": str(supplied),
+                "sha256": sha256_file(supplied),
+            },
+            role="test",
+        ):
+            pass
+
+
 def test_source_commit_binding_rejects_tracked_and_untracked_worktree_drift(
     tmp_path: Path,
 ) -> None:
@@ -201,6 +225,98 @@ def test_source_commit_binding_rejects_tracked_and_untracked_worktree_drift(
             benchmark_subject_commit=commit,
             candidate_source_commit=commit,
         )
+
+
+def test_source_binding_cannot_be_bypassed_by_path_git(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    subprocess.run(["/usr/bin/git", "init", "-q"], cwd=repository, check=True)
+    subprocess.run(
+        ["/usr/bin/git", "config", "user.name", "S1.4X Test"],
+        cwd=repository,
+        check=True,
+    )
+    subprocess.run(
+        ["/usr/bin/git", "config", "user.email", "s1.4x-test@example.invalid"],
+        cwd=repository,
+        check=True,
+    )
+    tracked = repository / "tracked.txt"
+    tracked.write_text("frozen\n", encoding="utf-8")
+    subprocess.run(
+        ["/usr/bin/git", "add", "tracked.txt"],
+        cwd=repository,
+        check=True,
+    )
+    subprocess.run(
+        ["/usr/bin/git", "commit", "-qm", "frozen"],
+        cwd=repository,
+        check=True,
+    )
+    commit = subprocess.run(
+        ["/usr/bin/git", "rev-parse", "HEAD"],
+        cwd=repository,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    tracked.write_text("dirty\n", encoding="utf-8")
+
+    malicious = tmp_path / "malicious"
+    malicious.mkdir()
+    fake_git = malicious / "git"
+    fake_git.write_text(
+        "#!/bin/sh\n"
+        "case \"$*\" in\n"
+        "  *--show-toplevel*) printf '%s\\n%s\\n' \"$FAKE_ROOT\" \"$FAKE_HEAD\" ;;\n"
+        "  *status*) : ;;\n"
+        "  *) exit 91 ;;\n"
+        "esac\n",
+        encoding="utf-8",
+    )
+    fake_git.chmod(0o700)
+    monkeypatch.setenv("PATH", str(malicious))
+    monkeypatch.setenv("FAKE_ROOT", str(repository))
+    monkeypatch.setenv("FAKE_HEAD", commit)
+
+    with pytest.raises(ContractError, match="CURRENT_SOURCE_WORKTREE_DIRTY"):
+        runner._verify_source_commit_binding(
+            repository,
+            benchmark_subject_commit=commit,
+            candidate_source_commit=commit,
+        )
+
+
+def test_benchmark_environment_drops_ambient_code_and_tool_overrides(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("BASH_ENV", str(tmp_path / "inject.sh"))
+    monkeypatch.setenv("ENV", str(tmp_path / "inject-posix.sh"))
+    monkeypatch.setenv("PYTHONPATH", str(tmp_path / "python"))
+    monkeypatch.setenv("JAVA_TOOL_OPTIONS", "-javaagent:/tmp/inject.jar")
+    monkeypatch.setenv("S1_4X_UV_BIN", str(tmp_path / "uv"))
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "core.fsmonitor")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", str(tmp_path / "hook"))
+
+    environment = runner._benchmark_environment()
+
+    assert environment == {
+        "HOME": str(tmp_path),
+        "LANG": "C.UTF-8",
+        "LC_ALL": "C.UTF-8",
+        "PATH": "/usr/bin:/bin",
+        "TMP": "/tmp",
+        "TMPDIR": "/tmp",
+        "TEMP": "/tmp",
+        **runner.THREAD_ENVIRONMENT,
+        "S1_4X_THREAD_COUNT": "1",
+    }
 
 
 def test_command_renderer_rejects_unbound_or_formatted_placeholders() -> None:
