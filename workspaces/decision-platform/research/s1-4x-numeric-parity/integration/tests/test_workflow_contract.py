@@ -5,7 +5,6 @@ import re
 import unittest
 from pathlib import Path
 
-
 REPO_ROOT = Path(__file__).resolve().parents[6]
 WORKFLOW_ROOT = REPO_ROOT / ".github" / "workflows"
 CORRECTNESS = WORKFLOW_ROOT / "s1-4x-numeric-parity-correctness.yml"
@@ -151,7 +150,10 @@ class NumericParityCorrectnessWorkflowTests(unittest.TestCase):
         self.assertRegex(self.text, r"(?m)^on:\n  pull_request:\n")
         self.assertEqual(_event_paths(self.text, "pull_request"), EXPECTED_PATHS)
         self.assertEqual(_event_paths(self.text, "push"), EXPECTED_PATHS)
-        self.assertEqual(_event_block(self.text, "push")[1:4], ["    branches:", "      - main", "    paths:"])
+        self.assertEqual(
+            _event_block(self.text, "push")[1:4],
+            ["    branches:", "      - main", "    paths:"],
+        )
 
     def test_exact_nine_jobs(self) -> None:
         self.assertEqual(tuple(self.jobs), EXPECTED_CORRECTNESS_JOBS)
