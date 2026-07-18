@@ -19,6 +19,8 @@ sys.path.insert(0, str(INTEGRATION))
 from benchmark_commands import (  # noqa: E402
     BOUNDARY_IDS,
     CommandManifestError,
+    RUNTIME_DEPENDENCY_ROLES_BY_BOUNDARY,
+    RUNTIME_EVIDENCE_ROLES_BY_BOUNDARY,
     boundary_command_template,
     build_manifest,
     host_command_template,
@@ -31,10 +33,41 @@ from prepare_benchmark_commands import _identity  # noqa: E402
 
 
 class BenchmarkCommandManifestTests(TestCase):
+    def _allowed_executables(
+        self,
+        identity: dict[str, str],
+    ) -> dict[str, object]:
+        return {
+            "hostValidator": identity,
+            "boundaries": {
+                boundary: identity for boundary in BOUNDARY_IDS
+            },
+            "runtimeDependenciesByBoundary": {
+                boundary: {
+                    role: identity
+                    for role in roles
+                }
+                for boundary, roles
+                in RUNTIME_DEPENDENCY_ROLES_BY_BOUNDARY.items()
+            },
+        }
+
+    def _allowed_evidence(
+        self,
+        identity: dict[str, str],
+    ) -> dict[str, dict[str, dict[str, str]]]:
+        return {
+            boundary: {
+                role: identity
+                for role in roles
+            }
+            for boundary, roles in RUNTIME_EVIDENCE_ROLES_BY_BOUNDARY.items()
+        }
+
     def _manifest_for_identity(self, identity: dict[str, str]) -> dict[str, object]:
         executable = identity["path"]
         return {
-            "schemaVersion": "s1.4x-benchmark-command-manifest-v2",
+            "schemaVersion": "s1.4x-benchmark-command-manifest-v3",
             "benchmarkSubjectCommit": "a" * 40,
             "candidateSourceCommit": "a" * 40,
             "hostValidatorCommand": [
@@ -70,13 +103,8 @@ class BenchmarkCommandManifestTests(TestCase):
                 ]
                 for boundary in BOUNDARY_IDS
             },
-            "allowedExecutables": {
-                "hostValidator": identity,
-                "boundaries": {
-                    boundary: identity for boundary in BOUNDARY_IDS
-                },
-                "runtimeDependencies": {"uv": identity},
-            },
+            "allowedExecutables": self._allowed_executables(identity),
+            "allowedEvidenceByBoundary": self._allowed_evidence(identity),
         }
 
     def test_manifest_covers_all_boundaries_and_binds_exact_commit(self) -> None:
@@ -94,11 +122,8 @@ class BenchmarkCommandManifestTests(TestCase):
                 boundary: boundary_command_template(str(executable), boundary)
                 for boundary in BOUNDARY_IDS
             },
-            allowed_executables={
-                "hostValidator": identity,
-                "boundaries": {boundary: identity for boundary in BOUNDARY_IDS},
-                "runtimeDependencies": {"uv": identity},
-            },
+            allowed_executables=self._allowed_executables(identity),
+            allowed_evidence_by_boundary=self._allowed_evidence(identity),
         )
         self.assertEqual(validate_manifest(manifest)["benchmarkSubjectCommit"], commit)
         self.assertEqual(set(manifest["boundaryCommands"]), set(BOUNDARY_IDS))
@@ -119,11 +144,8 @@ class BenchmarkCommandManifestTests(TestCase):
                 candidate_source_commit="a" * 40,
                 host_validator_command=["/bin/sh", "-c", "{host_report}"],
                 boundary_commands=commands,
-                allowed_executables={
-                    "hostValidator": identity,
-                    "boundaries": {boundary: identity for boundary in BOUNDARY_IDS},
-                    "runtimeDependencies": {"uv": identity},
-                },
+                allowed_executables=self._allowed_executables(identity),
+                allowed_evidence_by_boundary=self._allowed_evidence(identity),
             )
 
     def test_manifest_rejects_escaped_placeholder_and_extra_argv(self) -> None:
@@ -274,7 +296,7 @@ class BenchmarkCommandManifestTests(TestCase):
         self.assertIsNone(re.search(r"/home/[^/\s]+", source))
         self.assertIn('os.environ.get("HOME")', source)
 
-    def test_manifest_requires_exact_uv_runtime_dependency(self) -> None:
+    def test_manifest_requires_exact_boundary_runtime_and_evidence_roles(self) -> None:
         executable = Path(sys.executable).resolve()
         identity = {
             "path": str(executable),
@@ -282,17 +304,29 @@ class BenchmarkCommandManifestTests(TestCase):
         }
         manifest = self._manifest_for_identity(identity)
         runtime = cast(
-            dict[str, dict[str, str]],
+            dict[str, dict[str, dict[str, str]]],
             cast(dict[str, object], manifest["allowedExecutables"])[
-                "runtimeDependencies"
+                "runtimeDependenciesByBoundary"
             ],
         )
         self.assertEqual(validate_manifest(manifest), manifest)
 
-        del runtime["uv"]
+        del runtime["scala"]["java"]
         with self.assertRaisesRegex(
             CommandManifestError,
             "MANIFEST_COMMANDS_INVALID",
+        ):
+            validate_manifest(manifest)
+
+        manifest = self._manifest_for_identity(identity)
+        evidence = cast(
+            dict[str, dict[str, dict[str, str]]],
+            manifest["allowedEvidenceByBoundary"],
+        )
+        evidence["haskell"]["unexpected"] = identity
+        with self.assertRaisesRegex(
+            CommandManifestError,
+            "MANIFEST_EVIDENCE_INVALID",
         ):
             validate_manifest(manifest)
 
@@ -314,11 +348,8 @@ class BenchmarkCommandManifestTests(TestCase):
                 candidate_source_commit="a" * 40,
                 host_validator_command=host_command_template(str(executable)),
                 boundary_commands=commands,
-                allowed_executables={
-                    "hostValidator": identity,
-                    "boundaries": {boundary: identity for boundary in BOUNDARY_IDS},
-                    "runtimeDependencies": {"uv": identity},
-                },
+                allowed_executables=self._allowed_executables(identity),
+                allowed_evidence_by_boundary=self._allowed_evidence(identity),
             )
 
     def test_manifest_write_is_exclusive_canonical_and_digest_bound(self) -> None:
@@ -333,11 +364,8 @@ class BenchmarkCommandManifestTests(TestCase):
                 boundary: boundary_command_template(str(executable), boundary)
                 for boundary in BOUNDARY_IDS
             },
-            allowed_executables={
-                "hostValidator": identity,
-                "boundaries": {boundary: identity for boundary in BOUNDARY_IDS},
-                "runtimeDependencies": {"uv": identity},
-            },
+            allowed_executables=self._allowed_executables(identity),
+            allowed_evidence_by_boundary=self._allowed_evidence(identity),
         )
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "commands.json"

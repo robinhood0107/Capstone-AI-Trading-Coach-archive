@@ -60,7 +60,7 @@ def _command_manifest() -> dict[str, Any]:
     executable = str(Path(sys.executable).resolve())
     identity = {"path": executable, "sha256": sha256_file(Path(executable))}
     return {
-        "schemaVersion": "s1.4x-benchmark-command-manifest-v2",
+        "schemaVersion": "s1.4x-benchmark-command-manifest-v3",
         "benchmarkSubjectCommit": COMMIT,
         "candidateSourceCommit": COMMIT,
         "hostValidatorCommand": [
@@ -101,7 +101,22 @@ def _command_manifest() -> dict[str, Any]:
             "boundaries": {
                 boundary_id: identity for boundary_id in runner.BOUNDARY_IDS
             },
-            "runtimeDependencies": {"uv": identity},
+            "runtimeDependenciesByBoundary": {
+                boundary_id: {
+                    role: identity
+                    for role in roles
+                }
+                for boundary_id, roles
+                in runner.RUNTIME_DEPENDENCY_ROLES_BY_BOUNDARY.items()
+            },
+        },
+        "allowedEvidenceByBoundary": {
+            boundary_id: {
+                role: identity
+                for role in roles
+            }
+            for boundary_id, roles
+            in runner.RUNTIME_EVIDENCE_ROLES_BY_BOUNDARY.items()
         },
     }
 
@@ -126,7 +141,7 @@ def test_command_manifest_requires_precommitted_digest_and_executable_identity(
         benchmark_subject_commit=COMMIT,
         candidate_source_commit=COMMIT,
     )
-    assert manifest["schemaVersion"] == "s1.4x-benchmark-command-manifest-v2"
+    assert manifest["schemaVersion"] == "s1.4x-benchmark-command-manifest-v3"
 
     with pytest.raises(ContractError, match="COMMAND_MANIFEST_SHA256_MISMATCH"):
         runner._strict_command_manifest(
@@ -289,7 +304,11 @@ def test_runner_executes_fd_bound_uv_dependency_after_path_replacement(
         replacement.replace(supplied_uv)
         stdout = tmp_path / "uv.stdout"
         stderr = tmp_path / "uv.stderr"
-        environment = runner._benchmark_environment({"uv": pinned_uv})
+        environment = runner._benchmark_environment(
+            {"uv": pinned_uv},
+            {},
+            boundary_id="hostValidator",
+        )
 
         runner._run_process(
             [str(wrapper)],
@@ -462,7 +481,11 @@ def test_benchmark_environment_drops_ambient_code_and_tool_overrides(
         descriptor=42,
         required_seals=runner.F_SEAL_SEAL,
     )
-    environment = runner._benchmark_environment({"uv": runtime})
+    environment = runner._benchmark_environment(
+        {"uv": runtime},
+        {},
+        boundary_id="hostValidator",
+    )
 
     assert environment == {
         "HOME": str(tmp_path),
@@ -474,11 +497,69 @@ def test_benchmark_environment_drops_ambient_code_and_tool_overrides(
         "TEMP": str(cache_root / "tmp"),
         "UV_CACHE_DIR": str(cache_root / "uv"),
         "COURSIER_CACHE": str(cache_root / "coursier"),
-        "STACK_ROOT": str(cache_root / "stack-root"),
         **runner.THREAD_ENVIRONMENT,
         "S1_4X_THREAD_COUNT": "1",
         "S1_4X_UV_BIN": "/proc/self/fd/42",
+        "S1_4X_UV_SHA256": "a" * 64,
     }
+
+
+def test_benchmark_environment_is_boundary_least_privilege_and_haskell_clean(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    def pinned(role: str, descriptor: int) -> runner.PinnedExecutable:
+        return runner.PinnedExecutable(
+            binding={
+                "path": f"/opt/s1-4x/{role}",
+                "resolvedPath": f"/opt/s1-4x/{role}",
+                "sha256": f"{descriptor:064x}",
+            },
+            descriptor=descriptor,
+            required_seals=runner.F_SEAL_SEAL,
+        )
+
+    haskell_dependencies = {
+        role: pinned(role, index)
+        for index, role in enumerate(
+            runner.RUNTIME_DEPENDENCY_ROLES_BY_BOUNDARY["haskell"],
+            start=100,
+        )
+    }
+    haskell_evidence = {
+        role: pinned(role, index)
+        for index, role in enumerate(
+            runner.RUNTIME_EVIDENCE_ROLES_BY_BOUNDARY["haskell"],
+            start=200,
+        )
+    }
+
+    environment = runner._benchmark_environment(
+        haskell_dependencies,
+        haskell_evidence,
+        boundary_id="haskell",
+    )
+
+    self_forbidden = {
+        "S1_4X_UV_BIN",
+        "S1_4X_SCALA_CLI_BIN",
+        "S1_4X_SCALAFIX_BIN",
+        "S1_4X_SCALAFMT_BIN",
+        "S1_4X_SCALA_JAVA_BIN",
+        "STACK_ROOT",
+    }
+    assert self_forbidden.isdisjoint(environment)
+    assert environment["S1_4X_GHCUP_PINNED_FD_PATH"].startswith(
+        "/proc/self/fd/"
+    )
+    assert environment["S1_4X_STACK_PINNED_FD_PATH"].startswith(
+        "/proc/self/fd/"
+    )
+    assert environment["S1_4X_HASKELL_BASELINE_CORRECTNESS"].startswith(
+        "/proc/self/fd/"
+    )
 
 
 def test_timeout_termination_reaps_leader_and_remaining_process_group(
