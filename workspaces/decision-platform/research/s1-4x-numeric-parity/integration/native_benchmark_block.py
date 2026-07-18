@@ -17,6 +17,12 @@ from pathlib import Path
 from typing import Any
 
 from benchmark_input_ledger import validate_input_ledger
+from executable_identity import (
+    ExecutableIdentityError,
+    InspectedExecutable,
+    inspect_executable_path,
+    inspect_regular_file_path,
+)
 from gate import GateError, exclusive_json_write, strict_json_load
 
 BENCHMARKS = Path(__file__).resolve().parents[1] / "benchmarks"
@@ -154,6 +160,26 @@ HASKELL_SOURCE_INPUT_SETS = {
     "lint": "files",
     "profileRun": "files",
 }
+HASKELL_CANDIDATE_ROOTS = ("src", "app", "test", "benchmark")
+HASKELL_SOURCE_CONFIGURATION_PATHS = (
+    "package.yaml",
+    "selected-profile.v1.json",
+)
+HASKELL_BENCHMARK_CONFIGURATION_PATHS = (
+    "package.yaml",
+    "s1-4x-haskell.cabal",
+    "stack.yaml",
+    "stack.yaml.lock",
+)
+HASKELL_FORBIDDEN_COMPILED_SUFFIXES = (".lhs", ".hsc", ".hs-boot")
+HASKELL_RUNTIME_IDENTITY_FIELDS = {
+    "schemaVersion",
+    "boundaryId",
+    "selectorId",
+    "executedBenchmarkPath",
+    "executedBenchmarkSha256",
+    "status",
+}
 CRITERION_MEASUREMENT_KEYS = [
     "time",
     "cpuTime",
@@ -277,6 +303,45 @@ def _bound_regular_file(
     ):
         raise GateError(error)
     return path
+
+
+def _snapshot_regular_file(
+    path: Path,
+    *,
+    role: str,
+    error: str,
+    executable: bool = False,
+) -> InspectedExecutable:
+    """한 FD에서 읽은 regular-file bytes와 digest를 이후 검증의 단일 입력으로 사용한다."""
+
+    absolute = Path(os.path.abspath(path))
+    try:
+        snapshot = (
+            inspect_executable_path(absolute, role=role)
+            if executable
+            else inspect_regular_file_path(absolute, role=role)
+        )
+    except ExecutableIdentityError as exc:
+        raise GateError(error) from exc
+    if snapshot.path != str(absolute) or snapshot.resolved_path != str(absolute):
+        raise GateError(error)
+    return snapshot
+
+
+def _snapshot_json_file(
+    path: Path,
+    *,
+    role: str,
+    error: str,
+) -> tuple[InspectedExecutable, Any]:
+    """JSON hash와 parse가 경로 재개방 없이 같은 regular-file snapshot을 공유한다."""
+
+    snapshot = _snapshot_regular_file(path, role=role, error=error)
+    try:
+        document = strict_json_load(snapshot.payload)
+    except GateError as exc:
+        raise GateError(error) from exc
+    return snapshot, document
 
 
 def _number(value: Any, *, positive: bool = False) -> float | None:
@@ -813,13 +878,55 @@ def _validate_haskell_selected_profile(
     return profile
 
 
+def _haskell_candidate_source_files(
+    haskell_root: Path,
+    *,
+    error: str,
+) -> dict[str, Path]:
+    """Generator와 같은 filesystem 규칙으로 후보 Haskell source exact set을 만든다."""
+
+    candidate_files: dict[str, Path] = {}
+    for root_name in HASKELL_CANDIDATE_ROOTS:
+        source_root = haskell_root / root_name
+        if source_root.is_symlink() or not source_root.is_dir():
+            raise GateError(error)
+        for path in sorted(
+            source_root.rglob("*"),
+            key=lambda item: item.relative_to(haskell_root).as_posix().encode(),
+        ):
+            relative_path = path.relative_to(haskell_root).as_posix()
+            if path.is_symlink():
+                raise GateError(error)
+            if not path.is_file():
+                continue
+            if relative_path.endswith(HASKELL_FORBIDDEN_COMPILED_SUFFIXES):
+                raise GateError(error)
+            if path.suffix == ".hs":
+                candidate_files[relative_path] = path
+    if not candidate_files:
+        raise GateError(error)
+    return candidate_files
+
+
+def _haskell_source_role(relative_path: str, *, error: str) -> str:
+    if relative_path in HASKELL_SOURCE_CONFIGURATION_PATHS:
+        return "configuration"
+    if relative_path.startswith("test/"):
+        return "test"
+    if relative_path.startswith("benchmark/"):
+        return "benchmark"
+    if relative_path.startswith(("src/", "app/")):
+        return "main"
+    raise GateError(error)
+
+
 def _validate_haskell_source_manifest(
     value: Any,
     *,
     haskell_root: Path,
     error: str,
 ) -> dict[str, Any]:
-    """Source manifest 내부 digest와 현재 regular source bytes를 함께 고정한다."""
+    """Tracked generator의 exact path-set, role, 현재 bytes를 manifest와 대조한다."""
 
     manifest = _exact_object(
         value,
@@ -827,50 +934,76 @@ def _validate_haskell_source_manifest(
         error=error,
     )
     files = manifest["files"]
+    candidate_files = _haskell_candidate_source_files(haskell_root, error=error)
+    required_files = dict(candidate_files)
+    for relative_path in HASKELL_SOURCE_CONFIGURATION_PATHS:
+        path = haskell_root / relative_path
+        if path.is_symlink() or not path.is_file():
+            raise GateError(error)
+        required_files[relative_path] = path
     if (
         manifest["schemaVersion"] != "s1.4x-source-input-manifest-v1"
         or manifest["language"] != "haskell"
         or manifest["inputSets"] != HASKELL_SOURCE_INPUT_SETS
         or not isinstance(files, dict)
-        or not files
-        or any(not isinstance(relative_path, str) for relative_path in files)
+        or set(files) != set(required_files)
         or SHA256.fullmatch(str(manifest["canonicalManifestSha256"])) is None
     ):
         raise GateError(error)
     manifest_lines: list[str] = []
-    for relative_path in sorted(files, key=str.encode):
+    for relative_path in sorted(required_files, key=str.encode):
         metadata = _exact_object(
             files[relative_path],
             {"role", "sha256"},
             error=error,
         )
-        relative = Path(relative_path)
+        snapshot = _snapshot_regular_file(
+            required_files[relative_path],
+            role=f"haskell-source:{relative_path}",
+            error=error,
+        )
+        expected_role = _haskell_source_role(relative_path, error=error)
         if (
-            not isinstance(relative_path, str)
-            or not relative_path
-            or relative.is_absolute()
-            or ".." in relative.parts
-            or not isinstance(metadata["role"], str)
-            or not metadata["role"]
+            metadata["role"] != expected_role
             or SHA256.fullmatch(str(metadata["sha256"])) is None
+            or metadata["sha256"] != snapshot.sha256
         ):
             raise GateError(error)
-        source = haskell_root / relative
-        try:
-            source.resolve(strict=True).relative_to(haskell_root.resolve(strict=True))
-        except (OSError, ValueError) as exc:
-            raise GateError(error) from exc
-        if (
-            source.is_symlink()
-            or not source.is_file()
-            or sha256_file(source) != metadata["sha256"]
-        ):
-            raise GateError(error)
-        manifest_lines.append(f"{metadata['sha256']}  {relative_path}\n")
+        manifest_lines.append(f"{snapshot.sha256}  {relative_path}\n")
     closure_sha256 = hashlib.sha256("".join(manifest_lines).encode("utf-8")).hexdigest()
     if manifest["canonicalManifestSha256"] != closure_sha256:
         raise GateError(error)
     return manifest
+
+
+def _haskell_benchmark_source_tree_sha256(
+    haskell_root: Path,
+    *,
+    error: str,
+) -> str:
+    """Lane profile helper와 같은 candidate/build closure를 현재 bytes에서 재계산한다."""
+
+    source_files = _haskell_candidate_source_files(haskell_root, error=error)
+    benchmark_files = dict(source_files)
+    for relative_path in HASKELL_BENCHMARK_CONFIGURATION_PATHS:
+        path = haskell_root / relative_path
+        if path.is_symlink() or not path.is_file():
+            raise GateError(error)
+        benchmark_files[relative_path] = path
+    entries: list[dict[str, str]] = []
+    for relative_path in sorted(benchmark_files, key=str.encode):
+        snapshot = _snapshot_regular_file(
+            benchmark_files[relative_path],
+            role=f"haskell-benchmark-source:{relative_path}",
+            error=error,
+        )
+        entries.append(
+            {
+                "path": relative_path,
+                "sha256": snapshot.sha256,
+            }
+        )
+    return _canonical_sha256(entries)
 
 
 def _validate_execution_receipt(
@@ -886,6 +1019,7 @@ def _validate_execution_receipt(
     input_ledger_path: Path,
     effective_runtime_arguments_sha256: str,
     profile: str,
+    receipt_snapshots: dict[Path, tuple[InspectedExecutable, Any]],
 ) -> str | None:
     receipt_path_text = item["executionReceiptPath"]
     if (
@@ -901,14 +1035,19 @@ def _validate_execution_receipt(
         receipt_path.resolve(strict=True).relative_to(block_directory.resolve(strict=True))
     except (OSError, ValueError) as exc:
         raise GateError(f"NATIVE_EXECUTION_RECEIPT_PATH_INVALID:{case_id}") from exc
-    if (
-        receipt_path.is_symlink()
-        or not receipt_path.is_file()
-        or sha256_file(receipt_path) != item["executionReceiptSha256"]
-    ):
+    receipt_snapshot_and_document = receipt_snapshots.get(receipt_path)
+    if receipt_snapshot_and_document is None:
+        receipt_snapshot_and_document = _snapshot_json_file(
+            receipt_path,
+            role=f"native-execution-receipt:{case_id}",
+            error=f"NATIVE_EXECUTION_RECEIPT_DIGEST_INVALID:{case_id}",
+        )
+        receipt_snapshots[receipt_path] = receipt_snapshot_and_document
+    receipt_snapshot, receipt_document = receipt_snapshot_and_document
+    if receipt_snapshot.sha256 != item["executionReceiptSha256"]:
         raise GateError(f"NATIVE_EXECUTION_RECEIPT_DIGEST_INVALID:{case_id}")
     receipt = _exact_object(
-        strict_json_load(receipt_path),
+        receipt_document,
         EXECUTION_RECEIPT_FIELDS,
         error=f"NATIVE_EXECUTION_RECEIPT_INVALID:{case_id}",
     )
@@ -1136,6 +1275,12 @@ def _validate_execution_receipt(
                 "stackSha256",
                 "stackYamlPath",
                 "stackYamlSha256",
+                "runtimeIdentityPath",
+                "runtimeIdentitySha256",
+                "executedBenchmarkPath",
+                "executedBenchmarkSha256",
+                "authoritativeGhcPath",
+                "authoritativeGhcSha256",
                 "selectedGhcOptions",
                 "toolchainLockPath",
                 "toolchainLockSha256",
@@ -1152,6 +1297,9 @@ def _validate_execution_receipt(
         ghcup_path_text = haskell_provenance["ghcupPath"]
         stack_path_text = haskell_provenance["stackPath"]
         stack_yaml_path_text = haskell_provenance["stackYamlPath"]
+        runtime_identity_path_text = haskell_provenance["runtimeIdentityPath"]
+        executed_benchmark_path_text = haskell_provenance["executedBenchmarkPath"]
+        authoritative_ghc_path_text = haskell_provenance["authoritativeGhcPath"]
         selected_options = haskell_provenance["selectedGhcOptions"]
         s1_4x_root = resolved_plan.parent.parent
         expected_profile_path = s1_4x_root / "haskell/selected-profile.v1.json"
@@ -1159,6 +1307,9 @@ def _validate_execution_receipt(
         expected_marker_script_path = s1_4x_root / "benchmarks/run_rotated_blocks.py"
         expected_qualification_path = block_directory / "timeout-qualification.json"
         expected_stack_yaml_path = s1_4x_root / "haskell/stack.yaml"
+        expected_runtime_identity_path = (
+            block_directory / "benchmark-runtime-identity.json"
+        )
         expected_toolchain_lock_path = s1_4x_root / "haskell/toolchain-lock.v1.json"
         expected_merged_provenance_path = s1_4x_root / "contract/toolchain-provenance.v1.json"
         if (
@@ -1177,10 +1328,17 @@ def _validate_execution_receipt(
             or not isinstance(ghcup_path_text, str)
             or not isinstance(stack_path_text, str)
             or not isinstance(stack_yaml_path_text, str)
+            or not isinstance(runtime_identity_path_text, str)
+            or not isinstance(executed_benchmark_path_text, str)
+            or not isinstance(authoritative_ghc_path_text, str)
             or not Path(ghcup_path_text).is_absolute()
             or not Path(stack_path_text).is_absolute()
             or not Path(stack_yaml_path_text).is_absolute()
+            or not Path(runtime_identity_path_text).is_absolute()
+            or not Path(executed_benchmark_path_text).is_absolute()
+            or not Path(authoritative_ghc_path_text).is_absolute()
             or stack_yaml_path_text != str(expected_stack_yaml_path)
+            or runtime_identity_path_text != str(expected_runtime_identity_path)
             or SHA256.fullmatch(str(haskell_provenance["selectedProfileSha256"])) is None
             or Path(selected_profile_text).is_symlink()
             or not Path(selected_profile_text).is_file()
@@ -1218,8 +1376,18 @@ def _validate_execution_receipt(
             or SHA256.fullmatch(str(haskell_provenance["ghcupSha256"])) is None
             or SHA256.fullmatch(str(haskell_provenance["stackSha256"])) is None
             or SHA256.fullmatch(str(haskell_provenance["stackYamlSha256"])) is None
+            or SHA256.fullmatch(str(haskell_provenance["runtimeIdentitySha256"]))
+            is None
+            or SHA256.fullmatch(str(haskell_provenance["executedBenchmarkSha256"]))
+            is None
+            or SHA256.fullmatch(str(haskell_provenance["authoritativeGhcSha256"]))
+            is None
             or haskell_provenance["ghcupSha256"] != FROZEN_GHCUP_SHA256
             or haskell_provenance["stackSha256"] != FROZEN_STACK_SHA256
+            or haskell_provenance["authoritativeGhcSha256"] != FROZEN_GHC_910_SHA256
+            or executed_benchmark_path_text != benchmark_executable_text
+            or haskell_provenance["executedBenchmarkSha256"]
+            != provenance["benchmarkExecutableSha256"]
         ):
             raise GateError(f"NATIVE_EXECUTION_PROVENANCE_INVALID:{case_id}")
         ghcup_path = Path(ghcup_path_text)
@@ -1227,6 +1395,9 @@ def _validate_execution_receipt(
         stack_yaml_path = Path(stack_yaml_path_text)
         marker_python_path = Path(marker_python_text)
         marker_script_path = Path(marker_script_text)
+        runtime_identity_path = Path(runtime_identity_path_text)
+        executed_benchmark_path = Path(executed_benchmark_path_text)
+        authoritative_ghc_path = Path(authoritative_ghc_path_text)
         if (
             any(
                 path.is_symlink() or not path.is_file()
@@ -1245,6 +1416,66 @@ def _validate_execution_receipt(
             != haskell_provenance["markerPythonSha256"]
             or sha256_file(marker_script_path)
             != haskell_provenance["markerScriptSha256"]
+        ):
+            raise GateError(f"NATIVE_EXECUTION_PROVENANCE_INVALID:{case_id}")
+        runtime_identity_snapshot, runtime_identity_value = _snapshot_json_file(
+            runtime_identity_path,
+            role=f"haskell-runtime-identity:{case_id}",
+            error=f"NATIVE_EXECUTION_PROVENANCE_INVALID:{case_id}",
+        )
+        runtime_identity = _exact_object(
+            runtime_identity_value,
+            HASKELL_RUNTIME_IDENTITY_FIELDS,
+            error=f"NATIVE_EXECUTION_PROVENANCE_INVALID:{case_id}",
+        )
+        executed_benchmark_snapshot = _snapshot_regular_file(
+            executed_benchmark_path,
+            role=f"haskell-executed-benchmark:{case_id}",
+            error=f"NATIVE_EXECUTION_PROVENANCE_INVALID:{case_id}",
+            executable=True,
+        )
+        authoritative_ghc_snapshot = _snapshot_regular_file(
+            authoritative_ghc_path,
+            role=f"haskell-authoritative-ghc:{case_id}",
+            error=f"NATIVE_EXECUTION_PROVENANCE_INVALID:{case_id}",
+            executable=True,
+        )
+        try:
+            artifact_relative = executed_benchmark_path.relative_to(
+                s1_4x_root / "haskell"
+            )
+        except ValueError as exc:
+            raise GateError(
+                f"NATIVE_EXECUTION_PROVENANCE_INVALID:{case_id}"
+            ) from exc
+        artifact_parts = artifact_relative.parts
+        if (
+            runtime_identity_snapshot.sha256
+            != haskell_provenance["runtimeIdentitySha256"]
+            or runtime_identity
+            != {
+                "schemaVersion": "s1.4x-haskell-benchmark-runtime-identity-v1",
+                "boundaryId": "haskell",
+                "selectorId": selector_id,
+                "executedBenchmarkPath": executed_benchmark_path_text,
+                "executedBenchmarkSha256": (
+                    haskell_provenance["executedBenchmarkSha256"]
+                ),
+                "status": "PASS",
+            }
+            or executed_benchmark_snapshot.sha256
+            != haskell_provenance["executedBenchmarkSha256"]
+            or authoritative_ghc_snapshot.sha256
+            != haskell_provenance["authoritativeGhcSha256"]
+            or len(artifact_parts) != 7
+            or artifact_parts[0:2] != (".stack-work", "dist")
+            or artifact_parts[3:]
+            != (
+                "ghc-9.10.3",
+                "build",
+                "s1-4x-haskell-benchmark",
+                "s1-4x-haskell-benchmark",
+            )
         ):
             raise GateError(f"NATIVE_EXECUTION_PROVENANCE_INVALID:{case_id}")
         toolchain_lock_path = _bound_regular_file(
@@ -1276,10 +1507,15 @@ def _validate_execution_receipt(
             haskell_root=s1_4x_root / "haskell",
             error=f"NATIVE_EXECUTION_PROVENANCE_INVALID:{case_id}",
         )
+        source_tree_sha256 = _haskell_benchmark_source_tree_sha256(
+            s1_4x_root / "haskell",
+            error=f"NATIVE_EXECUTION_PROVENANCE_INVALID:{case_id}",
+        )
         if (
             selected_profile["profileId"] != profile
             or selected_profile["optionsSha256"] != effective_runtime_arguments_sha256
             or selected_profile["ghcOptions"] != selected_options
+            or selected_profile["sourceTreeSha256"] != source_tree_sha256
         ):
             raise GateError(f"NATIVE_EXECUTION_PROVENANCE_INVALID:{case_id}")
         selector = next(
@@ -1672,6 +1908,8 @@ def validate_native_contract_evidence(
     input_ledger_path: Path | None = None,
     effective_runtime_arguments_sha256: str | None = None,
     profile: str | None = None,
+    _raw_snapshots: dict[Path, tuple[InspectedExecutable, Any]] | None = None,
+    _receipt_snapshots: dict[Path, tuple[InspectedExecutable, Any]] | None = None,
 ) -> dict[str, Any]:
     """Candidate framework별 frozen timing 설정과 raw evidence bytes를 검증한다."""
 
@@ -1779,7 +2017,11 @@ def validate_native_contract_evidence(
         raise GateError("NATIVE_CONTRACT_CASE_ORDER_INVALID")
     haskell_raw_identities: set[tuple[str, str]] = set()
     haskell_receipt_identities: set[tuple[str, str]] = set()
-    haskell_raw_path: Path | None = None
+    haskell_raw_document: Any = None
+    raw_snapshots = {} if _raw_snapshots is None else _raw_snapshots
+    receipt_snapshots = (
+        {} if _receipt_snapshots is None else _receipt_snapshots
+    )
     for evidence, native_case, native_statistics_case in zip(
         document["cases"],
         native_cases,
@@ -1828,11 +2070,18 @@ def validate_native_contract_evidence(
             raw_path.resolve(strict=True).relative_to(block_directory.resolve(strict=True))
         except (OSError, ValueError) as exc:
             raise GateError(f"NATIVE_CONTRACT_RAW_PATH_INVALID:{case_id}") from exc
+        raw_snapshot_and_document = raw_snapshots.get(raw_path)
+        if raw_snapshot_and_document is None:
+            raw_snapshot_and_document = _snapshot_json_file(
+                raw_path,
+                role=f"native-raw:{case_id}",
+                error=f"NATIVE_CONTRACT_RAW_EVIDENCE_INVALID:{case_id}",
+            )
+            raw_snapshots[raw_path] = raw_snapshot_and_document
+        raw_snapshot, raw_document = raw_snapshot_and_document
         if (
-            raw_path.is_symlink()
-            or not raw_path.is_file()
-            or SHA256.fullmatch(str(item["rawEvidenceSha256"])) is None
-            or sha256_file(raw_path) != item["rawEvidenceSha256"]
+            SHA256.fullmatch(str(item["rawEvidenceSha256"])) is None
+            or raw_snapshot.sha256 != item["rawEvidenceSha256"]
         ):
             raise GateError(f"NATIVE_CONTRACT_RAW_EVIDENCE_INVALID:{case_id}")
         if (
@@ -1855,6 +2104,7 @@ def validate_native_contract_evidence(
             input_ledger_path=input_ledger_path,
             effective_runtime_arguments_sha256=str(effective_runtime_arguments_sha256),
             profile=profile,
+            receipt_snapshots=receipt_snapshots,
         )
         if boundary_id == "scala":
             if native_statistics_case is None or not isinstance(
@@ -1863,7 +2113,7 @@ def validate_native_contract_evidence(
             ):
                 raise GateError(f"NATIVE_STATISTICS_CASE_INVALID:{case_id}")
             _parse_jmh_raw(
-                strict_json_load(raw_path),
+                raw_document,
                 case_id=str(case_id),
                 jmh_include_regex=receipt_selector,
                 native_case=native_case,
@@ -1879,7 +2129,7 @@ def validate_native_contract_evidence(
                     str(item["executionReceiptSha256"]),
                 )
             )
-            haskell_raw_path = raw_path
+            haskell_raw_document = raw_document
         actual_case_ids.append(str(case_id))
     if actual_case_ids != expected_case_ids:
         raise GateError("NATIVE_CONTRACT_CASE_ORDER_INVALID")
@@ -1887,7 +2137,7 @@ def validate_native_contract_evidence(
         if (
             len(haskell_raw_identities) != 1
             or len(haskell_receipt_identities) != 1
-            or haskell_raw_path is None
+            or haskell_raw_document is None
             or native_statistics_cases is None
         ):
             raise GateError("CRITERION_FAMILY_EVIDENCE_NOT_SHARED")
@@ -1916,7 +2166,7 @@ def validate_native_contract_evidence(
                 raise GateError("CRITERION_FROZEN_CASES_INVALID")
             logical_operations_by_case[case_id] = logical_operations
         parsed_native_cases, parsed_statistics_cases = _parse_criterion_family_raw(
-            strict_json_load(haskell_raw_path),
+            haskell_raw_document,
             expected_case_ids=expected_case_ids,
             logical_operations_by_case=logical_operations_by_case,
         )
@@ -1989,15 +2239,15 @@ def produce_haskell_native_evidence(
     repo = repo_root.resolve(strict=True)
     plan_file = plan_path.resolve(strict=True)
     block = block_directory.resolve(strict=True)
-    raw_file = criterion_raw_path.resolve(strict=True)
-    receipt_file = execution_receipt_path.resolve(strict=True)
+    raw_file = Path(os.path.abspath(criterion_raw_path))
+    receipt_file = Path(os.path.abspath(execution_receipt_path))
     ledger_file = input_ledger_path.resolve(strict=True)
     fixture_root = fixture_root_path.resolve(strict=True)
     profile_file = selected_profile_path.resolve(strict=True)
     source_manifest_file = source_input_manifest_path.resolve(strict=True)
     toolchain_lock_file = toolchain_lock_path.resolve(strict=True)
     merged_provenance_file = merged_toolchain_provenance_path.resolve(strict=True)
-    benchmark_artifact = benchmark_artifact_path.resolve(strict=True)
+    benchmark_artifact = Path(os.path.abspath(benchmark_artifact_path))
     started_timestamp = _parse_utc_timestamp(started_at)
     finished_timestamp = _parse_utc_timestamp(finished_at)
     if (
@@ -2104,6 +2354,12 @@ def produce_haskell_native_evidence(
         haskell_root=haskell_root,
         error="HASKELL_NATIVE_SOURCE_MANIFEST_INVALID",
     )
+    source_tree_sha256 = _haskell_benchmark_source_tree_sha256(
+        haskell_root,
+        error="HASKELL_NATIVE_SOURCE_TREE_INVALID",
+    )
+    if profile["sourceTreeSha256"] != source_tree_sha256:
+        raise GateError("HASKELL_NATIVE_SOURCE_TREE_INVALID")
     _validate_haskell_toolchain_lock(
         strict_json_load(toolchain_lock_file),
         s1_4x_root=s1_4x_root,
@@ -2115,10 +2371,20 @@ def produce_haskell_native_evidence(
         != FROZEN_MERGED_TOOLCHAIN_PROVENANCE_SHA256
     ):
         raise GateError("HASKELL_NATIVE_TOOLCHAIN_PROVENANCE_INVALID")
-    raw_sha256 = sha256_file(raw_file)
-    receipt_sha256 = sha256_file(receipt_file)
+    raw_snapshot, raw_document = _snapshot_json_file(
+        raw_file,
+        role="haskell-criterion-family-raw",
+        error="HASKELL_NATIVE_RAW_EVIDENCE_INVALID",
+    )
+    receipt_snapshot, receipt_document = _snapshot_json_file(
+        receipt_file,
+        role="haskell-execution-receipt",
+        error="HASKELL_NATIVE_EXECUTION_RECEIPT_INVALID",
+    )
+    raw_sha256 = raw_snapshot.sha256
+    receipt_sha256 = receipt_snapshot.sha256
     receipt = _exact_object(
-        strict_json_load(receipt_file),
+        receipt_document,
         EXECUTION_RECEIPT_FIELDS,
         error="HASKELL_NATIVE_EXECUTION_RECEIPT_INVALID",
     )
@@ -2127,7 +2393,13 @@ def produce_haskell_native_evidence(
         EXECUTION_PROVENANCE_FIELDS,
         error="HASKELL_NATIVE_EXECUTION_RECEIPT_INVALID",
     )
-    benchmark_artifact_sha256 = sha256_file(benchmark_artifact)
+    benchmark_artifact_snapshot = _snapshot_regular_file(
+        benchmark_artifact,
+        role="haskell-benchmark-artifact",
+        error="HASKELL_NATIVE_EXECUTION_RECEIPT_INVALID",
+        executable=True,
+    )
+    benchmark_artifact_sha256 = benchmark_artifact_snapshot.sha256
     if (
         receipt["rawEvidencePath"] != "raw/criterion-family.json"
         or receipt["rawEvidenceSha256"] != raw_sha256
@@ -2138,7 +2410,7 @@ def produce_haskell_native_evidence(
     ):
         raise GateError("HASKELL_NATIVE_EXECUTION_RECEIPT_INVALID")
     native_cases, statistics_cases = _parse_criterion_family_raw(
-        strict_json_load(raw_file),
+        raw_document,
         expected_case_ids=expected_case_ids,
         logical_operations_by_case=logical_operations_by_case,
     )
@@ -2182,6 +2454,8 @@ def produce_haskell_native_evidence(
         input_ledger_path=ledger_file,
         effective_runtime_arguments_sha256=str(profile["optionsSha256"]),
         profile=str(profile["profileId"]),
+        _raw_snapshots={raw_file: (raw_snapshot, raw_document)},
+        _receipt_snapshots={receipt_file: (receipt_snapshot, receipt_document)},
     )
     native_contract_sha256 = _canonical_sha256(native_contract)
     native_document = {
@@ -2192,7 +2466,7 @@ def produce_haskell_native_evidence(
         "nativeTimeUnit": "s",
         "profile": profile["profileId"],
         "artifactSha256": benchmark_artifact_sha256,
-        "sourceTreeSha256": profile["sourceTreeSha256"],
+        "sourceTreeSha256": source_tree_sha256,
         "toolchainLockSha256": sha256_file(toolchain_lock_file),
         "effectiveRuntimeArgumentsSha256": profile["optionsSha256"],
         "inputLedgerSha256": sha256_file(ledger_file),
