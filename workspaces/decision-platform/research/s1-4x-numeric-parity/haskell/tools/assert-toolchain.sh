@@ -112,12 +112,6 @@ PROVENANCE="$NUMERIC_ROOT/contract/toolchain-provenance.v1.json"
 PROVENANCE_SCHEMA="$NUMERIC_ROOT/contract/schemas/toolchain-provenance.schema.json"
 LOCK="$HASKELL_ROOT/toolchain-lock.v1.json"
 COMPATIBILITY_EVIDENCE="$HASKELL_ROOT/ghc-compatibility-solve-failure.v1.json"
-COMPATIBILITY_RESULT="$NUMERIC_ROOT/reports/ghc-compatibility-result.v1.json"
-
-# 실패 승인도 성공 승인과 동일하게 raw solve, companion, canonical result의 exact closure를 검증한다.
-python3 "$HASKELL_ROOT/tools/compatibility_evidence.py" validate \
-  --evidence "$COMPATIBILITY_EVIDENCE" \
-  --result "$COMPATIBILITY_RESULT" >/dev/null
 
 compatibility_status="$(
 python3 - \
@@ -128,8 +122,7 @@ python3 - \
   "$HASKELL_ROOT/stack-ghc-9.14.1.yaml" \
   "$HASKELL_ROOT/stack.yaml.lock" \
   "$HASKELL_ROOT/stack-ghc-9.14.1.yaml.lock" \
-  "$COMPATIBILITY_EVIDENCE" \
-  "$COMPATIBILITY_RESULT" <<'PY'
+  "$COMPATIBILITY_EVIDENCE" <<'PY'
 import hashlib
 import json
 import sys
@@ -169,10 +162,10 @@ def strict_json(path: Path):
     stack_lock_path,
     compatibility_stack_lock_path,
     compatibility_evidence_path,
-    compatibility_result_path,
 ) = map(Path, sys.argv[1:])
 lock = strict_json(lock_path)
 provenance = strict_json(provenance_path)
+historical_compatibility_evidence = strict_json(compatibility_evidence_path)
 
 expected_outer_keys = {
     "schemaVersion",
@@ -307,19 +300,27 @@ if lock["resolverAssertions"] != expected_resolvers:
     raise SystemExit("GHCup run resolver assertion drift")
 
 expected_compatibility_plan = {
-    "status": "FAIL_FROZEN_DEPENDENCY",
-    "acceptedMode": True,
+    "status": "CURRENT_REPLAY_REQUIRED",
+    "acceptedMode": False,
     "stackYamlPath": "haskell/stack-ghc-9.14.1.yaml",
     "stackYamlSha256": sha256(compatibility_path),
     "stackLockPath": "haskell/stack-ghc-9.14.1.yaml.lock",
     "stackLockSha256": sha256(compatibility_stack_lock_path),
-    "failureEvidencePath": "haskell/ghc-compatibility-solve-failure.v1.json",
-    "failureEvidenceSha256": sha256(compatibility_evidence_path),
-    "failureResultPath": "reports/ghc-compatibility-result.v1.json",
-    "failureResultSha256": sha256(compatibility_result_path),
+    "historicalFailureEvidencePath": (
+        "haskell/ghc-compatibility-solve-failure.v1.json"
+    ),
+    "historicalFailureEvidenceSha256": sha256(compatibility_evidence_path),
+    "currentResultPublication": "transient-output-only",
 }
 if lock["compatibilityPlan"] != expected_compatibility_plan:
-    raise SystemExit("accepted GHC 9.14 compatibility failure plan drift")
+    raise SystemExit("current GHC 9.14 compatibility replay plan drift")
+if (
+    historical_compatibility_evidence.get("schemaVersion")
+    != "s1.4x-ghc-compatibility-solve-failure-v1"
+    or historical_compatibility_evidence.get("classification")
+    != "FAIL_FROZEN_DEPENDENCY"
+):
+    raise SystemExit("historical GHC 9.14 compatibility evidence drift")
 
 expected_configurations = {
     "authoritativePath": "haskell/stack.yaml",
@@ -353,5 +354,5 @@ printf 'HASKELL_TOOLCHAIN_PASS ghcup=%s stack=%s ghc=%s compatibilityGhc=%s comp
   "$AUTHORITATIVE_GHC_BIN" \
   "$LATEST_GHC_BIN" \
   "$compatibility_status" \
-  "true" \
+  "false" \
   "$(sha256sum "$LOCK" | awk '{print $1}')"

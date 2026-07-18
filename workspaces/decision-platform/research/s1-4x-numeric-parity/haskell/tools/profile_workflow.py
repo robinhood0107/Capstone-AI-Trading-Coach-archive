@@ -36,6 +36,21 @@ PROFILE_OPTIONS = {
 PROFILE_MARKER_SCHEMA_VERSION = "s1.4x-haskell-profile-measurement-state-v1"
 QUALIFICATION_SCHEMA_VERSION = "s1.4x-haskell-profile-qualification-v1"
 FINAL_PROFILE_SCHEMA_VERSION = "s1.4x-haskell-selected-profile-v1"
+RUNTIME_PROFILE_FIELDS = {
+    "schemaVersion",
+    "profileId",
+    "ghcOptions",
+    "compilerVersion",
+    "compilerSha256",
+    "sourceTreeSha256",
+    "optionsSha256",
+    "fullCorrectnessSha256",
+    "qualificationPlanSha256",
+    "qualificationArtifactSha256",
+    "selectorConfigSha256",
+    "fallbackProfile",
+    "selectedBy",
+}
 CURRENT_COMPATIBILITY_EVIDENCE_VERSION = (
     "s1.4x-ghc-current-frozen-dependency-evidence-v1"
 )
@@ -207,6 +222,53 @@ def profile_options(profile_id: object) -> tuple[str, str]:
     if type(profile_id) is not str or profile_id not in PROFILE_OPTIONS:
         raise WorkflowError("PROFILE_ID_INVALID")
     return PROFILE_OPTIONS[profile_id]
+
+
+def runtime_selected_profile(document: object) -> tuple[str, tuple[str, str]]:
+    """통합 candidate 실행에는 qualification이 끝난 exact final profile만 허용한다."""
+
+    if (
+        not isinstance(document, dict)
+        or document.get("schemaVersion") != FINAL_PROFILE_SCHEMA_VERSION
+    ):
+        raise WorkflowError("RUNTIME_SELECTED_PROFILE_NOT_FINAL")
+    if set(document) != RUNTIME_PROFILE_FIELDS:
+        raise WorkflowError("RUNTIME_SELECTED_PROFILE_INVALID")
+    try:
+        profile_id = document["profileId"]
+        options = profile_options(profile_id)
+        for field in (
+            "compilerSha256",
+            "sourceTreeSha256",
+            "optionsSha256",
+            "fullCorrectnessSha256",
+            "qualificationPlanSha256",
+            "qualificationArtifactSha256",
+            "selectorConfigSha256",
+        ):
+            _require_sha256(document.get(field), label=f"runtime-profile-{field}")
+    except WorkflowError as exc:
+        raise WorkflowError("RUNTIME_SELECTED_PROFILE_INVALID") from exc
+    if (
+        document.get("ghcOptions") != list(options)
+        or document.get("optionsSha256") != canonical_sha256(list(options))
+        or document.get("compilerVersion") != "9.10.3"
+        or document.get("fallbackProfile") != "baseline-o0-fasm"
+        or document.get("selectedBy")
+        not in {"frozen-criterion-selector", "proven-fallback"}
+    ):
+        raise WorkflowError("RUNTIME_SELECTED_PROFILE_INVALID")
+    return profile_id, options
+
+
+def candidate_stack_root(cache_root: Path, output_path: Path) -> Path:
+    """Output path identity마다 재사용 불가능한 candidate Stack root를 파생한다."""
+
+    if not cache_root.is_absolute() or not output_path.is_absolute():
+        raise WorkflowError("CANDIDATE_STACK_ROOT_INPUT_NOT_ABSOLUTE")
+    output_identity = os.fsencode(str(output_path))
+    suffix = hashlib.sha256(output_identity).hexdigest()[:24]
+    return cache_root / f"stack-root-candidate-{suffix}"
 
 
 def build_stack_command(
@@ -1266,6 +1328,65 @@ def _load_compatibility_evidence(haskell_root: Path):
     sys.modules[specification.name] = module
     specification.loader.exec_module(module)
     return module
+
+
+def _candidate_runtime(arguments: argparse.Namespace) -> None:
+    """현재 source/profile/manifest closure를 검증하고 exact runtime profile ID를 낸다."""
+
+    haskell_root = Path(__file__).resolve(strict=True).parent.parent
+    numeric_root = haskell_root.parent
+    expected_profile = haskell_root / "selected-profile.v1.json"
+    expected_manifest = haskell_root / "source-inputs.v1.json"
+    expected_plan = numeric_root / "benchmarks/benchmark-plan.v1.json"
+    profile_path = _absolute_regular(arguments.profile, label="SELECTED_PROFILE")
+    manifest_path = _absolute_regular(
+        arguments.source_manifest,
+        label="SOURCE_MANIFEST",
+    )
+    plan_path = _absolute_regular(
+        arguments.qualification_plan,
+        label="QUALIFICATION_PLAN",
+    )
+    if (
+        profile_path != expected_profile
+        or manifest_path != expected_manifest
+        or plan_path != expected_plan
+    ):
+        raise WorkflowError("CANDIDATE_RUNTIME_INPUT_PATH_DRIFT")
+
+    evidence = _load_haskell_evidence(haskell_root)
+    plan = strict_json_load(plan_path)
+    selector = (
+        plan.get("haskellProfileQualification")
+        if isinstance(plan, dict)
+        else None
+    )
+    if not isinstance(selector, dict):
+        raise WorkflowError("CANDIDATE_RUNTIME_SELECTOR_MISSING")
+    document = strict_json_load(profile_path)
+    profile_id, _ = runtime_selected_profile(document)
+    try:
+        source_tree_sha256 = evidence.benchmark_source_tree_sha256(haskell_root)
+        evidence.validate_selected_profile_document(
+            document,
+            expected_compiler_sha256=evidence.AUTHORITATIVE_GHC_SHA256,
+            expected_source_tree_sha256=source_tree_sha256,
+            expected_qualification_plan_sha256=sha256_file(plan_path),
+            expected_selector_config_sha256=canonical_sha256(selector),
+        )
+        evidence.validate_source_manifest(haskell_root, manifest_path)
+    except evidence.EvidenceError as exc:
+        raise WorkflowError(f"CANDIDATE_RUNTIME_CLOSURE_INVALID:{exc}") from exc
+    if profile_path.read_bytes() != canonical_json_bytes(
+        document,
+        trailing_newline=True,
+    ):
+        raise WorkflowError("CANDIDATE_RUNTIME_PROFILE_NOT_CANONICAL")
+    print(profile_id)
+
+
+def _candidate_stack_root(arguments: argparse.Namespace) -> None:
+    print(candidate_stack_root(arguments.cache_root, arguments.output))
 
 
 def _repo_commit(repo_root: Path) -> str:
@@ -5031,6 +5152,23 @@ def _parser() -> argparse.ArgumentParser:
     oci_correctness = commands.add_parser("oci-correctness")
     oci_correctness.add_argument("--output-dir", type=Path, required=True)
     oci_correctness.set_defaults(handler=_oci_correctness)
+    candidate_runtime = commands.add_parser("candidate-runtime")
+    candidate_runtime.add_argument("--profile", type=Path, required=True)
+    candidate_runtime.add_argument(
+        "--source-manifest",
+        type=Path,
+        required=True,
+    )
+    candidate_runtime.add_argument(
+        "--qualification-plan",
+        type=Path,
+        required=True,
+    )
+    candidate_runtime.set_defaults(handler=_candidate_runtime)
+    candidate_root = commands.add_parser("candidate-stack-root")
+    candidate_root.add_argument("--cache-root", type=Path, required=True)
+    candidate_root.add_argument("--output", type=Path, required=True)
+    candidate_root.set_defaults(handler=_candidate_stack_root)
     return parser
 
 
