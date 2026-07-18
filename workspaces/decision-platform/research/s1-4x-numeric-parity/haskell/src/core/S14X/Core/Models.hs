@@ -8,8 +8,8 @@ module S14X.Core.Models
   )
 where
 
-import Control.DeepSeq (NFData (rnf))
-import Data.Vector.Unboxed (Vector)
+import           Control.DeepSeq (NFData (rnf))
+import           Data.Vector.Unboxed (Vector)
 
 import qualified Data.Vector.Unboxed as U
 

@@ -10,20 +10,8 @@ where
 
 import qualified Data.Vector.Unboxed as U
 
-import S14X.Core.Error
-  ( StableError
-      ( ForecastShapeInvalid,
-        ForecastVarNegative,
-        InputEmpty,
-        InputNonFinite,
-        InputTooLong,
-        InputTooShort,
-        InsufficientSample,
-        ResearchInputInvalid,
-        ResearchInputTooShort
-      ),
-  )
-import S14X.Core.Models (TransitionCounts (TransitionCounts))
+import           S14X.Core.Error (StableError (ForecastShapeInvalid, ForecastVarNegative, InputEmpty, InputNonFinite, InputTooLong, InputTooShort, InsufficientSample, ResearchInputInvalid, ResearchInputTooShort))
+import           S14X.Core.Models (TransitionCounts (TransitionCounts))
 
 -- | 손실·예측 VaR와 그 strict 초과 여부를 같은 길이로 결속한 backtest 입력이다.
 -- 생성자는 검증 함수가 shape, 유한성, 비음수 forecast 계약을 통과한 뒤에만 사용한다.

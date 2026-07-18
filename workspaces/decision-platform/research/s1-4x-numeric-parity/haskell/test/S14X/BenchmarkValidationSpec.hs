@@ -1,19 +1,14 @@
 module S14X.BenchmarkValidationSpec (tests) where
 
-import Test.Tasty (TestTree, testGroup)
-import Test.Tasty.HUnit ((@?=), testCase)
+import           Test.Tasty (TestTree, testGroup)
+import           Test.Tasty.HUnit (testCase, (@?=))
 
 import qualified Data.Vector.Unboxed as U
 
-import S14X.Contract.BenchmarkValidation
-  ( BenchmarkResultShape
-      ( ScalarBatch,
-        VectorBatch
-      ),
-    validateBenchmarkResults,
-  )
-import S14X.Core.Error (StableError (ResearchInputInvalid))
-import S14X.Core.Models (NumericResult (ScalarResult, VectorResult))
+import           S14X.Contract.BenchmarkValidation (BenchmarkResultShape (ScalarBatch, VectorBatch),
+                                                    validateBenchmarkResults)
+import           S14X.Core.Error (StableError (ResearchInputInvalid))
+import           S14X.Core.Models (NumericResult (ScalarResult, VectorResult))
 
 tests :: TestTree
 tests =

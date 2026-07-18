@@ -13,15 +13,7 @@ module S14X.Core.ScalarValidation
   )
 where
 
-import S14X.Core.Error
-  ( StableError
-      ( MomentInvalid,
-        ResearchInputInvalid,
-        ResearchInputTooShort,
-        SignificanceInvalid,
-        TrialCountInvalid
-    ),
-  )
+import           S14X.Core.Error (StableError (MomentInvalid, ResearchInputInvalid, ResearchInputTooShort, SignificanceInvalid, TrialCountInvalid))
 
 -- | NaN/infinity를 caller가 지정한 stable 오류로 바꾸고 유한 값은 보존한다.
 -- 모든 scalar public boundary가 같은 결과 유한성 규칙을 재사용한다.

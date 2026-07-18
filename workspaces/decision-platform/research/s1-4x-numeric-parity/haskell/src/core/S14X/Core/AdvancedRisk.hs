@@ -11,60 +11,30 @@ module S14X.Core.AdvancedRisk
   )
 where
 
-import Data.Char (isHexDigit, isLower)
+import           Data.Char (isHexDigit, isLower)
 
 import qualified Data.Vector.Unboxed as U
 
-import S14X.Core.Error
-  ( StableError
-      ( AggregationPeriodsInvalid,
-        LikelihoodInvalid,
-        MomentInvalid,
-        ResearchInputInvalid,
-        ResearchInputTooShort,
-        ResearchResultNonFinite,
-        TrialProvenanceInvalid,
-        TrialVarianceInvalid
-      ),
-  )
-import S14X.Core.Models
-  ( ConditionalCoverageResult (ConditionalCoverageResult),
-    IndependenceResult (IndependenceResult),
-    LikelihoodResult (LikelihoodResult),
-    TransitionCounts (TransitionCounts),
-    TrialProvenance (TrialProvenance),
-  )
-import S14X.Core.NumericPrimitives
-  ( chiSquareOneSurvival,
-    chiSquareTwoSurvival,
-    confidenceExceptionLogLikelihood,
-    finiteResearchResult,
-    independenceLikelihoodComponents,
-    kupiecLikelihoodComponents,
-    likelihoodRatio,
-    likelihoodRoundoffTolerance,
-    meanVector,
-    normalCdf,
-    normalInverseCdf,
-    pureSort,
-    stableWeightedMean,
-    sumVector,
-  )
-import S14X.Core.ScalarValidation
-  ( validateConfidence,
-    validateFiniteScalar,
-    validateMomentPair,
-    validateSampleSize,
-    validateSignificance,
-    validateTrialCount,
-  )
-import S14X.Core.Validation
-  ( BacktestInputs (BacktestInputs),
-    transitionCounts,
-    validateBacktestInputs,
-    validateResearchVector,
-    validateTransitionIdentifiability,
-  )
+import           S14X.Core.Error (StableError (AggregationPeriodsInvalid, LikelihoodInvalid, MomentInvalid, ResearchInputInvalid, ResearchInputTooShort, ResearchResultNonFinite, TrialProvenanceInvalid, TrialVarianceInvalid))
+import           S14X.Core.Models (ConditionalCoverageResult (ConditionalCoverageResult),
+                                   IndependenceResult (IndependenceResult),
+                                   LikelihoodResult (LikelihoodResult),
+                                   TransitionCounts (TransitionCounts),
+                                   TrialProvenance (TrialProvenance))
+import           S14X.Core.NumericPrimitives (chiSquareOneSurvival, chiSquareTwoSurvival,
+                                              confidenceExceptionLogLikelihood,
+                                              finiteResearchResult,
+                                              independenceLikelihoodComponents,
+                                              kupiecLikelihoodComponents, likelihoodRatio,
+                                              likelihoodRoundoffTolerance, meanVector, normalCdf,
+                                              normalInverseCdf, pureSort, stableWeightedMean,
+                                              sumVector)
+import           S14X.Core.ScalarValidation (validateConfidence, validateFiniteScalar,
+                                             validateMomentPair, validateSampleSize,
+                                             validateSignificance, validateTrialCount)
+import           S14X.Core.Validation (BacktestInputs (BacktestInputs), transitionCounts,
+                                       validateBacktestInputs, validateResearchVector,
+                                       validateTransitionIdentifiability)
 
 -- | 손실 벡터의 상위 꼬리를 confidence 경계에서 부분 가중해 historical expected shortfall을 계산한다.
 -- research 입력·confidence·가중 결과가 유효하지 않으면 닫힌 'StableError'를 반환한다.

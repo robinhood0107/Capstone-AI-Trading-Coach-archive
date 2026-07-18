@@ -1,55 +1,25 @@
 module S14X.CoreSpec (tests) where
 
-import Test.Tasty (TestTree, testGroup)
-import Test.Tasty.HUnit ((@?=), assertBool, assertFailure, testCase)
+import           Test.Tasty (TestTree, testGroup)
+import           Test.Tasty.HUnit (assertBool, assertFailure, testCase, (@?=))
 
 import qualified Data.Vector.Unboxed as U
 
-import S14X.Core.AdvancedRisk
-  ( christoffersenConditionalCoverageTest,
-    christoffersenIndependenceTest,
-    deflatedSharpeRatio,
-    historicalExpectedShortfall,
-    loAdjustedSharpeRatio,
-    probabilisticSharpeRatio,
-    realizedVariance,
-    realizedVolatilityIntraday,
-  )
-import S14X.Core.Error
-  ( StableError
-      ( DenominatorZero,
-        InputTooShort,
-        MomentInvalid,
-        PricesNonPositive,
-        ResearchInputTooShort,
-        SimpleReturnBelowMinusOne
-      ),
-  )
-import S14X.Core.Models
-  ( ConditionalCoverageResult (ConditionalCoverageResult),
-    IndependenceResult (IndependenceResult),
-    TrialProvenance (TrialProvenance),
-  )
-import S14X.Core.NumericPrimitives
-  ( meanVector,
-    normalCdf,
-    normalInverseCdf,
-    pureSort,
-    sumVector,
-  )
-import S14X.Core.ProductionMetrics
-  ( annualizedVolatility,
-    cagr,
-    cumulativeReturn,
-    historicalCvar,
-    historicalVar,
-    logReturns,
-    maxDrawdown,
-    realizedVolatility,
-    sharpeRatio,
-    simpleReturns,
-    sortinoRatio,
-  )
+import           S14X.Core.AdvancedRisk (christoffersenConditionalCoverageTest,
+                                         christoffersenIndependenceTest, deflatedSharpeRatio,
+                                         historicalExpectedShortfall, loAdjustedSharpeRatio,
+                                         probabilisticSharpeRatio, realizedVariance,
+                                         realizedVolatilityIntraday)
+import           S14X.Core.Error (StableError (DenominatorZero, InputTooShort, MomentInvalid, PricesNonPositive, ResearchInputTooShort, SimpleReturnBelowMinusOne))
+import           S14X.Core.Models (ConditionalCoverageResult (ConditionalCoverageResult),
+                                   IndependenceResult (IndependenceResult),
+                                   TrialProvenance (TrialProvenance))
+import           S14X.Core.NumericPrimitives (meanVector, normalCdf, normalInverseCdf, pureSort,
+                                              sumVector)
+import           S14X.Core.ProductionMetrics (annualizedVolatility, cagr, cumulativeReturn,
+                                              historicalCvar, historicalVar, logReturns,
+                                              maxDrawdown, realizedVolatility, sharpeRatio,
+                                              simpleReturns, sortinoRatio)
 
 tests :: TestTree
 tests =

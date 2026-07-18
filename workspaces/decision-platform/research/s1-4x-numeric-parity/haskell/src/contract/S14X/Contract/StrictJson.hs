@@ -6,31 +6,20 @@ module S14X.Contract.StrictJson
   )
 where
 
-import Control.Applicative ((<|>))
-import Control.Monad (replicateM_)
-import Data.Aeson (eitherDecodeStrict')
-import Data.Attoparsec.ByteString.Char8
-  ( Parser,
-    char,
-    endOfInput,
-    many',
-    match,
-    option,
-    parseOnly,
-    peekChar,
-    satisfy,
-    sepBy,
-    skipWhile,
-    string,
-  )
-import Data.ByteString (ByteString)
-import Data.Foldable (traverse_)
-import Data.Functor (($>))
-import Data.Map.Strict (Map)
-import Data.Scientific (Scientific, toRealFloat)
-import Data.Set (Set)
-import Data.Text (Text)
-import Data.Text.Encoding (decodeUtf8')
+import           Control.Applicative ((<|>))
+import           Control.Monad (replicateM_)
+import           Data.Aeson (eitherDecodeStrict')
+import           Data.Attoparsec.ByteString.Char8 (Parser, char, endOfInput, many', match, option,
+                                                   parseOnly, peekChar, satisfy, sepBy, skipWhile,
+                                                   string)
+import           Data.ByteString (ByteString)
+import           Data.Foldable (traverse_)
+import           Data.Functor (($>))
+import           Data.Map.Strict (Map)
+import           Data.Scientific (Scientific, toRealFloat)
+import           Data.Set (Set)
+import           Data.Text (Text)
+import           Data.Text.Encoding (decodeUtf8')
 
 import qualified Data.ByteString.Char8 as BS8
 import qualified Data.Map.Strict as Map
@@ -38,16 +27,7 @@ import qualified Data.Set as Set
 import qualified Data.Text as Text
 import qualified Data.Text.Read as TextRead
 
-import S14X.Contract.Types
-  ( RawJson
-      ( RawArray,
-        RawBool,
-        RawNull,
-        RawNumber,
-        RawObject,
-        RawString
-      ),
-  )
+import           S14X.Contract.Types (RawJson (RawArray, RawBool, RawNull, RawNumber, RawObject, RawString))
 
 -- | Aeson object materialization 전에 모든 object level의 decoded duplicate key를 검사한다.
 -- UTF-8·RFC 8259·유한 number만 허용하고 raw number token을 보존한다.

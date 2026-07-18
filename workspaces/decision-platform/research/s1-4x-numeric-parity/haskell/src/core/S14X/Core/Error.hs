@@ -7,7 +7,7 @@ module S14X.Core.Error
   )
 where
 
-import Control.DeepSeq (NFData (rnf))
+import           Control.DeepSeq (NFData (rnf))
 
 -- | Gate 1 registry의 production 19개와 research 13개 오류를 닫힌 집합으로 보존한다.
 -- shell은 이 생성자 외 임의 문자열을 numeric 오류로 내보낼 수 없다.

@@ -4,19 +4,13 @@ module S14X.Contract.AtomicOutput
   )
 where
 
-import Control.Exception (IOException, SomeException, bracket, try, tryJust)
-import Data.ByteString (ByteString)
-import System.Directory (createDirectoryIfMissing, removeFile)
-import System.FilePath (takeDirectory)
-import System.IO
-  ( Handle,
-    hClose,
-    hFlush,
-    hSetBinaryMode,
-    openBinaryTempFile,
-  )
-import System.IO.Error (isAlreadyExistsError)
-import System.Posix.Files (createLink)
+import           Control.Exception (IOException, SomeException, bracket, try, tryJust)
+import           Data.ByteString (ByteString)
+import           System.Directory (createDirectoryIfMissing, removeFile)
+import           System.FilePath (takeDirectory)
+import           System.IO (Handle, hClose, hFlush, hSetBinaryMode, openBinaryTempFile)
+import           System.IO.Error (isAlreadyExistsError)
+import           System.Posix.Files (createLink)
 
 import qualified Data.ByteString as BS
 

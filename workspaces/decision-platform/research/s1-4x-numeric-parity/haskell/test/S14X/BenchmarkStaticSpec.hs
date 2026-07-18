@@ -1,12 +1,12 @@
 module S14X.BenchmarkStaticSpec (tests) where
 
-import Data.Aeson (FromJSON (parseJSON), eitherDecodeFileStrict', withObject, (.:))
-import Data.Bifunctor (second)
-import Data.List (isInfixOf)
-import Data.Map.Strict (Map)
-import Data.Text (Text)
-import Test.Tasty (TestTree, testGroup)
-import Test.Tasty.HUnit ((@?=), assertBool, assertFailure, testCase)
+import           Data.Aeson (FromJSON (parseJSON), eitherDecodeFileStrict', withObject, (.:))
+import           Data.Bifunctor (second)
+import           Data.List (isInfixOf)
+import           Data.Map.Strict (Map)
+import           Data.Text (Text)
+import           Test.Tasty (TestTree, testGroup)
+import           Test.Tasty.HUnit (assertBool, assertFailure, testCase, (@?=))
 
 import qualified Data.Map.Strict as Map
 

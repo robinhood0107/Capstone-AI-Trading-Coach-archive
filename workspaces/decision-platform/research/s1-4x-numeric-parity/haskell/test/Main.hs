@@ -1,8 +1,8 @@
 module S14X.TestMain (main) where
 
-import Test.Tasty (TestTree, defaultMain, localOption, testGroup)
-import Test.Tasty.QuickCheck (QuickCheckTests (QuickCheckTests))
-import System.Environment (getArgs)
+import           System.Environment (getArgs)
+import           Test.Tasty (TestTree, defaultMain, localOption, testGroup)
+import           Test.Tasty.QuickCheck (QuickCheckTests (QuickCheckTests))
 
 import qualified S14X.AtomicOutputSpec as AtomicOutputSpec
 import qualified S14X.BenchmarkStaticSpec as BenchmarkStaticSpec

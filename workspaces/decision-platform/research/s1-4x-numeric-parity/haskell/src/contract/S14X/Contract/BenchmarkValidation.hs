@@ -6,19 +6,11 @@ where
 
 import qualified Data.Vector.Unboxed as U
 
-import S14X.Core.Error (StableError)
-import S14X.Core.Models
-  ( ConditionalCoverageResult (ConditionalCoverageResult),
-    IndependenceResult (IndependenceResult),
-    LikelihoodResult (LikelihoodResult),
-    NumericResult
-      ( ConditionalCoverageRecord,
-        IndependenceRecord,
-        LikelihoodRecord,
-        ScalarResult,
-        VectorResult
-      ),
-  )
+import           S14X.Core.Error (StableError)
+import           S14X.Core.Models (ConditionalCoverageResult (ConditionalCoverageResult),
+                                   IndependenceResult (IndependenceResult),
+                                   LikelihoodResult (LikelihoodResult),
+                                   NumericResult (ConditionalCoverageRecord, IndependenceRecord, LikelihoodRecord, ScalarResult, VectorResult))
 
 -- | Criterion batch의 기대 result constructor, batch 수, vector 길이를 표현한다.
 -- timing 전에 실제 kernel output과 exact 일치하는지 검증하는 setup 계약이다.

@@ -1,40 +1,22 @@
 module Main (main) where
 
-import Control.Exception (SomeException, try)
-import Data.Map.Strict (Map)
-import System.Directory
-  ( doesDirectoryExist,
-    doesFileExist,
-    doesPathExist,
-  )
-import System.Environment (getArgs)
-import System.Exit (ExitCode (ExitFailure, ExitSuccess), exitWith)
-import System.FilePath (isAbsolute)
-import System.IO (stderr)
+import           Control.Exception (SomeException, try)
+import           Data.Map.Strict (Map)
+import           System.Directory (doesDirectoryExist, doesFileExist, doesPathExist)
+import           System.Environment (getArgs)
+import           System.Exit (ExitCode (ExitFailure, ExitSuccess), exitWith)
+import           System.FilePath (isAbsolute)
+import           System.IO (stderr)
 
 import qualified Data.ByteString as BS
 import qualified Data.Map.Strict as Map
 
-import S14X.Contract.AtomicOutput
-  ( PublishResult (AlreadyExists, Published),
-    exclusiveAtomicWrite,
-  )
-import S14X.Contract.Process
-  ( encodeResultBatch,
-    encodeTransportError,
-    parseRequest,
-    runRequest,
-  )
-import S14X.Contract.Types
-  ( TransportCode
-      ( BinaryInvalid,
-        InternalError,
-        ManifestInvalid,
-        RequestInvalid
-      ),
-    TransportError (TransportError),
-    transportCode,
-  )
+import           S14X.Contract.AtomicOutput (PublishResult (AlreadyExists, Published),
+                                             exclusiveAtomicWrite)
+import           S14X.Contract.Process (encodeResultBatch, encodeTransportError, parseRequest,
+                                        runRequest)
+import           S14X.Contract.Types (TransportCode (BinaryInvalid, InternalError, ManifestInvalid, RequestInvalid),
+                                      TransportError (TransportError), transportCode)
 
 data Cli = Cli
   { cliRequest :: FilePath,

@@ -1,28 +1,20 @@
 module S14X.ContractSpec (tests) where
 
-import Data.ByteString (ByteString)
-import Data.Foldable (traverse_)
-import Data.Version (showVersion)
-import System.Info (compilerName, fullCompilerVersion)
-import Test.Tasty (TestTree, testGroup)
-import Test.Tasty.HUnit ((@?=), assertBool, assertFailure, testCase)
+import           Data.ByteString (ByteString)
+import           Data.Foldable (traverse_)
+import           Data.Version (showVersion)
+import           System.Info (compilerName, fullCompilerVersion)
+import           Test.Tasty (TestTree, testGroup)
+import           Test.Tasty.HUnit (assertBool, assertFailure, testCase, (@?=))
 
 import qualified Data.ByteString.Char8 as BS8
 import qualified Data.Text as Text
 
-import S14X.Contract.Process
-  ( encodeResultBatch,
-    implementationLabel,
-    parseRequest,
-    runRequest,
-    sha256Hex,
-  )
-import S14X.Contract.Types
-  ( RequestBatch (RequestBatch),
-    ResultBatch (ResultBatch),
-    TransportCode (ManifestInvalid, RequestInvalid),
-    transportCode,
-  )
+import           S14X.Contract.Process (encodeResultBatch, implementationLabel, parseRequest,
+                                        runRequest, sha256Hex)
+import           S14X.Contract.Types (RequestBatch (RequestBatch), ResultBatch (ResultBatch),
+                                      TransportCode (ManifestInvalid, RequestInvalid),
+                                      transportCode)
 
 tests :: TestTree
 tests =

@@ -5,63 +5,32 @@ module S14X.PropertyEvidence
   )
 where
 
-import Control.Monad (unless, when)
-import Data.Aeson
-  ( FromJSON (parseJSON),
-    Value,
-    eitherDecodeFileStrict',
-    encode,
-    object,
-    withObject,
-    (.:),
-    (.=),
-  )
-import Data.ByteString (ByteString)
-import Data.List (sort)
-import Data.Text (Text)
-import Data.Time.Clock (UTCTime, getCurrentTime)
-import Data.Time.Format (defaultTimeLocale, formatTime)
-import System.Directory
-  ( doesDirectoryExist,
-    doesFileExist,
-    doesPathExist,
-    listDirectory,
-  )
-import System.FilePath (makeRelative, takeExtension, (</>))
-import Test.QuickCheck
-  ( Args,
-    Property,
-    Result,
-    chatty,
-    isSuccess,
-    maxDiscardRatio,
-    maxShrinks,
-    maxSuccess,
-    numDiscarded,
-    numTests,
-    output,
-    quickCheckWithResult,
-    replay,
-    stdArgs,
-  )
-import Test.QuickCheck.Random (mkQCGen)
+import           Control.Monad (unless, when)
+import           Data.Aeson (FromJSON (parseJSON), Value, eitherDecodeFileStrict', encode, object,
+                             withObject, (.:), (.=))
+import           Data.ByteString (ByteString)
+import           Data.List (sort)
+import           Data.Text (Text)
+import           Data.Time.Clock (UTCTime, getCurrentTime)
+import           Data.Time.Format (defaultTimeLocale, formatTime)
+import           System.Directory (doesDirectoryExist, doesFileExist, doesPathExist, listDirectory)
+import           System.FilePath (makeRelative, takeExtension, (</>))
+import           Test.QuickCheck (Args, Property, Result, chatty, isSuccess, maxDiscardRatio,
+                                  maxShrinks, maxSuccess, numDiscarded, numTests, output,
+                                  quickCheckWithResult, replay, stdArgs)
+import           Test.QuickCheck.Random (mkQCGen)
 
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
 
-import S14X.Contract.AtomicOutput
-  ( PublishResult (AlreadyExists, Published),
-    exclusiveAtomicWrite,
-  )
-import S14X.Contract.Process (implementationLabel, sha256Hex)
-import S14X.Contract.Types (FunctionId, functionIdText)
-import S14X.Core.Error (allStableErrors, stableErrorCode)
-import S14X.PropertyCases
-  ( PropertyCase (PropertyCase),
-    propertyCases,
-  )
+import           S14X.Contract.AtomicOutput (PublishResult (AlreadyExists, Published),
+                                             exclusiveAtomicWrite)
+import           S14X.Contract.Process (implementationLabel, sha256Hex)
+import           S14X.Contract.Types (FunctionId, functionIdText)
+import           S14X.Core.Error (allStableErrors, stableErrorCode)
+import           S14X.PropertyCases (PropertyCase (PropertyCase), propertyCases)
 
 data SeedCorpus = SeedCorpus Text [Int]
   deriving stock (Eq, Show)

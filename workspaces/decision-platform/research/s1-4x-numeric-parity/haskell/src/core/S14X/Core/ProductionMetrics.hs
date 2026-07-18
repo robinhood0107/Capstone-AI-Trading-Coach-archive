@@ -13,38 +13,15 @@ module S14X.Core.ProductionMetrics
   )
 where
 
-import Numeric.SpecFunctions (expm1)
+import           Numeric.SpecFunctions (expm1)
 
 import qualified Data.Vector.Unboxed as U
 
-import S14X.Core.Error
-  ( StableError
-      ( ConfidenceInvalid,
-        DenominatorZero,
-        EquityInitialNonPositive,
-        EquityNegative,
-        PeriodsPerYearInvalid,
-        PricesNonPositive,
-        ResultNonFinite,
-        RiskFreeRateInvalid,
-        SimpleReturnBelowMinusOne,
-        TailEmpty,
-        TargetReturnInvalid
-      ),
-  )
-import S14X.Core.NumericPrimitives
-  ( hf7Quantile,
-    meanVector,
-    sampleVariance,
-    sumVector,
-  )
-import S14X.Core.ScalarValidation
-  ( ensureFinite,
-    validateConfidence,
-    validateFiniteScalar,
-    validatePositiveInteger,
-  )
-import S14X.Core.Validation (validateProductionVector)
+import           S14X.Core.Error (StableError (ConfidenceInvalid, DenominatorZero, EquityInitialNonPositive, EquityNegative, PeriodsPerYearInvalid, PricesNonPositive, ResultNonFinite, RiskFreeRateInvalid, SimpleReturnBelowMinusOne, TailEmpty, TargetReturnInvalid))
+import           S14X.Core.NumericPrimitives (hf7Quantile, meanVector, sampleVariance, sumVector)
+import           S14X.Core.ScalarValidation (ensureFinite, validateConfidence, validateFiniteScalar,
+                                             validatePositiveInteger)
+import           S14X.Core.Validation (validateProductionVector)
 
 -- | 양수 가격 벡터를 인접 단순수익률 벡터로 변환한다.
 -- 길이·유한성·양수 계약 위반과 비유한 결과는 stable production 오류로 반환한다.

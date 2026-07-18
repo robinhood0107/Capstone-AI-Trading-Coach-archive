@@ -22,19 +22,13 @@ module S14X.Core.NumericPrimitives
   )
 where
 
-import Data.List (foldl')
-import Numeric.SpecFunctions (erfc, log1p)
+import           Data.List (foldl')
+import           Numeric.SpecFunctions (erfc, log1p)
 
 import qualified Data.Vector.Unboxed as U
 
-import S14X.Core.Error
-  ( StableError
-      ( LikelihoodInvalid,
-        ResearchResultNonFinite,
-        ResultNonFinite
-      ),
-  )
-import S14X.Core.ScalarValidation (ensureFinite)
+import           S14X.Core.Error (StableError (LikelihoodInvalid, ResearchResultNonFinite, ResultNonFinite))
+import           S14X.Core.ScalarValidation (ensureFinite)
 
 -- | immutable vector를 Neumaier 보상합으로 축약해 cancellation residual을 보존한다.
 -- 호출자가 입력 유한성과 최종 결과 오류 매핑을 소유하는 내부 수치 primitive다.

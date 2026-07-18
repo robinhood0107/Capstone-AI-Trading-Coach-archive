@@ -1,11 +1,11 @@
 module S14X.StaticPolicySpec (tests) where
 
-import Data.Char (isSpace)
-import Data.List (find, isInfixOf, isPrefixOf, isSuffixOf, tails)
-import System.Directory (doesDirectoryExist, listDirectory)
-import System.FilePath ((</>))
-import Test.Tasty (TestTree, testGroup)
-import Test.Tasty.HUnit (assertBool, assertFailure, testCase)
+import           Data.Char (isSpace)
+import           Data.List (find, isInfixOf, isPrefixOf, isSuffixOf, tails)
+import           System.Directory (doesDirectoryExist, listDirectory)
+import           System.FilePath ((</>))
+import           Test.Tasty (TestTree, testGroup)
+import           Test.Tasty.HUnit (assertBool, assertFailure, testCase)
 
 tests :: TestTree
 tests =

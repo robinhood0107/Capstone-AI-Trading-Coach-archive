@@ -1,27 +1,20 @@
 module S14X.AtomicOutputSpec (tests) where
 
-import Control.Concurrent (MVar, forkIO, newEmptyMVar, putMVar, readMVar, takeMVar)
-import Control.Exception (SomeException, bracket, try)
-import Data.ByteString (ByteString)
-import Data.List (sort)
-import System.Directory
-  ( createDirectory,
-    getTemporaryDirectory,
-    listDirectory,
-    removeDirectoryRecursive,
-    removeFile,
-  )
-import System.FilePath ((</>))
-import System.IO (hClose, openBinaryTempFile)
-import Test.Tasty (TestTree, testGroup)
-import Test.Tasty.HUnit ((@?=), assertBool, assertFailure, testCase)
+import           Control.Concurrent (MVar, forkIO, newEmptyMVar, putMVar, readMVar, takeMVar)
+import           Control.Exception (SomeException, bracket, try)
+import           Data.ByteString (ByteString)
+import           Data.List (sort)
+import           System.Directory (createDirectory, getTemporaryDirectory, listDirectory,
+                                   removeDirectoryRecursive, removeFile)
+import           System.FilePath ((</>))
+import           System.IO (hClose, openBinaryTempFile)
+import           Test.Tasty (TestTree, testGroup)
+import           Test.Tasty.HUnit (assertBool, assertFailure, testCase, (@?=))
 
 import qualified Data.ByteString as BS
 
-import S14X.Contract.AtomicOutput
-  ( PublishResult (AlreadyExists, Published),
-    exclusiveAtomicWrite,
-  )
+import           S14X.Contract.AtomicOutput (PublishResult (AlreadyExists, Published),
+                                             exclusiveAtomicWrite)
 
 tests :: TestTree
 tests =

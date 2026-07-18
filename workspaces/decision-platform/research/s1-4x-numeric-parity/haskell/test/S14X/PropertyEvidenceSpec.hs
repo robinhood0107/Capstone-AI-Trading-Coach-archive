@@ -1,13 +1,10 @@
 module S14X.PropertyEvidenceSpec (tests) where
 
-import Test.Tasty (TestTree, testGroup)
-import Test.Tasty.HUnit ((@?=), testCase)
+import           Test.Tasty (TestTree, testGroup)
+import           Test.Tasty.HUnit (testCase, (@?=))
 
-import S14X.Contract.Process (implementationLabel)
-import S14X.PropertyEvidence
-  ( canonicalOuterCommandSha256,
-    toolchainProfile,
-  )
+import           S14X.Contract.Process (implementationLabel)
+import           S14X.PropertyEvidence (canonicalOuterCommandSha256, toolchainProfile)
 
 tests :: TestTree
 tests =

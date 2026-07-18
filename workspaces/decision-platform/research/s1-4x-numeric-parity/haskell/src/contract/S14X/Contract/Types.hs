@@ -11,11 +11,11 @@ module S14X.Contract.Types
   )
 where
 
-import Data.Map.Strict (Map)
-import Data.Text (Text)
+import           Data.Map.Strict (Map)
+import           Data.Text (Text)
 
-import S14X.Core.Error (StableError)
-import S14X.Core.Models (NumericResult)
+import           S14X.Core.Error (StableError)
+import           S14X.Core.Models (NumericResult)
 
 -- | strict parser가 decoded duplicate key와 number 원문을 보존하는 JSON 표현이다.
 -- transport validation이 끝나기 전에는 Aeson object로 축약하지 않는다.

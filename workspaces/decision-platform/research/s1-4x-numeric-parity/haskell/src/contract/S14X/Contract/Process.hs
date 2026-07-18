@@ -8,141 +8,56 @@ module S14X.Contract.Process
   )
 where
 
-import Control.Exception (IOException, try)
-import Data.Aeson (Value, encode, object, toJSON, (.=))
-import Data.Aeson.Types (Pair)
-import Data.Binary.Get (getDoublele, runGet)
-import Data.ByteString (ByteString)
-import Data.Digest.Pure.SHA (sha256, showDigest)
-import Data.Either (lefts, rights)
-import Data.Map.Strict (Map)
-import Data.Set (Set)
-import Data.Text (Text)
-import Data.Version (showVersion)
-import System.Directory
-  ( canonicalizePath,
-    doesDirectoryExist,
-    doesFileExist,
-    pathIsSymbolicLink,
-  )
-import System.FilePath ((</>))
-import System.Info (compilerName, fullCompilerVersion)
+import           Control.Exception (IOException, try)
+import           Data.Aeson (Value, encode, object, toJSON, (.=))
+import           Data.Aeson.Types (Pair)
+import           Data.Binary.Get (getDoublele, runGet)
+import           Data.ByteString (ByteString)
+import           Data.Digest.Pure.SHA (sha256, showDigest)
+import           Data.Either (lefts, rights)
+import           Data.Map.Strict (Map)
+import           Data.Set (Set)
+import           Data.Text (Text)
+import           Data.Version (showVersion)
+import           System.Directory (canonicalizePath, doesDirectoryExist, doesFileExist,
+                                   pathIsSymbolicLink)
+import           System.FilePath ((</>))
+import           System.Info (compilerName, fullCompilerVersion)
 
+import qualified Data.Aeson.Key as Key
 import qualified Data.ByteString.Char8 as BS8
 import qualified Data.ByteString.Lazy as LBS
-import qualified Data.Aeson.Key as Key
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import qualified Data.Text as Text
 import qualified Data.Vector.Unboxed as U
 
-import S14X.Contract.StrictJson
-  ( objectMap,
-    parseStrictJson,
-    rawDouble,
-    rawInteger,
-  )
-import S14X.Contract.Types
-  ( CaseRequest (CaseRequest),
-    CaseResult (CaseFailure, CaseSuccess),
-    FunctionId
-      ( AnnualizedVolatility,
-        Cagr,
-        ChristoffersenConditionalCoverageTest,
-        ChristoffersenIndependenceTest,
-        CumulativeReturn,
-        DeflatedSharpeRatio,
-        HistoricalCvar,
-        HistoricalExpectedShortfall,
-        HistoricalVar,
-        KupiecUnconditionalCoverageTest,
-        LoAdjustedSharpeRatio,
-        LogReturns,
-        MaxDrawdown,
-        ProbabilisticSharpeRatio,
-        RealizedVariance,
-        RealizedVolatility,
-        RealizedVolatilityIntraday,
-        SharpeRatio,
-        SimpleReturns,
-        SortinoRatio
-      ),
-    RawJson
-      ( RawArray,
-        RawBool,
-        RawNumber,
-        RawObject,
-        RawString
-      ),
-    RequestBatch (RequestBatch),
-    ResultBatch (ResultBatch),
-    TransportCode
-      ( BinaryInvalid,
-        InternalError,
-        ManifestInvalid,
-        RequestInvalid
-      ),
-    TransportError (TransportError),
-    functionIdText,
-  )
-import S14X.Core.AdvancedRisk
-  ( christoffersenConditionalCoverageTest,
-    christoffersenIndependenceTest,
-    deflatedSharpeRatio,
-    historicalExpectedShortfall,
-    kupiecUnconditionalCoverageTest,
-    loAdjustedSharpeRatio,
-    probabilisticSharpeRatio,
-    realizedVariance,
-    realizedVolatilityIntraday,
-  )
-import S14X.Core.Error
-  ( StableError
-      ( AggregationPeriodsInvalid,
-        ConfidenceInvalid,
-        InputBoolInvalid,
-        InputNonFinite,
-        InputShapeInvalid,
-        InputTypeInvalid,
-        MomentInvalid,
-        PeriodsPerYearInvalid,
-        ResearchInputInvalid,
-        RiskFreeRateInvalid,
-        SignificanceInvalid,
-        TargetReturnInvalid,
-        TrialCountInvalid,
-        TrialProvenanceInvalid,
-        TrialVarianceInvalid
-      ),
-    stableErrorCode,
-  )
-import S14X.Core.Models
-  ( ConditionalCoverageResult (ConditionalCoverageResult),
-    IndependenceResult (IndependenceResult),
-    LikelihoodResult (LikelihoodResult),
-    NumericResult
-      ( ConditionalCoverageRecord,
-        IndependenceRecord,
-        LikelihoodRecord,
-        ScalarResult,
-        VectorResult
-      ),
-    TransitionCounts (TransitionCounts),
-    TrialProvenance (TrialProvenance),
-  )
-import S14X.Core.ProductionMetrics
-  ( annualizedVolatility,
-    cagr,
-    cumulativeReturn,
-    historicalCvar,
-    historicalVar,
-    logReturns,
-    maxDrawdown,
-    realizedVolatility,
-    sharpeRatio,
-    simpleReturns,
-    sortinoRatio,
-  )
+import           S14X.Contract.StrictJson (objectMap, parseStrictJson, rawDouble, rawInteger)
+import           S14X.Contract.Types (CaseRequest (CaseRequest),
+                                      CaseResult (CaseFailure, CaseSuccess),
+                                      FunctionId (AnnualizedVolatility, Cagr, ChristoffersenConditionalCoverageTest, ChristoffersenIndependenceTest, CumulativeReturn, DeflatedSharpeRatio, HistoricalCvar, HistoricalExpectedShortfall, HistoricalVar, KupiecUnconditionalCoverageTest, LoAdjustedSharpeRatio, LogReturns, MaxDrawdown, ProbabilisticSharpeRatio, RealizedVariance, RealizedVolatility, RealizedVolatilityIntraday, SharpeRatio, SimpleReturns, SortinoRatio),
+                                      RawJson (RawArray, RawBool, RawNumber, RawObject, RawString),
+                                      RequestBatch (RequestBatch), ResultBatch (ResultBatch),
+                                      TransportCode (BinaryInvalid, InternalError, ManifestInvalid, RequestInvalid),
+                                      TransportError (TransportError), functionIdText)
+import           S14X.Core.AdvancedRisk (christoffersenConditionalCoverageTest,
+                                         christoffersenIndependenceTest, deflatedSharpeRatio,
+                                         historicalExpectedShortfall,
+                                         kupiecUnconditionalCoverageTest, loAdjustedSharpeRatio,
+                                         probabilisticSharpeRatio, realizedVariance,
+                                         realizedVolatilityIntraday)
+import           S14X.Core.Error (StableError (AggregationPeriodsInvalid, ConfidenceInvalid, InputBoolInvalid, InputNonFinite, InputShapeInvalid, InputTypeInvalid, MomentInvalid, PeriodsPerYearInvalid, ResearchInputInvalid, RiskFreeRateInvalid, SignificanceInvalid, TargetReturnInvalid, TrialCountInvalid, TrialProvenanceInvalid, TrialVarianceInvalid),
+                                  stableErrorCode)
+import           S14X.Core.Models (ConditionalCoverageResult (ConditionalCoverageResult),
+                                   IndependenceResult (IndependenceResult),
+                                   LikelihoodResult (LikelihoodResult),
+                                   NumericResult (ConditionalCoverageRecord, IndependenceRecord, LikelihoodRecord, ScalarResult, VectorResult),
+                                   TransitionCounts (TransitionCounts),
+                                   TrialProvenance (TrialProvenance))
+import           S14X.Core.ProductionMetrics (annualizedVolatility, cagr, cumulativeReturn,
+                                              historicalCvar, historicalVar, logReturns,
+                                              maxDrawdown, realizedVolatility, sharpeRatio,
+                                              simpleReturns, sortinoRatio)
 
 -- | UTF-8 JSON request를 strict duplicate/number grammar와 frozen 20-function 계약으로 검증한다.
 -- 실패 시 payload나 local path를 노출하지 않는 typed 'TransportError'만 반환한다.

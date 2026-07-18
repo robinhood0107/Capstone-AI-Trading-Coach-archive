@@ -4,80 +4,37 @@ module S14X.PropertyCases
   )
 where
 
-import Data.List (foldl')
-import Data.Text (Text)
-import Test.QuickCheck
-  ( Gen,
-    Property,
-    choose,
-    counterexample,
-    elements,
-    forAll,
-    vectorOf,
-    (===),
-  )
+import           Data.List (foldl')
+import           Data.Text (Text)
+import           Test.QuickCheck (Gen, Property, choose, counterexample, elements, forAll, vectorOf,
+                                  (===))
 
 import qualified Data.ByteString.Char8 as BS8
 import qualified Data.Text as Text
 import qualified Data.Vector.Unboxed as U
 
-import S14X.Contract.Process (encodeResultBatch)
-import S14X.Contract.Types
-  ( CaseResult (CaseSuccess),
-    FunctionId
-      ( ChristoffersenConditionalCoverageTest,
-        ChristoffersenIndependenceTest,
-        KupiecUnconditionalCoverageTest,
-        LogReturns,
-        SimpleReturns
-    ),
-    ResultBatch (ResultBatch),
-  )
-import S14X.Core.AdvancedRisk
-  ( christoffersenConditionalCoverageTest,
-    christoffersenIndependenceTest,
-    deflatedSharpeRatio,
-    historicalExpectedShortfall,
-    kupiecUnconditionalCoverageTest,
-    loAdjustedSharpeRatio,
-    probabilisticSharpeRatio,
-    realizedVariance,
-    realizedVolatilityIntraday,
-  )
-import S14X.Core.Error
-  ( StableError
-      ( InsufficientSample,
-        TrialProvenanceInvalid
-      ),
-  )
-import S14X.Core.Models
-  ( ConditionalCoverageResult (ConditionalCoverageResult),
-    IndependenceResult (IndependenceResult),
-    LikelihoodResult (LikelihoodResult),
-    NumericResult
-      ( ConditionalCoverageRecord,
-        IndependenceRecord,
-        LikelihoodRecord,
-        ScalarResult,
-        VectorResult
-      ),
-    TransitionCounts (TransitionCounts),
-    TrialProvenance (TrialProvenance),
-  )
-import S14X.Core.NumericPrimitives (normalInverseCdf)
-import S14X.Core.ProductionMetrics
-  ( annualizedVolatility,
-    cagr,
-    cumulativeReturn,
-    historicalCvar,
-    historicalVar,
-    logReturns,
-    maxDrawdown,
-    realizedVolatility,
-    sharpeRatio,
-    simpleReturns,
-    sortinoRatio,
-  )
+import           S14X.Contract.Process (encodeResultBatch)
+import           S14X.Contract.Types (CaseResult (CaseSuccess),
+                                      FunctionId (ChristoffersenConditionalCoverageTest, ChristoffersenIndependenceTest, KupiecUnconditionalCoverageTest, LogReturns, SimpleReturns),
+                                      ResultBatch (ResultBatch))
+import           S14X.Core.AdvancedRisk (christoffersenConditionalCoverageTest,
+                                         christoffersenIndependenceTest, deflatedSharpeRatio,
+                                         historicalExpectedShortfall,
+                                         kupiecUnconditionalCoverageTest, loAdjustedSharpeRatio,
+                                         probabilisticSharpeRatio, realizedVariance,
+                                         realizedVolatilityIntraday)
+import           S14X.Core.Error (StableError (InsufficientSample, TrialProvenanceInvalid))
+import           S14X.Core.Models (ConditionalCoverageResult (ConditionalCoverageResult),
+                                   IndependenceResult (IndependenceResult),
+                                   LikelihoodResult (LikelihoodResult),
+                                   NumericResult (ConditionalCoverageRecord, IndependenceRecord, LikelihoodRecord, ScalarResult, VectorResult),
+                                   TransitionCounts (TransitionCounts),
+                                   TrialProvenance (TrialProvenance))
+import           S14X.Core.NumericPrimitives (normalInverseCdf)
+import           S14X.Core.ProductionMetrics (annualizedVolatility, cagr, cumulativeReturn,
+                                              historicalCvar, historicalVar, logReturns,
+                                              maxDrawdown, realizedVolatility, sharpeRatio,
+                                              simpleReturns, sortinoRatio)
 
 data PropertyCase = PropertyCase
   { propertyIdentifier :: String,

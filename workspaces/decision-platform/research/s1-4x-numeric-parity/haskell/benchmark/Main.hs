@@ -1,28 +1,17 @@
 module S14X.BenchmarkMain (main) where
 
-import Control.DeepSeq (NFData (rnf))
-import Control.Monad (unless)
-import Criterion.Main (Benchmark, bench, bgroup, defaultMain, env, nf)
-import Data.Aeson
-  ( FromJSON (parseJSON),
-    Value,
-    eitherDecodeFileStrict',
-    object,
-    withObject,
-    (.:),
-    (.=),
-  )
-import Data.Binary.Get (getDoublele, runGet)
-import Data.Maybe (fromMaybe)
-import Data.Text (Text)
-import System.Directory
-  ( canonicalizePath,
-    doesDirectoryExist,
-    doesFileExist,
-    pathIsSymbolicLink,
-  )
-import System.Environment (lookupEnv)
-import System.FilePath (takeDirectory, takeFileName, (</>))
+import           Control.DeepSeq (NFData (rnf))
+import           Control.Monad (unless)
+import           Criterion.Main (Benchmark, bench, bgroup, defaultMain, env, nf)
+import           Data.Aeson (FromJSON (parseJSON), Value, eitherDecodeFileStrict', object,
+                             withObject, (.:), (.=))
+import           Data.Binary.Get (getDoublele, runGet)
+import           Data.Maybe (fromMaybe)
+import           Data.Text (Text)
+import           System.Directory (canonicalizePath, doesDirectoryExist, doesFileExist,
+                                   pathIsSymbolicLink)
+import           System.Environment (lookupEnv)
+import           System.FilePath (takeDirectory, takeFileName, (</>))
 
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
@@ -30,52 +19,22 @@ import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
 import qualified Data.Vector.Unboxed as U
 
-import S14X.Contract.BenchmarkValidation
-  ( BenchmarkResultShape
-      ( ConditionalCoverageBatch,
-        IndependenceBatch,
-        LikelihoodBatch,
-        ScalarBatch,
-        VectorBatch
-      ),
-    validateBenchmarkResults,
-  )
-import S14X.Contract.Process (sha256Hex)
-import S14X.Core.AdvancedRisk
-  ( christoffersenConditionalCoverageTest,
-    christoffersenIndependenceTest,
-    deflatedSharpeRatio,
-    historicalExpectedShortfall,
-    kupiecUnconditionalCoverageTest,
-    loAdjustedSharpeRatio,
-    probabilisticSharpeRatio,
-    realizedVariance,
-    realizedVolatilityIntraday,
-  )
-import S14X.Core.Error (StableError)
-import S14X.Core.Models
-  ( NumericResult
-      ( ConditionalCoverageRecord,
-        IndependenceRecord,
-        LikelihoodRecord,
-        ScalarResult,
-        VectorResult
-      ),
-    TrialProvenance (TrialProvenance),
-  )
-import S14X.Core.ProductionMetrics
-  ( annualizedVolatility,
-    cagr,
-    cumulativeReturn,
-    historicalCvar,
-    historicalVar,
-    logReturns,
-    maxDrawdown,
-    realizedVolatility,
-    sharpeRatio,
-    simpleReturns,
-    sortinoRatio,
-  )
+import           S14X.Contract.BenchmarkValidation (BenchmarkResultShape (ConditionalCoverageBatch, IndependenceBatch, LikelihoodBatch, ScalarBatch, VectorBatch),
+                                                    validateBenchmarkResults)
+import           S14X.Contract.Process (sha256Hex)
+import           S14X.Core.AdvancedRisk (christoffersenConditionalCoverageTest,
+                                         christoffersenIndependenceTest, deflatedSharpeRatio,
+                                         historicalExpectedShortfall,
+                                         kupiecUnconditionalCoverageTest, loAdjustedSharpeRatio,
+                                         probabilisticSharpeRatio, realizedVariance,
+                                         realizedVolatilityIntraday)
+import           S14X.Core.Error (StableError)
+import           S14X.Core.Models (NumericResult (ConditionalCoverageRecord, IndependenceRecord, LikelihoodRecord, ScalarResult, VectorResult),
+                                   TrialProvenance (TrialProvenance))
+import           S14X.Core.ProductionMetrics (annualizedVolatility, cagr, cumulativeReturn,
+                                              historicalCvar, historicalVar, logReturns,
+                                              maxDrawdown, realizedVolatility, sharpeRatio,
+                                              simpleReturns, sortinoRatio)
 
 data BenchmarkPlan = BenchmarkPlan [FamilySelector] [BenchmarkCase]
   deriving stock (Eq, Show)
