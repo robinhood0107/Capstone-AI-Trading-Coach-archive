@@ -49,6 +49,17 @@ def git(root: Path, *arguments: str) -> str:
 
 def main() -> int:
     module = load_helper()
+    helper_source = (TOOLS_ROOT / "scala_benchmark_block.py").read_text(
+        encoding="utf-8"
+    )
+    for marker in (
+        "benchmark_python_exec = benchmark_python_pin.proc_path",
+        'environment["S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH"]',
+        "python=benchmark_python_exec",
+        "str(benchmark_python_exec)",
+    ):
+        assert marker in helper_source
+
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory).resolve()
         git(root, "init", "-q")
@@ -113,6 +124,17 @@ def main() -> int:
             replacement.chmod(0o755)
             tool.unlink()
             replacement.rename(tool)
+            pinned_execution = subprocess.run(
+                [str(pinned.proc_path)],
+                check=False,
+                pass_fds=pinned.pass_fds,
+            )
+            pathname_execution = subprocess.run(
+                [str(tool)],
+                check=False,
+            )
+            assert pinned_execution.returncode == 0
+            assert pathname_execution.returncode == 1
             expect_error(
                 module,
                 pinned.verify_path_identity,
@@ -162,8 +184,8 @@ def main() -> int:
 
     print(
         "SCALA_BENCHMARK_SECURITY_TEST_PASS "
-        "dirty=REJECT ignoredBuild=REJECT fdPin=PASS ambient=REJECT "
-        "cacheIsolation=PASS"
+        "dirty=REJECT ignoredBuild=REJECT fdPin=PASS abaExecution=PASS "
+        "ambient=REJECT cacheIsolation=PASS"
     )
     return 0
 

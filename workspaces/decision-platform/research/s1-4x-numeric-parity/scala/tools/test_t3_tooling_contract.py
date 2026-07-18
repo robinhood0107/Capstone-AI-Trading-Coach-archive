@@ -237,6 +237,7 @@ def main() -> int:
         "json",
         "validate-native-jmh",
         "S1_4X_EFFECTIVE_JVM_EVIDENCE_DIR",
+        "S1_4X_SCALA_JAVA_PINNED_FD_PATH",
         "create-jvm-allowlist",
         "--jvm-allowlist",
         "--expected-measurement-iterations",
@@ -247,6 +248,7 @@ def main() -> int:
         "environmentValuesSha256",
         "workspace_index = runtime_argv.index(\"--workspace\")",
         "runtime_argv[3:workspace_index]",
+        '"-jvm", "PINNED_JAVA_FD"',
     ):
         assert marker in native_smoke
     assert "S1_4X_MEASUREMENT_READY_MARKER" in native_smoke

@@ -31,6 +31,7 @@ def main() -> int:
         "/usr/bin/env -i",
         "S1_4X_BENCHMARK_PYTHON_BIN",
         "S1_4X_BENCHMARK_PYTHON_SHA256",
+        "S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH",
         "S1_4X_SCALA_CLI_BIN",
         "S1_4X_SCALAFIX_BIN",
         "S1_4X_SCALAFMT_ARCHIVE",
@@ -51,6 +52,8 @@ def main() -> int:
         "benchmarks/run_rotated_blocks.py",
     ):
         assert forbidden not in wrapper
+    assert '"$BENCHMARK_PYTHON_EXEC" "$HELPER"' in wrapper
+    assert '"$BENCHMARK_PYTHON" "$HELPER"' not in wrapper
 
     runner = Path("/repo/numeric/scala/tools/run-jmh-native-full.sh")
     plan = Path("/repo/numeric/benchmarks/benchmark-plan.v1.json")
@@ -77,7 +80,7 @@ def main() -> int:
         str(case_root),
     ]
 
-    python = Path("/tools/python")
+    python = Path("/proc/self/fd/101")
     producer = Path("/repo/numeric/integration/native_benchmark_block.py")
     repo = Path("/repo")
     block = Path("/run/r1/scala/path-transform")
