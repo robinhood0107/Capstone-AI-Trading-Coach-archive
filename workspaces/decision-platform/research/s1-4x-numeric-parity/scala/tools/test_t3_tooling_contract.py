@@ -93,6 +93,23 @@ def main() -> int:
         assert item["expectedExitCode"] == 1
         assert item["expectedDiagnosticPattern"]
         assert item["forbiddenDiagnosticPattern"]
+    warning_fixtures = {
+        item["fixtureId"]: item for item in profiles["warningNegativeFixtures"]
+    }
+    value_discard = warning_fixtures["value-discard"]
+    assert value_discard["expectedDiagnosticPattern"] == (
+        r"(?i)discarded (?:non-Unit )?value"
+    )
+    assert (SCALA_ROOT / value_discard["path"]).read_text(
+        encoding="utf-8"
+    ) == (
+        "object CompilerWarningValueDiscard:\n"
+        "  def value: Unit =\n"
+        "    Option(1)\n"
+    )
+    assert warning_fixtures["nonunit-statement"][
+        "expectedDiagnosticPattern"
+    ] == r"(?i)pure expression does nothing in statement position"
 
     compiler_tool = load_tool("run_compiler_profile")
     intended = compiler_tool.diagnostic_disposition(
