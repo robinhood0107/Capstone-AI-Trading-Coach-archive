@@ -46,14 +46,36 @@ class ProfileSelection:
 
 CANDIDATE_ROOTS = ("src", "app", "test", "benchmark")
 CONFIGURATION_PATHS = ("package.yaml", "selected-profile.v1.json")
+WORKFLOW_INPUT_PATHS = (
+    "Containerfile",
+    "stack-ghc-9.14.1.yaml",
+    "toolchain-lock.v1.json",
+    "tools/assert-toolchain.sh",
+    "tools/check-format.sh",
+    "tools/check-hlint.sh",
+    "tools/compatibility_evidence.py",
+    "tools/haskell_benchmark_block.py",
+    "tools/haskell_evidence.py",
+    "tools/hlint_inventory.py",
+    "tools/profile_workflow.py",
+    "tools/run-benchmark-block.sh",
+    "tools/run-correctness-profile.sh",
+    "tools/run-ghc-9.14.1-compatibility.sh",
+    "tools/run-oci-correctness.sh",
+    "tools/run-profile-qualification.sh",
+    "tools/run-property-evidence.sh",
+    "tools/select-proven-profile.sh",
+    "tools/stylish_fallback.py",
+    "tools/validate-ghc-9.14.1-compatibility.sh",
+)
 PROPERTY_CLOSURE_CONFIGURATION_PATHS = (
     "package.yaml",
     "s1-4x-haskell.cabal",
     "stack.yaml",
     "stack.yaml.lock",
-    "stack-ghc-9.14.1.yaml",
     "selected-profile.v1.json",
     "source-inputs.v1.json",
+    *WORKFLOW_INPUT_PATHS,
 )
 FORBIDDEN_COMPILED_SUFFIXES = (".lhs", ".hsc", ".hs-boot")
 MANDATORY_INPUT_SETS = {
@@ -544,7 +566,7 @@ def validate_source_manifest(root: Path, manifest_path: Path) -> dict[str, Any]:
 
 
 def benchmark_source_tree_entries(root: Path) -> list[dict[str, str]]:
-    """Selected profile을 제외한 authoritative compile/benchmark subject closure."""
+    """Profile 자체를 제외한 compile, audit, workflow subject closure."""
 
     paths = _candidate_source_paths(root)
     for relative in (
@@ -552,6 +574,7 @@ def benchmark_source_tree_entries(root: Path) -> list[dict[str, str]]:
         "s1-4x-haskell.cabal",
         "stack.yaml",
         "stack.yaml.lock",
+        *WORKFLOW_INPUT_PATHS,
     ):
         path = root / relative
         if path.is_symlink() or not path.is_file():

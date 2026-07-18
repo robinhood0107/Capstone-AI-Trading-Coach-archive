@@ -724,7 +724,7 @@ def build_oci_run_command(
     uid: int,
     gid: int,
 ) -> list[str]:
-    """Source/home/credential mount 없이 offline process replay command를 만든다."""
+    """Source, user directory, credential mount 없이 offline replay command를 만든다."""
 
     if (
         re.fullmatch(r"local/s1-4x-haskell:[a-z0-9._-]+", image_tag) is None
