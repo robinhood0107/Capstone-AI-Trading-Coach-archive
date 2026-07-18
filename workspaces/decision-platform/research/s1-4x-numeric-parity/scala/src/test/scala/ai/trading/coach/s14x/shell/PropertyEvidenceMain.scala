@@ -356,6 +356,7 @@ object PropertyEvidenceMain:
     )
     exitCode
 
+  /** frozen 24-seed property plan을 실행해 새 output directory에 byte-bound evidence를 배타 생성한다. */
   def main(arguments: Array[String]): Unit =
     val exitCode =
       parseCli(arguments.toVector) match

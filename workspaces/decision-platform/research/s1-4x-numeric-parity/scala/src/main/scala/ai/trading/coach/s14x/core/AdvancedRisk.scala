@@ -1,6 +1,7 @@
 package ai.trading.coach.s14x.core
 
 object AdvancedRisk:
+  /** 손실 표본과 신뢰수준을 받아 fractional tail weight 기반 historical expected shortfall을 반환한다. */
   def historicalExpectedShortfall(
       losses: Vector[Double],
       confidence: Double = 0.95,
@@ -28,6 +29,7 @@ object AdvancedRisk:
           Validation.finiteResearch(math.min(1.0, math.max(-1.0, normalized)) * scale)
     yield result
 
+  /** intraday 로그수익률 제곱합을 실현분산으로 반환하며 비유한 입력·결과를 거부한다. */
   def realizedVariance(intradayLogReturns: Vector[Double]): Either[StableError, Double] =
     Validation.researchSequence(intradayLogReturns).flatMap { values =>
       Validation.finiteResearch(
@@ -35,6 +37,7 @@ object AdvancedRisk:
       )
     }
 
+  /** 검증된 intraday 실현분산의 제곱근을 실현변동성으로 반환한다. */
   def realizedVolatilityIntraday(
       intradayLogReturns: Vector[Double]
   ): Either[StableError, Double] =
@@ -42,6 +45,7 @@ object AdvancedRisk:
       Validation.finiteResearch(math.sqrt(value))
     )
 
+  /** 수익률과 aggregation period를 받아 Lo 자기상관 조정 Sharpe 비율을 반환한다. */
   def loAdjustedSharpeRatio(
       returns: Vector[Double],
       aggregationPeriods: BigInt,
@@ -106,6 +110,7 @@ object AdvancedRisk:
         else Left(StableError.MomentInvalid)
     yield (observed, benchmark, observations, radicand)
 
+  /** 관측·기준 Sharpe와 표본 모멘트를 받아 확률적 Sharpe 비율을 [0, 1]로 반환한다. */
   def probabilisticSharpeRatio(
       observedSharpe: Double,
       benchmarkSharpe: Double,
@@ -122,6 +127,7 @@ object AdvancedRisk:
         else NumericPrimitives.probability(NumericPrimitives.normalCdf(z))
     }
 
+  /** 다중 시행 provenance와 Sharpe 분산을 검증한 뒤 selection bias 보정 확률을 반환한다. */
   def deflatedSharpeRatio(
       observedSharpe: Double,
       sampleSize: BigInt,
@@ -232,6 +238,7 @@ object AdvancedRisk:
       .bernoulliLogLikelihood(observations, exceptions, maximumLikelihood)
       .flatMap(alternative => NumericPrimitives.likelihoodRatio(nullLog, alternative))
 
+  /** 실현손실·예측 VaR를 비교해 Kupiec unconditional coverage 통계와 판정을 반환한다. */
   def kupiecUnconditionalCoverageTest(
       realizedLosses: Vector[Double],
       forecastVars: Vector[Double],
@@ -255,6 +262,7 @@ object AdvancedRisk:
       alpha,
     )
 
+  /** 예외 indicator의 1차 전이를 이용해 Christoffersen 독립성 통계와 판정을 반환한다. */
   def christoffersenIndependenceTest(
       realizedLosses: Vector[Double],
       forecastVars: Vector[Double],
@@ -278,7 +286,7 @@ object AdvancedRisk:
       counts,
     )
 
-  /** Conditional coverage는 I_2:T에서 UC와 Markov likelihood를 모두 맞춘다. */
+  /** 실현손실·예측 VaR의 I_2:T 구간에서 UC와 Markov likelihood를 결합해 conditional coverage를 반환한다. */
   def christoffersenConditionalCoverageTest(
       realizedLosses: Vector[Double],
       forecastVars: Vector[Double],

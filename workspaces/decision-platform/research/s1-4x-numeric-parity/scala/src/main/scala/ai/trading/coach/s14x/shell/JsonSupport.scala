@@ -15,6 +15,7 @@ object JsonSupport:
   private def number(value: Double): JsonNode =
     Mapper.getNodeFactory.numberNode(if value == 0.0 then 0.0 else value)
 
+  /** 결과 tree의 모든 부동소수점 zero를 positive zero로 정규화해 cross-language JSON 계약을 맞춘다. */
   def normalizeNumberTree(value: Any): Any =
     value match
       case numberValue: Double => if numberValue == 0.0 then 0.0 else numberValue
@@ -42,6 +43,7 @@ object JsonSupport:
         }
       case _ => Mapper.getNodeFactory.textNode("unsupported")
 
+  /** 테스트·evidence용 값 tree를 negative-zero 없는 compact JSON 문자열로 직렬화한다. */
   def encode(value: Any): String =
     Mapper.writeValueAsString(node(normalizeNumberTree(value)))
 
@@ -113,6 +115,7 @@ object JsonSupport:
         )
         base
 
+  /** candidate batch를 frozen result-batch envelope로 변환하고 semantic error를 code로만 공개한다. */
   def batchNode(batch: CandidateBatch): ObjectNode =
     val root = Mapper.createObjectNode()
     root.put("schemaVersion", "s1.4x-result-batch-v1")
@@ -135,6 +138,7 @@ object JsonSupport:
     root.set[ArrayNode]("results", results)
     root
 
+  /** process/manifest 경계 오류를 numeric result와 분리된 frozen transport envelope로 변환한다. */
   def transportNode(error: TransportError): ObjectNode =
     val root = Mapper.createObjectNode()
     root.put("schemaVersion", "s1.4x-transport-error-v1")
@@ -144,5 +148,6 @@ object JsonSupport:
     error.field.foreach(value => root.put("field", value))
     root
 
+  /** JSON node를 UTF-8과 단일 trailing LF로 직렬화해 원자 파일·stderr 출력에 사용한다. */
   def bytes(node: JsonNode): Array[Byte] =
     (Mapper.writeValueAsString(node) + "\n").getBytes(java.nio.charset.StandardCharsets.UTF_8)

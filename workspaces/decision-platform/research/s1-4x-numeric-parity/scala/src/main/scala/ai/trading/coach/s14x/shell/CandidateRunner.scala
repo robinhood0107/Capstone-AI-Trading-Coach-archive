@@ -14,6 +14,7 @@ final case class CandidateCaseResult(
     functionId: FunctionId,
     value: Either[StableError, NumericResult],
 ) derives CanEqual:
+  /** semantic result의 stable error code만 노출하며 transport error와 혼합하지 않는다. */
   def errorCode: Option[String] = value.left.toOption.map(_.code)
 
 final case class CandidateBatch(requestId: String, results: Vector[CandidateCaseResult])

@@ -5,6 +5,7 @@ object ProductionMetrics:
   def simpleReturnsRaw(raw: Any): Either[StableError, Vector[Double]] =
     Validation.productionRawSequence(raw, minimumLength = 2).flatMap(simpleReturns)
 
+  /** 양수 가격 시계열을 받아 인접 단순수익률을 반환하며, frozen production 오류 우선순위를 보존한다. */
   def simpleReturns(prices: Vector[Double]): Either[StableError, Vector[Double]] =
     Validation.productionSequence(prices, minimumLength = 2).flatMap { values =>
       if values.exists(_ <= 0.0) then Left(StableError.PricesNonPositive)
@@ -15,6 +16,7 @@ object ProductionMetrics:
         if result.forall(_.isFinite) then Right(result) else Left(StableError.ResultNonFinite)
     }
 
+  /** 양수 immutable 가격 시계열을 검증한 뒤 인접 로그수익률을 반환한다. */
   def logReturns(prices: Vector[Double]): Either[StableError, Vector[Double]] =
     Validation.productionSequence(prices, minimumLength = 2).flatMap { values =>
       if values.exists(_ <= 0.0) then Left(StableError.PricesNonPositive)
@@ -25,6 +27,7 @@ object ProductionMetrics:
         if result.forall(_.isFinite) then Right(result) else Left(StableError.ResultNonFinite)
     }
 
+  /** 단순수익률 시계열을 복리 누적하고, -1 미만 입력과 비유한 결과를 stable error로 반환한다. */
   def cumulativeReturn(returns: Vector[Double]): Either[StableError, Double] =
     Validation.productionSequence(returns, minimumLength = 1).flatMap { values =>
       if values.exists(_ < -1.0) then Left(StableError.SimpleReturnBelowMinusOne)
@@ -34,6 +37,7 @@ object ProductionMetrics:
         Validation.finiteProduction(result)
     }
 
+  /** 양수 가격 경로와 양의 연환산 주기를 받아 기하 연환산 수익률을 계산한다. */
   def cagr(
       prices: Vector[Double],
       periodsPerYear: BigInt = BigInt(252),
@@ -52,11 +56,13 @@ object ProductionMetrics:
           )
     yield result
 
+  /** 두 개 이상의 로그수익률을 표본 표준편차로 집계해 실현 변동성을 반환한다. */
   def realizedVolatility(logReturns: Vector[Double]): Either[StableError, Double] =
     Validation
       .productionSequence(logReturns, minimumLength = 2)
       .flatMap(values => Validation.finiteProduction(NumericPrimitives.sampleStandardDeviation(values)))
 
+  /** 로그수익률 표본 변동성을 양의 연환산 주기의 제곱근으로 확장한다. */
   def annualizedVolatility(
       logReturns: Vector[Double],
       periodsPerYear: BigInt = BigInt(252),
@@ -69,6 +75,7 @@ object ProductionMetrics:
       )
     yield result
 
+  /** 비음수 자산곡선의 running peak 대비 최소 수익률을 최대낙폭으로 반환한다. */
   def maxDrawdown(equityCurve: Vector[Double]): Either[StableError, Double] =
     Validation.productionSequence(equityCurve, minimumLength = 1).flatMap { values =>
       val first = values.take(1).foldLeft(Double.NaN)((_, value) => value)
@@ -84,6 +91,7 @@ object ProductionMetrics:
         Validation.finiteProduction(minimumDrawdown)
     }
 
+  /** 수익률·주기당 무위험수익률·연환산 주기를 받아 표본 Sharpe 비율을 반환한다. */
   def sharpeRatio(
       returns: Vector[Double],
       riskFreeRate: Double = 0.0,
@@ -106,6 +114,7 @@ object ProductionMetrics:
           )
     yield result
 
+  /** 수익률·목표수익률·연환산 주기를 받아 전체 관측치 기준 downside Sortino 비율을 반환한다. */
   def sortinoRatio(
       returns: Vector[Double],
       targetReturn: Double = 0.0,
@@ -141,6 +150,7 @@ object ProductionMetrics:
     val upper = ordered.lift(math.min(lowerIndex + 1, ordered.size - 1)).fold(Double.NaN)(identity)
     lower + fraction * (upper - lower)
 
+  /** 수익률 표본과 신뢰수준을 받아 frozen 선형 보간 규칙의 historical VaR를 반환한다. */
   def historicalVar(
       returns: Vector[Double],
       confidence: Double = 0.95,
@@ -151,6 +161,7 @@ object ProductionMetrics:
       result <- Validation.finiteProduction(historicalVarKernel(values, probability))
     yield result
 
+  /** 수익률 표본과 신뢰수준을 받아 VaR 이하 관측치 평균인 historical CVaR를 반환한다. */
   def historicalCvar(
       returns: Vector[Double],
       confidence: Double = 0.95,

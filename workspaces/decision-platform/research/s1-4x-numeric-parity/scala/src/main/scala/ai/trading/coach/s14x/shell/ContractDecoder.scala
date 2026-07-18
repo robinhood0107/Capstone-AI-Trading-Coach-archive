@@ -36,6 +36,8 @@ enum FunctionId(val wire: String) derives CanEqual:
 
 object FunctionId:
   private val ByWire = values.map(value => value.wire -> value).toMap
+
+  /** frozen function registry의 wire id만 typed enum으로 해석하며 미등록 값은 None으로 닫는다. */
   def fromWire(value: String): Option[FunctionId] = ByWire.get(value)
 
 final case class TransportError(
