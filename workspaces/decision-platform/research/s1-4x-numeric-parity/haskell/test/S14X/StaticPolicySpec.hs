@@ -15,7 +15,10 @@ tests =
       testCase "every candidate module declares an explicit export list" explicitExports,
       testCase "Stack configurations have no forbidden override keys" noStackOverrides,
       testCase "core component cannot see contract shell dependencies" componentDependencyBoundary,
-      testCase "formatter and HLint retain the frozen hard gates" formatterAndLintConfiguration
+      testCase "formatter and HLint retain the frozen hard gates" formatterAndLintConfiguration,
+      testCase
+        "weighted autocorrelation uses the compensated sum primitive"
+        weightedAutocorrelationUsesCompensatedSum
     ]
 
 noForbiddenForms :: IO ()
@@ -162,6 +165,25 @@ formatterAndLintConfiguration = do
   assertBool
     "HLint frozen restrictions are incomplete"
     (all (`isInfixOf` hlint) hlintRequirements)
+
+weightedAutocorrelationUsesCompensatedSum :: IO ()
+weightedAutocorrelationUsesCompensatedSum = do
+  source <- readFile "src/core/S14X/Core/AdvancedRisk.hs"
+  section <-
+    case sectionBetween "weightedCorrelationSum ::" "validatedPsrInputs ::" source of
+      Nothing -> assertFailure "weightedCorrelationSum source section is missing" >> pure ""
+      Just value -> pure value
+  assertBool
+    "weightedCorrelationSum must reduce its complete term vector through sumVector"
+    ("sumVector weightedTerms" `isInfixOf` section)
+  assertBool
+    "weightedCorrelationSum must not use a naive total + weighted-term recurrence"
+    (not ("total + weight" `isInfixOf` section))
+
+sectionBetween :: String -> String -> String -> Maybe String
+sectionBetween startMarker endMarker content = do
+  start <- find (startMarker `isPrefixOf`) (tails content)
+  beforeMarker endMarker start
 
 haskellSources :: FilePath -> IO [FilePath]
 haskellSources root = do

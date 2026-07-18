@@ -125,9 +125,12 @@ compensatedSummation :: IO ()
 compensatedSummation = do
   let cancellation = U.fromList [1.0e16, 1.0, -1.0e16]
       scaleAware = U.fromList [1.0e308, -1.0e308, 1.0]
+      maximumFinite = encodeFloat (2 ^ (53 :: Int) - 1) 971
+      maximumFiniteCancellation = U.fromList [maximumFinite, 1.0, -maximumFinite]
   sumVector cancellation @?= 1.0
   meanVector cancellation @?= (1.0 / 3.0)
   sumVector scaleAware @?= 1.0
+  sumVector maximumFiniteCancellation @?= 1.0
 
 stableErrors :: IO ()
 stableErrors = do
