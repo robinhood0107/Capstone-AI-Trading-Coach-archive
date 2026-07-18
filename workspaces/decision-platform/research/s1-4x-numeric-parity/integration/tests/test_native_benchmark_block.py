@@ -234,6 +234,29 @@ class NativeBenchmarkBlockTests(TestCase):
             ]
             mean = statistics.fmean(samples)
             standard_deviation = statistics.stdev(samples)
+            iteration_counts = [float(index + 1) for index in range(100)]
+            elapsed_times = [
+                sample * iterations
+                for sample, iterations in zip(
+                    samples,
+                    iteration_counts,
+                    strict=True,
+                )
+            ]
+            iteration_mean = statistics.fmean(iteration_counts)
+            elapsed_mean = statistics.fmean(elapsed_times)
+            regression_slope = math.fsum(
+                (iterations - iteration_mean) * (elapsed - elapsed_mean)
+                for iterations, elapsed in zip(
+                    iteration_counts,
+                    elapsed_times,
+                    strict=True,
+                )
+            ) / math.fsum(
+                (iterations - iteration_mean) ** 2
+                for iterations in iteration_counts
+            )
+            case["nativeValue"] = regression_slope
             estimate = {
                 "estPoint": mean,
                 "estError": {
@@ -265,10 +288,10 @@ class NativeBenchmarkBlockTests(TestCase):
                         ],
                         "reportMeasured": [
                             [
-                                sample,
+                                elapsed_times[index],
                                 sample,
                                 100,
-                                1,
+                                index + 1,
                                 None,
                                 None,
                                 None,
@@ -278,14 +301,40 @@ class NativeBenchmarkBlockTests(TestCase):
                                 None,
                                 None,
                             ]
-                            for sample in samples
+                            for index, sample in enumerate(samples)
                         ],
                         "reportAnalysis": {
                             "anRegress": [
                                 {
-                                    "regResponder": "time",
+                                    "regResponder": "cpuTime",
                                     "regCoeffs": {
                                         "iters": estimate,
+                                        "y": estimate,
+                                    },
+                                    "regRSquare": {
+                                        "estPoint": 1.0,
+                                        "estError": {
+                                            "confIntLDX": 0.0,
+                                            "confIntUDX": 0.0,
+                                            "confIntCL": 0.05,
+                                        },
+                                    },
+                                },
+                                {
+                                    "regResponder": "time",
+                                    "regCoeffs": {
+                                        "iters": {
+                                            "estPoint": regression_slope,
+                                            "estError": {
+                                                "confIntLDX": (
+                                                    regression_slope * 0.1
+                                                ),
+                                                "confIntUDX": (
+                                                    regression_slope * 0.2
+                                                ),
+                                                "confIntCL": 0.05,
+                                            },
+                                        },
                                         "y": estimate,
                                     },
                                     "regRSquare": {
@@ -389,8 +438,8 @@ class NativeBenchmarkBlockTests(TestCase):
                     "nativeSampleCount": 100,
                     "nativeP95": max(samples),
                     "confidenceLevel": 0.95,
-                    "confidenceLow": mean * 0.9,
-                    "confidenceHigh": mean * 1.2,
+                    "confidenceLow": regression_slope * 0.9,
+                    "confidenceHigh": regression_slope * 1.2,
                     "dispersionMetric": (
                         "criterion-bootstrap-standard-deviation-"
                         "seconds-per-invocation"
@@ -400,10 +449,10 @@ class NativeBenchmarkBlockTests(TestCase):
                     "logicalOperationsPerInvocation": 1,
                     "normalizedP95NsPerLogicalOperation": max(samples) * 1e9,
                     "normalizedConfidenceLowNsPerLogicalOperation": (
-                        mean * 0.9 * 1e9
+                        regression_slope * 0.9 * 1e9
                     ),
                     "normalizedConfidenceHighNsPerLogicalOperation": (
-                        mean * 1.2 * 1e9
+                        regression_slope * 1.2 * 1e9
                     ),
                     "normalizedDispersionNsPerLogicalOperation": (
                         standard_deviation * 1e9
