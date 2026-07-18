@@ -14,7 +14,8 @@ tests =
     [ testCase "candidate source has no forbidden native or unsafe forms" noForbiddenForms,
       testCase "every candidate module declares an explicit export list" explicitExports,
       testCase "Stack configurations have no forbidden override keys" noStackOverrides,
-      testCase "core component cannot see contract shell dependencies" componentDependencyBoundary
+      testCase "core component cannot see contract shell dependencies" componentDependencyBoundary,
+      testCase "formatter and HLint retain the frozen hard gates" formatterAndLintConfiguration
     ]
 
 noForbiddenForms :: IO ()
@@ -128,6 +129,39 @@ componentSection header content =
       case line of
         [] -> True
         character : _ -> isSpace character
+
+formatterAndLintConfiguration :: IO ()
+formatterAndLintConfiguration = do
+  stylish <- readFile ".stylish-haskell.yaml"
+  hlint <- readFile ".hlint.yaml"
+  let stylishRequirements =
+        [ "newline: lf",
+          "exit_code: error_on_format",
+          "  - GHC2024"
+        ]
+      hlintRequirements =
+        [ "-XGHC2024",
+          "-XNoForeignFunctionInterface",
+          "Data.Maybe.fromJust",
+          "Data.Either.fromLeft",
+          "Data.Either.fromRight",
+          "Control.Exception.throw",
+          "Control.Exception.throwIO",
+          "foldl1",
+          "maximum",
+          "minimum",
+          "Foreign",
+          "System.IO.Unsafe",
+          "GeneralizedNewtypeDeriving",
+          "DerivingVia",
+          "DeriveAnyClass"
+        ]
+  assertBool
+    "stylish-haskell frozen configuration is incomplete"
+    (all (`isInfixOf` stylish) stylishRequirements)
+  assertBool
+    "HLint frozen restrictions are incomplete"
+    (all (`isInfixOf` hlint) hlintRequirements)
 
 haskellSources :: FilePath -> IO [FilePath]
 haskellSources root = do
