@@ -341,9 +341,15 @@ class NativeBenchmarkBlockTests(TestCase):
                 original_sha256 = hashlib.sha256(source.read_bytes()).hexdigest()
                 replacement.write_text(json.dumps(swapped), encoding="utf-8")
 
-                def inspect_then_swap(path: Path, *, role: str) -> Any:
+                def inspect_then_swap(
+                    path: Path,
+                    *,
+                    role: str,
+                    replacement_path: Path = replacement,
+                    source_path: Path = source,
+                ) -> Any:
                     snapshot = real_inspector(path, role=role)
-                    os.replace(replacement, source)
+                    os.replace(replacement_path, source_path)
                     return snapshot
 
                 with patch.object(
@@ -1461,11 +1467,17 @@ class NativeBenchmarkBlockTests(TestCase):
             with self.subTest(same_fd_swap=swapped_path.name):
                 swapped = False
 
-                def inspect_then_swap(path: Path, *, role: str) -> Any:
+                def inspect_then_swap(
+                    path: Path,
+                    *,
+                    role: str,
+                    target_path: Path = swapped_path,
+                    target_role: str = role_prefix,
+                ) -> Any:
                     nonlocal swapped
                     snapshot = inspect_regular_file_path(path, role=role)
-                    if not swapped and path == swapped_path and role.startswith(role_prefix):
-                        swapped_path.write_text('{"forged":true}', encoding="utf-8")
+                    if not swapped and path == target_path and role.startswith(target_role):
+                        target_path.write_text('{"forged":true}', encoding="utf-8")
                         swapped = True
                     return snapshot
 

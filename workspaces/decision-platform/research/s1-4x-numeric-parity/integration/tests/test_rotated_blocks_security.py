@@ -18,9 +18,9 @@ BENCHMARKS = INTEGRATION.parent / "benchmarks"
 sys.path.insert(0, str(BENCHMARKS))
 sys.path.insert(0, str(INTEGRATION))
 
-import rotated_block_runtime as runner
-from benchmark_contract import ContractError, sha256_file, strict_json_load
-from validate_benchmark_report import DEFAULT_PLAN, validate_plan
+import rotated_block_runtime as runner  # noqa: E402
+from benchmark_contract import ContractError, sha256_file, strict_json_load  # noqa: E402
+from validate_benchmark_report import DEFAULT_PLAN, validate_plan  # noqa: E402
 
 COMMIT = "a" * 40
 
@@ -319,15 +319,14 @@ def test_runner_rejects_path_resolved_script_interpreter(
     with pytest.raises(
         ContractError,
         match="COMMAND_SCRIPT_INTERPRETER_MISMATCH",
+    ), runner._pin_executable(
+        {
+            "path": str(supplied),
+            "sha256": sha256_file(supplied),
+        },
+        role="test",
     ):
-        with runner._pin_executable(
-            {
-                "path": str(supplied),
-                "sha256": sha256_file(supplied),
-            },
-            role="test",
-        ):
-            pass
+        pass
 
 
 def test_source_commit_binding_rejects_tracked_and_untracked_worktree_drift(

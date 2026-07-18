@@ -12,11 +12,11 @@ import re
 import statistics
 import sys
 import tempfile
-from collections.abc import Mapping, Sequence
-from contextlib import contextmanager
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager, suppress
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 from benchmark_input_ledger import validate_input_ledger
 from executable_identity import (
@@ -795,10 +795,8 @@ def _sealed_snapshot_path(
             os.close(writer)
         if reader >= 0:
             os.close(reader)
-        try:
+        with suppress(FileNotFoundError):
             os.unlink(temporary_name)
-        except FileNotFoundError:
-            pass
 
 
 def _validate_plan_snapshot(

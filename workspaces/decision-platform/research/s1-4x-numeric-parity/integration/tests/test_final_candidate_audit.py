@@ -476,7 +476,7 @@ class FinalCandidateAuditTests(TestCase):
         ).encode("utf-8")
         original_loader = cast(
             Callable[[bytes | str | Path], Any],
-            getattr(audit_module, "strict_json_load"),
+            audit_module.strict_json_load,
         )
         swapped = False
 

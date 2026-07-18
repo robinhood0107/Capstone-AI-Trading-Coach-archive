@@ -15,8 +15,8 @@ BENCHMARKS = INTEGRATION.parent / "benchmarks"
 sys.path.insert(0, str(BENCHMARKS))
 sys.path.insert(0, str(INTEGRATION))
 
-import rotated_block_runtime as runner
-from benchmark_contract import ContractError, sha256_file
+import rotated_block_runtime as runner  # noqa: E402
+from benchmark_contract import ContractError, sha256_file  # noqa: E402
 
 
 def _proc_start_time(pid: int) -> int | None:

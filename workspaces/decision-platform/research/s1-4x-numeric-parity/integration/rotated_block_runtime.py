@@ -26,13 +26,17 @@ BENCHMARKS_DIRECTORY = Path(__file__).resolve().parents[1] / "benchmarks"
 if str(BENCHMARKS_DIRECTORY) not in sys.path:
     sys.path.append(str(BENCHMARKS_DIRECTORY))
 
-from benchmark_contract import ContractError, sha256_file, strict_json_load
-from executable_identity import (
+from benchmark_contract import ContractError, sha256_file, strict_json_load  # noqa: E402
+from executable_identity import (  # noqa: E402
     ExecutableIdentityError,
     inspect_executable_identity,
     inspect_regular_file_path,
 )
-from validate_benchmark_report import DEFAULT_PLAN, validate_block_result, validate_plan
+from validate_benchmark_report import (  # noqa: E402
+    DEFAULT_PLAN,
+    validate_block_result,
+    validate_plan,
+)
 
 THREAD_ENVIRONMENT = {
     "OMP_NUM_THREADS": "1",
