@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -75,7 +76,44 @@ def _validate_identity(
     ):
         raise CommandManifestError(f"COMMAND_EXECUTABLE_MISMATCH:{role}")
     executable = Path(identity["path"])
-    if executable.is_file() and _file_sha256(executable) != identity["sha256"]:
+    try:
+        path_stat = executable.lstat()
+    except OSError as exc:
+        raise CommandManifestError(
+            f"COMMAND_EXECUTABLE_UNAVAILABLE:{role}"
+        ) from exc
+    if stat.S_ISLNK(path_stat.st_mode) or not stat.S_ISREG(path_stat.st_mode):
+        raise CommandManifestError(f"COMMAND_EXECUTABLE_NOT_REGULAR:{role}")
+    if path_stat.st_mode & 0o111 == 0:
+        raise CommandManifestError(f"COMMAND_EXECUTABLE_NOT_EXECUTABLE:{role}")
+    try:
+        descriptor = os.open(
+            executable,
+            os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
+        )
+    except OSError as exc:
+        raise CommandManifestError(
+            f"COMMAND_EXECUTABLE_CHANGED_DURING_VALIDATION:{role}"
+        ) from exc
+    try:
+        with os.fdopen(descriptor, "rb") as stream:
+            opened_stat = os.fstat(stream.fileno())
+            if (
+                not stat.S_ISREG(opened_stat.st_mode)
+                or (path_stat.st_dev, path_stat.st_ino)
+                != (opened_stat.st_dev, opened_stat.st_ino)
+            ):
+                raise CommandManifestError(
+                    f"COMMAND_EXECUTABLE_CHANGED_DURING_VALIDATION:{role}"
+                )
+            digest = hashlib.sha256()
+            for block in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(block)
+    except OSError as exc:
+        raise CommandManifestError(
+            f"COMMAND_EXECUTABLE_CHANGED_DURING_VALIDATION:{role}"
+        ) from exc
+    if digest.hexdigest() != identity["sha256"]:
         raise CommandManifestError(f"COMMAND_EXECUTABLE_SHA256_MISMATCH:{role}")
 
 
