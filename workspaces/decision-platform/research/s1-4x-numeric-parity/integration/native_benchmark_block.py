@@ -753,9 +753,22 @@ def _sealed_snapshot_path(
 ) -> Iterator[Path]:
     """검증기가 path API만 제공할 때 unlinked read-only FD로 snapshot bytes를 전달한다."""
 
+    temporary_value = os.environ.get("TMPDIR")
+    if not temporary_value or not Path(temporary_value).is_absolute():
+        raise GateError(error)
+    temporary_root = Path(os.path.abspath(temporary_value))
+    try:
+        if (
+            temporary_root.is_symlink()
+            or temporary_root.resolve(strict=True) != temporary_root
+            or not temporary_root.is_dir()
+        ):
+            raise GateError(error)
+    except OSError as exc:
+        raise GateError(error) from exc
     writer, temporary_name = tempfile.mkstemp(
         prefix=".s1-4x-snapshot-",
-        dir="/tmp",
+        dir=str(temporary_root),
     )
     reader = -1
     try:

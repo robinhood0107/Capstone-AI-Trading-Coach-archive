@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 from collections.abc import Sequence
@@ -43,6 +44,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     arguments = _parser().parse_args(argv)
     try:
         repo = arguments.repo_root.resolve(strict=True)
+        home_value = os.environ.get("HOME")
+        if not home_value or not Path(home_value).is_absolute():
+            raise ValueError("HOME must be an absolute path")
+        home = Path(home_value).resolve(strict=True)
+        if not home.is_dir():
+            raise ValueError("HOME must resolve to a directory")
         git = inspect_executable_identity(
             {
                 "path": "/usr/bin/git",
@@ -66,7 +73,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             check=False,
             text=True,
             env={
-                "HOME": "/home/pjjpj",
+                "HOME": str(home),
                 "LANG": "C.UTF-8",
                 "LC_ALL": "C.UTF-8",
                 "PATH": "/usr/bin:/bin",

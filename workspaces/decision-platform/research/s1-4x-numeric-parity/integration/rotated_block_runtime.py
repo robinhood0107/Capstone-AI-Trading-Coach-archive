@@ -595,14 +595,32 @@ def _benchmark_environment(
     uv = runtime_dependencies["uv"]
     if uv.descriptor < 0:
         raise ContractError("BENCHMARK_RUNTIME_DEPENDENCY_INVALID:uv")
+    cache_root = Path(home) / ".cache/s1-4x"
+    cache_directories = {
+        "TMP": cache_root / "tmp",
+        "UV_CACHE_DIR": cache_root / "uv",
+        "COURSIER_CACHE": cache_root / "coursier",
+        "STACK_ROOT": cache_root / "stack-root",
+    }
+    for path in (cache_root, *cache_directories.values()):
+        try:
+            path.mkdir(mode=0o700, parents=True, exist_ok=True)
+            resolved = path.resolve(strict=True)
+        except OSError as exc:
+            raise ContractError("BENCHMARK_CACHE_ROOT_INVALID") from exc
+        if path.is_symlink() or resolved != path or not path.is_dir():
+            raise ContractError("BENCHMARK_CACHE_ROOT_INVALID")
     return {
         "HOME": home,
         "LANG": "C.UTF-8",
         "LC_ALL": "C.UTF-8",
         "PATH": "/usr/bin:/bin",
-        "TMP": "/tmp",
-        "TMPDIR": "/tmp",
-        "TEMP": "/tmp",
+        "TMP": str(cache_directories["TMP"]),
+        "TMPDIR": str(cache_directories["TMP"]),
+        "TEMP": str(cache_directories["TMP"]),
+        "UV_CACHE_DIR": str(cache_directories["UV_CACHE_DIR"]),
+        "COURSIER_CACHE": str(cache_directories["COURSIER_CACHE"]),
+        "STACK_ROOT": str(cache_directories["STACK_ROOT"]),
         **THREAD_ENVIRONMENT,
         "S1_4X_THREAD_COUNT": "1",
         "S1_4X_UV_BIN": f"/proc/self/fd/{uv.descriptor}",
