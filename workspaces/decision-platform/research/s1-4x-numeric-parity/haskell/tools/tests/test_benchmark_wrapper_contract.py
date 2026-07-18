@@ -158,6 +158,18 @@ class BenchmarkWrapperContractTests(unittest.TestCase):
             source,
         )
 
+    def test_wrapper_ignores_hostile_home_and_forwards_only_explicit_cache(
+        self,
+    ) -> None:
+        source = WRAPPER.read_text(encoding="utf-8")
+        self.assertIn(
+            'CACHE_ROOT="${S1_4X_CACHE_ROOT:?S1_4X_CACHE_ROOT is required}"',
+            source,
+        )
+        self.assertIn('HOME="/nonexistent"', source)
+        self.assertIn('S1_4X_CACHE_ROOT="$CACHE_ROOT"', source)
+        self.assertNotIn('RUNTIME_HOME="${HOME:', source)
+
 
 if __name__ == "__main__":
     unittest.main()

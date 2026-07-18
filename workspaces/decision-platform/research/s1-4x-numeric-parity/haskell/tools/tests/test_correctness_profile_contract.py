@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import re
 import sys
 import unittest
 from pathlib import Path
@@ -31,6 +32,39 @@ def load_helper():
 
 
 class CorrectnessProfileContractTests(unittest.TestCase):
+    def test_every_workflow_stack_root_is_purpose_and_output_bound(self) -> None:
+        helper = load_helper()
+        cache = Path("/cache/s1-4x")
+        first = helper.isolated_stack_root(
+            cache,
+            purpose="correctness-baseline",
+            output_path=Path("/evidence/run-a"),
+        )
+        second = helper.isolated_stack_root(
+            cache,
+            purpose="correctness-baseline",
+            output_path=Path("/evidence/run-b"),
+        )
+        other_purpose = helper.isolated_stack_root(
+            cache,
+            purpose="qualification",
+            output_path=Path("/evidence/run-a"),
+        )
+
+        self.assertNotEqual(first, second)
+        self.assertNotEqual(first, other_purpose)
+        self.assertEqual(first.parent, cache)
+        self.assertRegex(
+            first.name,
+            re.compile(r"^stack-root-correctness-baseline-[0-9a-f]{24}$"),
+        )
+        with self.assertRaises(helper.WorkflowError):
+            helper.isolated_stack_root(
+                Path("relative-cache"),
+                purpose="correctness",
+                output_path=Path("/evidence/run"),
+            )
+
     def test_exact_profile_ids_map_to_exact_authoritative_options(self) -> None:
         helper = load_helper()
         self.assertEqual(

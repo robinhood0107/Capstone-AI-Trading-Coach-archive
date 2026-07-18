@@ -5,6 +5,8 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -41,6 +43,8 @@ class BenchmarkBlockHelperTests(unittest.TestCase):
             ghcup_bin=Path("/tools/ghcup"),
             stack_bin=Path("/tools/stack"),
             stack_yaml=Path("/repo/haskell/stack.yaml"),
+            stack_root=Path("/cache/stack-root-benchmark-abc"),
+            work_dir=Path("/cache/stack-root-benchmark-abc/work"),
             profile_options=["-O2", "-fasm"],
             time_limit_seconds=5,
             native_report=Path("/out/raw/criterion-family.json"),
@@ -59,6 +63,10 @@ class BenchmarkBlockHelperTests(unittest.TestCase):
                 "3.11.1",
                 "--",
                 "/tools/stack",
+                "--stack-root",
+                "/cache/stack-root-benchmark-abc",
+                "--work-dir",
+                "/cache/stack-root-benchmark-abc/work",
                 "--stack-yaml",
                 "/repo/haskell/stack.yaml",
                 "--no-terminal",
@@ -66,6 +74,7 @@ class BenchmarkBlockHelperTests(unittest.TestCase):
                 "never",
                 "--system-ghc",
                 "--no-install-ghc",
+                "--hpack-force",
                 "bench",
                 "--ghc-options=-O2 -fasm",
                 (
@@ -139,12 +148,20 @@ class BenchmarkBlockHelperTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            executed_path, executed_sha256 = helper.validate_runtime_identity(
+            (
+                executed_path,
+                executed_sha256,
+                identity_sha256,
+            ) = helper.validate_runtime_identity(
                 identity,
                 selector_id="haskell/path-transform",
             )
             self.assertEqual(executed_path, executable)
             self.assertEqual(executed_sha256, digest)
+            self.assertEqual(
+                identity_sha256,
+                hashlib.sha256(identity.read_bytes()).hexdigest(),
+            )
 
             for altered in (
                 {**document, "unknown": True},
@@ -161,6 +178,84 @@ class BenchmarkBlockHelperTests(unittest.TestCase):
                             identity,
                             selector_id="haskell/path-transform",
                         )
+
+    def test_same_fd_snapshot_rejects_symlink_parent_and_hardlink(self) -> None:
+        helper = load_helper()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            real = root / "real"
+            real.mkdir()
+            evidence = real / "evidence.json"
+            evidence.write_text('{"status":"PASS"}\n', encoding="utf-8")
+
+            snapshot = helper.read_json_snapshot(
+                evidence,
+                label="TEST_EVIDENCE",
+                max_bytes=1024,
+            )
+            self.assertEqual(snapshot.document, {"status": "PASS"})
+            self.assertEqual(
+                snapshot.sha256,
+                hashlib.sha256(snapshot.payload).hexdigest(),
+            )
+
+            linked = real / "linked.json"
+            os.link(evidence, linked)
+            with self.assertRaisesRegex(helper.BlockError, "HARDLINK"):
+                helper.read_json_snapshot(
+                    evidence,
+                    label="TEST_EVIDENCE",
+                    max_bytes=1024,
+                )
+            linked.unlink()
+
+            alias = root / "alias"
+            alias.symlink_to(real, target_is_directory=True)
+            with self.assertRaisesRegex(helper.BlockError, "PATH_COMPONENT"):
+                helper.read_json_snapshot(
+                    alias / "evidence.json",
+                    label="TEST_EVIDENCE",
+                    max_bytes=1024,
+                )
+
+    def test_benchmark_subject_requires_clean_exact_head(self) -> None:
+        helper = load_helper()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            tracked = root / "tracked.txt"
+            tracked.write_text("clean\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(root), "add", "tracked.txt"], check=True)
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(root),
+                    "-c",
+                    "user.name=S1.4X Test",
+                    "-c",
+                    "user.email=s1.4x@example.invalid",
+                    "commit",
+                    "-qm",
+                    "fixture",
+                ],
+                check=True,
+            )
+            commit = subprocess.run(
+                ["git", "-C", str(root), "rev-parse", "HEAD"],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            helper._verify_subject_commit(root, commit)
+
+            tracked.write_text("dirty\n", encoding="utf-8")
+            with self.assertRaisesRegex(helper.BlockError, "WORKTREE_NOT_CLEAN"):
+                helper._verify_subject_commit(root, commit)
+            tracked.write_text("clean\n", encoding="utf-8")
+            (root / "untracked.txt").write_text("untracked\n", encoding="utf-8")
+            with self.assertRaisesRegex(helper.BlockError, "WORKTREE_NOT_CLEAN"):
+                helper._verify_subject_commit(root, commit)
 
     def test_receipt_binds_runtime_executable_and_authoritative_ghc_identity(
         self,

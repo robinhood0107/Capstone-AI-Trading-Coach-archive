@@ -66,14 +66,22 @@ class OciCorrectnessContractTests(unittest.TestCase):
             docker=Path("/tools/docker"),
             containerfile=Path("/cache/context/Containerfile"),
             context=Path("/cache/context"),
+            iidfile=Path("/evidence/image.iid"),
             image_tag="local/s1-4x-haskell:abc",
             binary_sha256="1" * 64,
+            provenance_labels={
+                "io.s1-4x.base-image-id": f"sha256:{'2' * 64}",
+                "io.s1-4x.containerfile-sha256": "3" * 64,
+                "io.s1-4x.fixture-tree-sha256": "4" * 64,
+            },
         )
         self.assertEqual(
             build,
             [
                 "/tools/docker",
                 "build",
+                "--platform",
+                "linux/amd64",
                 "--network",
                 "none",
                 "--pull=false",
@@ -81,6 +89,14 @@ class OciCorrectnessContractTests(unittest.TestCase):
                 "/cache/context/Containerfile",
                 "--build-arg",
                 f"S1_4X_BINARY_SHA256={'1' * 64}",
+                "--label",
+                f"io.s1-4x.base-image-id=sha256:{'2' * 64}",
+                "--label",
+                f"io.s1-4x.containerfile-sha256={'3' * 64}",
+                "--label",
+                f"io.s1-4x.fixture-tree-sha256={'4' * 64}",
+                "--iidfile",
+                "/evidence/image.iid",
                 "--tag",
                 "local/s1-4x-haskell:abc",
                 "/cache/context",
@@ -98,6 +114,7 @@ class OciCorrectnessContractTests(unittest.TestCase):
         self.assertIn("--network", run)
         self.assertEqual(run[run.index("--network") + 1], "none")
         self.assertIn("--read-only", run)
+        self.assertEqual(run[run.index("--platform") + 1], "linux/amd64")
         self.assertIn("--cap-drop=ALL", run)
         self.assertIn("--security-opt=no-new-privileges", run)
         self.assertIn("--user", run)
@@ -142,6 +159,63 @@ class OciCorrectnessContractTests(unittest.TestCase):
                         expected_image_id=image_id,
                     )
 
+    def test_daemon_base_and_iid_are_exact_linux_amd64_objects(self) -> None:
+        helper = load_helper()
+        daemon = helper.validate_oci_daemon_identity(
+            {
+                "ID": "daemon-id",
+                "OSType": "linux",
+                "Architecture": "x86_64",
+                "ServerVersion": "28.3.2",
+                "OperatingSystem": "Docker Desktop",
+            },
+            context_name="desktop-linux",
+        )
+        self.assertEqual(daemon["platform"], "linux/amd64")
+        with self.assertRaises(helper.WorkflowError):
+            helper.validate_oci_daemon_identity(
+                {
+                    "ID": "daemon-id",
+                    "OSType": "windows",
+                    "Architecture": "x86_64",
+                    "ServerVersion": "28.3.2",
+                    "OperatingSystem": "Docker Desktop",
+                },
+                context_name="desktop-linux",
+            )
+
+        base_reference = f"docker.io/library/haskell@{BASE_DIGEST}"
+        base_id = f"sha256:{'5' * 64}"
+        self.assertEqual(
+            helper.validate_oci_base_image_inspection(
+                {
+                    "Id": base_id,
+                    "RepoDigests": [base_reference],
+                },
+                expected_reference=base_reference,
+            ),
+            base_id,
+        )
+        with self.assertRaises(helper.WorkflowError):
+            helper.validate_oci_base_image_inspection(
+                {
+                    "Id": base_id,
+                    "RepoDigests": [],
+                },
+                expected_reference=base_reference,
+            )
+
+        self.assertEqual(
+            helper.validate_oci_iid_bytes(
+                f"{base_id}\n".encode("ascii"),
+            ),
+            base_id,
+        )
+        for invalid in (base_id.encode("ascii"), b"sha256:not-a-digest\n"):
+            with self.subTest(invalid=invalid):
+                with self.assertRaises(helper.WorkflowError):
+                    helper.validate_oci_iid_bytes(invalid)
+
     def test_receipt_records_the_immutable_runtime_subject_and_tag_checks(
         self,
     ) -> None:
@@ -152,7 +226,7 @@ class OciCorrectnessContractTests(unittest.TestCase):
         self.assertIn('"imageTagBindingChecks"', source)
         self.assertIn("validate_oci_image_inspection", source)
 
-    def test_wrapper_requires_selected_profile_and_pinned_docker_identity(
+    def test_wrapper_requires_selected_profile_and_records_dynamic_docker_identity(
         self,
     ) -> None:
         self.assertTrue(WRAPPER_PATH.is_file(), "OCI wrapper is missing")
@@ -163,7 +237,6 @@ class OciCorrectnessContractTests(unittest.TestCase):
             "select-proven-profile.sh",
             "--check",
             "S1_4X_DOCKER_BIN",
-            "S1_4X_DOCKER_SHA256",
             "profile_workflow.py",
             "oci-correctness",
             "--network",
@@ -171,6 +244,22 @@ class OciCorrectnessContractTests(unittest.TestCase):
         ):
             with self.subTest(required=required):
                 self.assertIn(required, source)
+        self.assertNotIn("S1_4X_DOCKER_SHA256", source)
+        self.assertNotIn("DOCKER_SHA256_MISMATCH", HELPER_PATH.read_text(encoding="utf-8"))
+        helper_source = HELPER_PATH.read_text(encoding="utf-8")
+        for trust_token in (
+            "docker context show",
+            '"{{json .}}"',
+            "validate_oci_daemon_identity",
+            "validate_oci_base_image_inspection",
+            "validate_oci_iid_bytes",
+            '"daemonIdentityBefore"',
+            '"daemonIdentityAfter"',
+            '"baseImageId"',
+            '"iidFileSha256"',
+        ):
+            with self.subTest(trust_token=trust_token):
+                self.assertIn(trust_token, helper_source)
         for forbidden in (
             "eval ",
             "bash -c",

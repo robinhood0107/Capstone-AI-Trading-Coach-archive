@@ -156,6 +156,9 @@ class GhcCompatibilityWrapperContractTests(unittest.TestCase):
             self.assertNotIn("--allow-newer", source)
             self.assertNotIn("--resolver", source)
             self.assertNotIn("eval ", source)
+        self.assertIn("isolated-stack-root", run_source)
+        self.assertIn("--purpose compatibility", run_source)
+        self.assertNotIn("stack-root-ghc914-current", run_source)
 
     def test_current_lock_hashes_read_both_exact_files_independently(self) -> None:
         helper = load_helper()

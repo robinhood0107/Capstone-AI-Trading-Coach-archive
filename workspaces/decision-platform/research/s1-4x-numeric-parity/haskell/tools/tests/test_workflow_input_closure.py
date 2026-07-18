@@ -31,6 +31,24 @@ EXPECTED_WORKFLOW_INPUTS = (
     "tools/check-format.sh",
     "tools/check-hlint.sh",
     "tools/compatibility_evidence.py",
+    "tools/fixtures/hlint-negative.v1.json",
+    "tools/fixtures/hlint/aliased-from-left.hs",
+    "tools/fixtures/hlint/aliased-from-right.hs",
+    "tools/fixtures/hlint/core-system-io.hs",
+    "tools/fixtures/hlint/debug-trace.hs",
+    "tools/fixtures/hlint/forbidden-deriving.hs",
+    "tools/fixtures/hlint/forbidden-extension.hs",
+    "tools/fixtures/hlint/foreign-interface.hs",
+    "tools/fixtures/hlint/partial-and-unsafe.hs",
+    "tools/fixtures/hlint/qualified-from-just.hs",
+    "tools/fixtures/hlint/qualified-throw-io.hs",
+    "tools/fixtures/hlint/qualified-throw.hs",
+    "tools/fixtures/hlint/unchecked-folds.hs",
+    "tools/fixtures/hlint/unsafe-module.hs",
+    "tools/fixtures/hlint/unsafe-modules.hs",
+    "tools/fixtures/process/large/unicode-digit-path.manifest.json",
+    "tools/fixtures/process/large/unicode-digit-sha.manifest.json",
+    "tools/fixtures/stylish/misformatted.hs",
     "tools/haskell_benchmark_block.py",
     "tools/haskell_evidence.py",
     "tools/hlint_inventory.py",
@@ -54,8 +72,13 @@ class WorkflowInputClosureTests(unittest.TestCase):
     ) -> None:
         tracked_tools = {
             path.relative_to(HASKELL_ROOT).as_posix()
-            for path in TOOLS_ROOT.iterdir()
-            if path.is_file() and not path.is_symlink()
+            for path in TOOLS_ROOT.rglob("*")
+            if (
+                path.is_file()
+                and not path.is_symlink()
+                and "tests" not in path.relative_to(TOOLS_ROOT).parts
+                and "__pycache__" not in path.parts
+            )
         }
         expected_tools = {
             path for path in EXPECTED_WORKFLOW_INPUTS if path.startswith("tools/")

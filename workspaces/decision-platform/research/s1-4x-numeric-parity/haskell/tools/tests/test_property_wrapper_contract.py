@@ -216,13 +216,16 @@ class PropertyWrapperContractTests(unittest.TestCase):
         )
         for token in (
             "S1_4X_CACHE_ROOT",
-            'STACK_ROOT_PATH="${CACHE_ROOT}/stack-root"',
+            "isolated-stack-root",
+            "--purpose property",
+            "--output \"$OUTPUT_DIRECTORY\"",
             "--stack-root",
             "STACK_ROOT_PATH",
         ):
             with self.subTest(token=token):
                 self.assertIn(token, wrapper)
-        self.assertNotIn('OUTPUT_PARENT/.s1-4x-stack-root', wrapper)
+        self.assertNotIn('STACK_ROOT_PATH="${CACHE_ROOT}/stack-root"', wrapper)
+        self.assertIn("--hpack-force", wrapper)
 
     def test_wrapper_forces_and_hashes_selected_profile_options(self) -> None:
         wrapper = (TOOLS_ROOT / "run-property-evidence.sh").read_text(
