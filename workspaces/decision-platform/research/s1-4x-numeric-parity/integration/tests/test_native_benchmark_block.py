@@ -141,65 +141,79 @@ class NativeBenchmarkBlockTests(TestCase):
     ) -> None:
         temporary = Path(self.enterContext(tempfile.TemporaryDirectory()))
         (temporary / "raw").mkdir()
+        (temporary / "receipts").mkdir()
         input_ledger = temporary / "input-ledger.json"
         input_ledger.write_text('{"status":"fixture"}', encoding="utf-8")
         benchmark_executable = temporary / "criterion-benchmark"
         benchmark_executable.write_bytes(b"criterion executable fixture")
+        ghcup = temporary / "ghcup"
+        ghcup.write_bytes(b"ghcup fixture")
+        stack = temporary / "stack"
+        stack.write_bytes(b"stack fixture")
+        stack_yaml = temporary / "stack.yaml"
+        stack_yaml.write_text("resolver: ghc-9.10.3\n", encoding="utf-8")
+        selected_options = ["-O0", "-fasm"]
+        effective_options_sha256 = _canonical_sha256(selected_options)
         selected_profile = temporary / "haskell-selected-profile.json"
         selected_profile.write_text(
             json.dumps(
                 {
                     "schemaVersion": "s1.4x-haskell-selected-profile-v1",
                     "profileId": "baseline-o0-fasm",
-                    "optionsSha256": EFFECTIVE_RUNTIME_ARGUMENTS_SHA256,
+                    "ghcOptions": selected_options,
+                    "optionsSha256": effective_options_sha256,
                 },
                 sort_keys=True,
             ),
             encoding="utf-8",
         )
         plan = strict_json_load(PLAN)
+        selector = next(
+            item
+            for item in plan["familySelectors"]
+            if item["selectorId"] == "haskell/probabilistic-scalar"
+        )
+        selector_id = selector["selectorId"]
+        expected_case_ids = selector["expectedCaseIds"]
         receipt_provenance = {
             "planPath": str(PLAN.resolve()),
             "planSha256": hashlib.sha256(PLAN.read_bytes()).hexdigest(),
             "fixtureRootPath": str(FIXTURES.resolve()),
-            "fixtureFreezeIdentitySha256": _canonical_sha256(
-                plan["fixtureFreezeIdentity"]
-            ),
+            "fixtureFreezeIdentitySha256": _canonical_sha256(plan["fixtureFreezeIdentity"]),
             "inputLedgerPath": str(input_ledger.resolve()),
-            "inputLedgerSha256": hashlib.sha256(
-                input_ledger.read_bytes()
-            ).hexdigest(),
-            "selectorId": "haskell/test",
-            "caseId": None,
+            "inputLedgerSha256": hashlib.sha256(input_ledger.read_bytes()).hexdigest(),
+            "selectorId": selector_id,
+            "caseIds": expected_case_ids,
             "benchmarkExecutablePath": str(benchmark_executable.resolve()),
             "benchmarkExecutableSha256": hashlib.sha256(
                 benchmark_executable.read_bytes()
             ).hexdigest(),
-            "effectiveRuntimeArgumentsSha256": (
-                EFFECTIVE_RUNTIME_ARGUMENTS_SHA256
-            ),
+            "effectiveRuntimeArgumentsSha256": effective_options_sha256,
             "candidateProvenance": {
                 "kind": "haskell",
                 "selectedProfilePath": str(selected_profile.resolve()),
-                "selectedProfileSha256": hashlib.sha256(
-                    selected_profile.read_bytes()
-                ).hexdigest(),
+                "selectedProfileSha256": hashlib.sha256(selected_profile.read_bytes()).hexdigest(),
                 "selectedProfileId": "baseline-o0-fasm",
-                "effectiveCompilerFlagsSha256": (
-                    EFFECTIVE_RUNTIME_ARGUMENTS_SHA256
-                ),
+                "effectiveCompilerFlagsSha256": effective_options_sha256,
+                "ghcupPath": str(ghcup.resolve()),
+                "ghcupSha256": hashlib.sha256(ghcup.read_bytes()).hexdigest(),
+                "stackPath": str(stack.resolve()),
+                "stackSha256": hashlib.sha256(stack.read_bytes()).hexdigest(),
+                "stackYamlPath": str(stack_yaml.resolve()),
+                "stackYamlSha256": hashlib.sha256(stack_yaml.read_bytes()).hexdigest(),
+                "selectedGhcOptions": selected_options,
             },
         }
         cases: list[dict[str, Any]] = [
             {
-                "caseId": "case-a",
+                "caseId": expected_case_ids[0],
                 "nativeValue": 0.1,
                 "samples": 100,
                 "warmupIterations": 0,
                 "measurementIterations": 100,
             },
             {
-                "caseId": "case-b",
+                "caseId": expected_case_ids[1],
                 "nativeValue": 0.2,
                 "samples": 100,
                 "warmupIterations": 0,
@@ -209,7 +223,7 @@ class NativeBenchmarkBlockTests(TestCase):
         evidence: dict[str, Any] = {
             "schemaVersion": "s1.4x-native-contract-validation-v1",
             "boundaryId": "haskell",
-            "selectorId": "haskell/test",
+            "selectorId": selector_id,
             "framework": "Criterion",
             "frameworkVersion": "1.6.4.0",
             "configuration": {
@@ -222,15 +236,11 @@ class NativeBenchmarkBlockTests(TestCase):
             "cases": [],
             "status": "PASS",
         }
-        receipts = temporary / "receipts"
-        receipts.mkdir()
-        statistics_cases = []
+        statistics_cases: list[dict[str, Any]] = []
         raw_documents: dict[str, list[Any]] = {}
         for case_index, case in enumerate(cases):
-            raw = temporary / f"raw/{case_index:03d}.json"
             samples = [
-                case["nativeValue"] * (0.9 if index % 2 == 0 else 1.1)
-                for index in range(100)
+                case["nativeValue"] * (0.9 if index % 2 == 0 else 1.1) for index in range(100)
             ]
             mean = statistics.fmean(samples)
             standard_deviation = statistics.stdev(samples)
@@ -252,10 +262,7 @@ class NativeBenchmarkBlockTests(TestCase):
                     elapsed_times,
                     strict=True,
                 )
-            ) / math.fsum(
-                (iterations - iteration_mean) ** 2
-                for iterations in iteration_counts
-            )
+            ) / math.fsum((iterations - iteration_mean) ** 2 for iterations in iteration_counts)
             case["nativeValue"] = regression_slope
             estimate = {
                 "estPoint": mean,
@@ -270,7 +277,7 @@ class NativeBenchmarkBlockTests(TestCase):
                 "1.6.4.0",
                 [
                     {
-                        "reportNumber": 0,
+                        "reportNumber": case_index,
                         "reportName": case["caseId"],
                         "reportKeys": [
                             "time",
@@ -326,12 +333,8 @@ class NativeBenchmarkBlockTests(TestCase):
                                         "iters": {
                                             "estPoint": regression_slope,
                                             "estError": {
-                                                "confIntLDX": (
-                                                    regression_slope * 0.1
-                                                ),
-                                                "confIntUDX": (
-                                                    regression_slope * 0.2
-                                                ),
+                                                "confIntLDX": (regression_slope * 0.1),
+                                                "confIntUDX": (regression_slope * 0.2),
                                                 "confIntCL": 0.05,
                                             },
                                         },
@@ -345,7 +348,7 @@ class NativeBenchmarkBlockTests(TestCase):
                                             "confIntCL": 0.05,
                                         },
                                     },
-                                }
+                                },
                             ],
                             "anMean": estimate,
                             "anStdDev": {
@@ -380,58 +383,6 @@ class NativeBenchmarkBlockTests(TestCase):
                 ],
             ]
             raw_documents[case["caseId"]] = raw_document
-            raw.write_text(json.dumps(raw_document), encoding="utf-8")
-            raw_sha = hashlib.sha256(raw.read_bytes()).hexdigest()
-            receipt_relative = f"receipts/{case['caseId']}.json"
-            receipt = receipts / f"{case['caseId']}.json"
-            receipt.write_text(
-                json.dumps(
-                    {
-                        "schemaVersion": (
-                            "s1.4x-native-case-execution-receipt-v1"
-                        ),
-                        "boundaryId": "haskell",
-                        "selectorId": "haskell/test",
-                        "caseId": case["caseId"],
-                        "commandArgv": [
-                            str(benchmark_executable.resolve()),
-                            "--time-limit",
-                            "5",
-                            "--json",
-                            str(raw),
-                            "+RTS",
-                            "-N1",
-                            "-RTS",
-                        ],
-                        "environment": {
-                            "S1_4X_BENCHMARK_CASE_ID": case["caseId"]
-                        },
-                        "exitCode": 0,
-                        "rawEvidencePath": f"raw/{case_index:03d}.json",
-                        "rawEvidenceSha256": raw_sha,
-                        "provenance": {
-                            **receipt_provenance,
-                            "caseId": case["caseId"],
-                        },
-                        "status": "PASS",
-                    },
-                    sort_keys=True,
-                ),
-                encoding="utf-8",
-            )
-            evidence["cases"].append(
-                {
-                    "caseId": case["caseId"],
-                    "nativeSampleCount": 100,
-                    "rawEvidencePath": f"raw/{case_index:03d}.json",
-                    "rawEvidenceSha256": raw_sha,
-                    "executionReceiptPath": receipt_relative,
-                    "executionReceiptSha256": hashlib.sha256(
-                        receipt.read_bytes()
-                    ).hexdigest(),
-                    "status": "PASS",
-                }
-            )
             statistics_cases.append(
                 {
                     "caseId": case["caseId"],
@@ -441,58 +392,105 @@ class NativeBenchmarkBlockTests(TestCase):
                     "confidenceLow": regression_slope * 0.9,
                     "confidenceHigh": regression_slope * 1.2,
                     "dispersionMetric": (
-                        "criterion-bootstrap-standard-deviation-"
-                        "seconds-per-invocation"
+                        "criterion-bootstrap-standard-deviation-seconds-per-invocation"
                     ),
                     "dispersionValue": standard_deviation,
                     "nativeUnit": "s",
                     "logicalOperationsPerInvocation": 1,
                     "normalizedP95NsPerLogicalOperation": max(samples) * 1e9,
-                    "normalizedConfidenceLowNsPerLogicalOperation": (
-                        regression_slope * 0.9 * 1e9
-                    ),
-                    "normalizedConfidenceHighNsPerLogicalOperation": (
-                        regression_slope * 1.2 * 1e9
-                    ),
-                    "normalizedDispersionNsPerLogicalOperation": (
-                        standard_deviation * 1e9
-                    ),
+                    "normalizedConfidenceLowNsPerLogicalOperation": (regression_slope * 0.9 * 1e9),
+                    "normalizedConfidenceHighNsPerLogicalOperation": (regression_slope * 1.2 * 1e9),
+                    "normalizedDispersionNsPerLogicalOperation": (standard_deviation * 1e9),
                 }
             )
 
-        def install_case_a_raw(document: list[Any]) -> None:
-            raw_path = temporary / "raw/000.json"
+        family_raw_document: list[Any] = [
+            "criterion",
+            "1.6.4.0",
+            [raw_documents[case_id][2][0] for case_id in expected_case_ids],
+        ]
+        raw_path = temporary / "raw/criterion-family.json"
+        receipt_path = temporary / "receipts/criterion-family.json"
+        raw_relative = "raw/criterion-family.json"
+        receipt_relative = "receipts/criterion-family.json"
+        raw_path.write_text(json.dumps(family_raw_document), encoding="utf-8")
+        raw_sha = hashlib.sha256(raw_path.read_bytes()).hexdigest()
+        receipt_document: dict[str, Any] = {
+            "schemaVersion": "s1.4x-native-case-execution-receipt-v1",
+            "boundaryId": "haskell",
+            "selectorId": selector_id,
+            "caseId": None,
+            "commandArgv": [
+                str(ghcup.resolve()),
+                "run",
+                "--ghc",
+                "9.10.3",
+                "--stack",
+                "3.11.1",
+                "--",
+                str(stack.resolve()),
+                "--stack-yaml",
+                str(stack_yaml.resolve()),
+                "--system-ghc",
+                "--no-install-ghc",
+                "bench",
+                "--ghc-options=-O0 -fasm",
+                (
+                    "--benchmark-arguments=--time-limit 5 "
+                    f"--json {raw_path} --match prefix "
+                    f"{selector['criterionPrefix']} +RTS -N1 -RTS"
+                ),
+            ],
+            "environment": {"S1_4X_BENCHMARK_SELECTOR_ID": selector_id},
+            "exitCode": 0,
+            "rawEvidencePath": raw_relative,
+            "rawEvidenceSha256": raw_sha,
+            "provenance": receipt_provenance,
+            "status": "PASS",
+        }
+        receipt_path.write_text(
+            json.dumps(receipt_document, sort_keys=True),
+            encoding="utf-8",
+        )
+        receipt_sha = hashlib.sha256(receipt_path.read_bytes()).hexdigest()
+        evidence["cases"] = [
+            {
+                "caseId": case["caseId"],
+                "nativeSampleCount": 100,
+                "rawEvidencePath": raw_relative,
+                "rawEvidenceSha256": raw_sha,
+                "executionReceiptPath": receipt_relative,
+                "executionReceiptSha256": receipt_sha,
+                "status": "PASS",
+            }
+            for case in cases
+        ]
+
+        def install_family_raw(document: list[Any]) -> None:
             raw_path.write_text(json.dumps(document), encoding="utf-8")
-            raw_sha = hashlib.sha256(raw_path.read_bytes()).hexdigest()
-            evidence["cases"][0]["rawEvidenceSha256"] = raw_sha
-            receipt_path = (
-                temporary / evidence["cases"][0]["executionReceiptPath"]
-            )
-            receipt_document = json.loads(
-                receipt_path.read_text(encoding="utf-8")
-            )
-            receipt_document["rawEvidenceSha256"] = raw_sha
+            updated_raw_sha = hashlib.sha256(raw_path.read_bytes()).hexdigest()
+            updated_receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+            updated_receipt["rawEvidenceSha256"] = updated_raw_sha
             receipt_path.write_text(
-                json.dumps(receipt_document, sort_keys=True),
+                json.dumps(updated_receipt, sort_keys=True),
                 encoding="utf-8",
             )
-            evidence["cases"][0]["executionReceiptSha256"] = hashlib.sha256(
-                receipt_path.read_bytes()
-            ).hexdigest()
+            updated_receipt_sha = hashlib.sha256(receipt_path.read_bytes()).hexdigest()
+            for evidence_case in evidence["cases"]:
+                evidence_case["rawEvidenceSha256"] = updated_raw_sha
+                evidence_case["executionReceiptSha256"] = updated_receipt_sha
 
         validate_native_contract_evidence(
             evidence,
             boundary_id="haskell",
-            selector_id="haskell/test",
+            selector_id=selector_id,
             block_directory=temporary,
             native_cases=cases,
             native_statistics_cases=statistics_cases,
             plan_path=PLAN,
             fixture_root_path=FIXTURES,
             input_ledger_path=input_ledger,
-            effective_runtime_arguments_sha256=(
-                EFFECTIVE_RUNTIME_ARGUMENTS_SHA256
-            ),
+            effective_runtime_arguments_sha256=effective_options_sha256,
             profile="baseline-o0-fasm",
         )
 
@@ -502,65 +500,65 @@ class NativeBenchmarkBlockTests(TestCase):
             validate_native_contract_evidence(
                 invalid,
                 boundary_id="haskell",
-                selector_id="haskell/test",
+                selector_id=selector_id,
                 block_directory=temporary,
                 native_cases=cases,
                 native_statistics_cases=statistics_cases,
                 plan_path=PLAN,
                 fixture_root_path=FIXTURES,
                 input_ledger_path=input_ledger,
-                effective_runtime_arguments_sha256=(
-                    EFFECTIVE_RUNTIME_ARGUMENTS_SHA256
-                ),
+                effective_runtime_arguments_sha256=effective_options_sha256,
                 profile="baseline-o0-fasm",
             )
 
-        wrong_case = copy.deepcopy(raw_documents["case-a"])
-        wrong_case[2][0]["reportName"] = "case-forged"
-        install_case_a_raw(wrong_case)
-        with self.assertRaisesRegex(GateError, "CRITERION_RAW_CONTRACT_INVALID"):
+        wrong_case_order = copy.deepcopy(family_raw_document)
+        wrong_case_order[2][0]["reportName"], wrong_case_order[2][1]["reportName"] = (
+            wrong_case_order[2][1]["reportName"],
+            wrong_case_order[2][0]["reportName"],
+        )
+        install_family_raw(wrong_case_order)
+        with self.assertRaisesRegex(GateError, "CRITERION_RAW_CASE_ORDER_INVALID"):
             validate_native_contract_evidence(
                 evidence,
                 boundary_id="haskell",
-                selector_id="haskell/test",
+                selector_id=selector_id,
                 block_directory=temporary,
                 native_cases=cases,
                 native_statistics_cases=statistics_cases,
                 plan_path=PLAN,
                 fixture_root_path=FIXTURES,
                 input_ledger_path=input_ledger,
-                effective_runtime_arguments_sha256=(
-                    EFFECTIVE_RUNTIME_ARGUMENTS_SHA256
-                ),
+                effective_runtime_arguments_sha256=effective_options_sha256,
                 profile="baseline-o0-fasm",
             )
 
-        missing_bootstrap = copy.deepcopy(raw_documents["case-a"])
+        missing_bootstrap = copy.deepcopy(family_raw_document)
         missing_bootstrap[2][0]["reportAnalysis"]["anRegress"] = []
-        install_case_a_raw(missing_bootstrap)
+        install_family_raw(missing_bootstrap)
         with self.assertRaisesRegex(GateError, "CRITERION_RAW_CONTRACT_INVALID"):
             validate_native_contract_evidence(
                 evidence,
                 boundary_id="haskell",
-                selector_id="haskell/test",
+                selector_id=selector_id,
                 block_directory=temporary,
                 native_cases=cases,
                 native_statistics_cases=statistics_cases,
                 plan_path=PLAN,
                 fixture_root_path=FIXTURES,
                 input_ledger_path=input_ledger,
-                effective_runtime_arguments_sha256=(
-                    EFFECTIVE_RUNTIME_ARGUMENTS_SHA256
-                ),
+                effective_runtime_arguments_sha256=effective_options_sha256,
                 profile="baseline-o0-fasm",
             )
 
-        install_case_a_raw(raw_documents["case-a"])
+        install_family_raw(family_raw_document)
         forged_statistics = copy.deepcopy(statistics_cases)
-        forged_statistics[0]["dispersionValue"] = math.nextafter(
-            forged_statistics[0]["dispersionValue"],
-            math.inf,
-        ) * 2
+        forged_statistics[0]["dispersionValue"] = (
+            math.nextafter(
+                forged_statistics[0]["dispersionValue"],
+                math.inf,
+            )
+            * 2
+        )
         with self.assertRaisesRegex(
             GateError,
             "CRITERION_NATIVE_STATISTICS_MISMATCH",
@@ -568,16 +566,105 @@ class NativeBenchmarkBlockTests(TestCase):
             validate_native_contract_evidence(
                 evidence,
                 boundary_id="haskell",
-                selector_id="haskell/test",
+                selector_id=selector_id,
                 block_directory=temporary,
                 native_cases=cases,
                 native_statistics_cases=forged_statistics,
                 plan_path=PLAN,
                 fixture_root_path=FIXTURES,
                 input_ledger_path=input_ledger,
-                effective_runtime_arguments_sha256=(
-                    EFFECTIVE_RUNTIME_ARGUMENTS_SHA256
-                ),
+                effective_runtime_arguments_sha256=effective_options_sha256,
+                profile="baseline-o0-fasm",
+            )
+
+        def install_receipt(document: dict[str, Any]) -> None:
+            receipt_path.write_text(
+                json.dumps(document, sort_keys=True),
+                encoding="utf-8",
+            )
+            updated_receipt_sha = hashlib.sha256(receipt_path.read_bytes()).hexdigest()
+            for evidence_case in evidence["cases"]:
+                evidence_case["executionReceiptSha256"] = updated_receipt_sha
+
+        direct_executable_receipt = copy.deepcopy(receipt_document)
+        direct_executable_receipt["commandArgv"] = [
+            str(benchmark_executable.resolve()),
+            "--json",
+            str(raw_path),
+        ]
+        install_receipt(direct_executable_receipt)
+        with self.assertRaisesRegex(GateError, "NATIVE_EXECUTION_ARGV_INVALID"):
+            validate_native_contract_evidence(
+                evidence,
+                boundary_id="haskell",
+                selector_id=selector_id,
+                block_directory=temporary,
+                native_cases=cases,
+                native_statistics_cases=statistics_cases,
+                plan_path=PLAN,
+                fixture_root_path=FIXTURES,
+                input_ledger_path=input_ledger,
+                effective_runtime_arguments_sha256=effective_options_sha256,
+                profile="baseline-o0-fasm",
+            )
+
+        forged_provenance_receipt = copy.deepcopy(receipt_document)
+        forged_provenance_receipt["provenance"]["candidateProvenance"]["ghcupSha256"] = "0" * 64
+        install_receipt(forged_provenance_receipt)
+        with self.assertRaisesRegex(
+            GateError,
+            "NATIVE_EXECUTION_PROVENANCE_INVALID",
+        ):
+            validate_native_contract_evidence(
+                evidence,
+                boundary_id="haskell",
+                selector_id=selector_id,
+                block_directory=temporary,
+                native_cases=cases,
+                native_statistics_cases=statistics_cases,
+                plan_path=PLAN,
+                fixture_root_path=FIXTURES,
+                input_ledger_path=input_ledger,
+                effective_runtime_arguments_sha256=effective_options_sha256,
+                profile="baseline-o0-fasm",
+            )
+
+        install_receipt(receipt_document)
+        alternate_raw = temporary / "raw/alternate.json"
+        alternate_raw.write_bytes(raw_path.read_bytes())
+        alternate_receipt_path = temporary / "receipts/alternate.json"
+        alternate_receipt = copy.deepcopy(receipt_document)
+        alternate_receipt["rawEvidencePath"] = "raw/alternate.json"
+        alternate_receipt["commandArgv"][-1] = (
+            "--benchmark-arguments=--time-limit 5 "
+            f"--json {alternate_raw} --match prefix "
+            f"{selector['criterionPrefix']} +RTS -N1 -RTS"
+        )
+        alternate_receipt_path.write_text(
+            json.dumps(alternate_receipt, sort_keys=True),
+            encoding="utf-8",
+        )
+        shared_violation = copy.deepcopy(evidence)
+        shared_violation["cases"][1]["rawEvidencePath"] = "raw/alternate.json"
+        shared_violation["cases"][1]["executionReceiptPath"] = "receipts/alternate.json"
+        shared_violation["cases"][1]["executionReceiptSha256"] = hashlib.sha256(
+            alternate_receipt_path.read_bytes()
+        ).hexdigest()
+        with self.assertRaisesRegex(
+            GateError,
+            "CRITERION_FAMILY_EVIDENCE_NOT_SHARED",
+        ):
+            validate_native_contract_evidence(
+                shared_violation,
+                boundary_id="haskell",
+                selector_id=selector_id,
+                block_directory=temporary,
+                native_cases=cases,
+                native_statistics_cases=statistics_cases,
+                plan_path=PLAN,
+                fixture_root_path=FIXTURES,
+                input_ledger_path=input_ledger,
+                effective_runtime_arguments_sha256=effective_options_sha256,
                 profile="baseline-o0-fasm",
             )
 
@@ -650,9 +737,7 @@ class NativeBenchmarkBlockTests(TestCase):
             receipt.write_text(
                 json.dumps(
                     {
-                        "schemaVersion": (
-                            "s1.4x-native-case-execution-receipt-v1"
-                        ),
+                        "schemaVersion": ("s1.4x-native-case-execution-receipt-v1"),
                         "boundaryId": "scala",
                         "selectorId": "scala/test",
                         "caseId": "case-a",
@@ -681,17 +766,13 @@ class NativeBenchmarkBlockTests(TestCase):
                             "-rff",
                             str(raw),
                         ],
-                        "environment": {
-                            "S1_4X_BENCHMARK_CASE_ID": "case-a"
-                        },
+                        "environment": {"S1_4X_BENCHMARK_CASE_ID": "case-a"},
                         "exitCode": 0,
                         "rawEvidencePath": "raw/000.json",
                         "rawEvidenceSha256": raw_sha,
                         "provenance": {
                             "planPath": str(PLAN.resolve()),
-                            "planSha256": hashlib.sha256(
-                                PLAN.read_bytes()
-                            ).hexdigest(),
+                            "planSha256": hashlib.sha256(PLAN.read_bytes()).hexdigest(),
                             "fixtureRootPath": str(FIXTURES.resolve()),
                             "fixtureFreezeIdentitySha256": _canonical_sha256(
                                 plan["fixtureFreezeIdentity"]
@@ -701,25 +782,19 @@ class NativeBenchmarkBlockTests(TestCase):
                                 input_ledger.read_bytes()
                             ).hexdigest(),
                             "selectorId": "scala/test",
-                            "caseId": "case-a",
-                            "benchmarkExecutablePath": str(
-                                benchmark_executable.resolve()
-                            ),
+                            "caseIds": ["case-a"],
+                            "benchmarkExecutablePath": str(benchmark_executable.resolve()),
                             "benchmarkExecutableSha256": hashlib.sha256(
                                 benchmark_executable.read_bytes()
                             ).hexdigest(),
-                            "effectiveRuntimeArgumentsSha256": (
-                                EFFECTIVE_RUNTIME_ARGUMENTS_SHA256
-                            ),
+                            "effectiveRuntimeArgumentsSha256": (EFFECTIVE_RUNTIME_ARGUMENTS_SHA256),
                             "candidateProvenance": {
                                 "kind": "scala",
                                 "effectiveJvmArgumentsCapabilityPath": str(
                                     jvm_capability.resolve()
                                 ),
                                 "effectiveJvmArgumentsCapabilitySha256": (
-                                    hashlib.sha256(
-                                        jvm_capability.read_bytes()
-                                    ).hexdigest()
+                                    hashlib.sha256(jvm_capability.read_bytes()).hexdigest()
                                 ),
                             },
                         },
@@ -752,9 +827,7 @@ class NativeBenchmarkBlockTests(TestCase):
                         "rawEvidencePath": "raw/000.json",
                         "rawEvidenceSha256": raw_sha,
                         "executionReceiptPath": "receipts/000.json",
-                        "executionReceiptSha256": hashlib.sha256(
-                            receipt.read_bytes()
-                        ).hexdigest(),
+                        "executionReceiptSha256": hashlib.sha256(receipt.read_bytes()).hexdigest(),
                         "status": "PASS",
                     }
                 ],
@@ -771,9 +844,7 @@ class NativeBenchmarkBlockTests(TestCase):
             plan_path=PLAN,
             fixture_root_path=FIXTURES,
             input_ledger_path=input_ledger,
-            effective_runtime_arguments_sha256=(
-                EFFECTIVE_RUNTIME_ARGUMENTS_SHA256
-            ),
+            effective_runtime_arguments_sha256=(EFFECTIVE_RUNTIME_ARGUMENTS_SHA256),
             profile="baseline",
         )
 
@@ -784,9 +855,9 @@ class NativeBenchmarkBlockTests(TestCase):
             json.dumps(receipt_document, sort_keys=True),
             encoding="utf-8",
         )
-        forged_provenance["cases"][0]["executionReceiptSha256"] = (
-            hashlib.sha256(receipt.read_bytes()).hexdigest()
-        )
+        forged_provenance["cases"][0]["executionReceiptSha256"] = hashlib.sha256(
+            receipt.read_bytes()
+        ).hexdigest()
         with self.assertRaisesRegex(
             GateError,
             "NATIVE_EXECUTION_RECEIPT_INVALID",
@@ -801,9 +872,7 @@ class NativeBenchmarkBlockTests(TestCase):
                 plan_path=PLAN,
                 fixture_root_path=FIXTURES,
                 input_ledger_path=input_ledger,
-                effective_runtime_arguments_sha256=(
-                    EFFECTIVE_RUNTIME_ARGUMENTS_SHA256
-                ),
+                effective_runtime_arguments_sha256=(EFFECTIVE_RUNTIME_ARGUMENTS_SHA256),
                 profile="baseline",
             )
 
@@ -820,9 +889,7 @@ class NativeBenchmarkBlockTests(TestCase):
                 plan_path=PLAN,
                 fixture_root_path=FIXTURES,
                 input_ledger_path=input_ledger,
-                effective_runtime_arguments_sha256=(
-                    EFFECTIVE_RUNTIME_ARGUMENTS_SHA256
-                ),
+                effective_runtime_arguments_sha256=(EFFECTIVE_RUNTIME_ARGUMENTS_SHA256),
                 profile="baseline",
             )
 
@@ -839,9 +906,7 @@ class NativeBenchmarkBlockTests(TestCase):
                 plan_path=PLAN,
                 fixture_root_path=FIXTURES,
                 input_ledger_path=input_ledger,
-                effective_runtime_arguments_sha256=(
-                    EFFECTIVE_RUNTIME_ARGUMENTS_SHA256
-                ),
+                effective_runtime_arguments_sha256=(EFFECTIVE_RUNTIME_ARGUMENTS_SHA256),
                 profile="baseline",
             )
 
@@ -858,9 +923,7 @@ class NativeBenchmarkBlockTests(TestCase):
                 plan_path=PLAN,
                 fixture_root_path=FIXTURES,
                 input_ledger_path=input_ledger,
-                effective_runtime_arguments_sha256=(
-                    EFFECTIVE_RUNTIME_ARGUMENTS_SHA256
-                ),
+                effective_runtime_arguments_sha256=(EFFECTIVE_RUNTIME_ARGUMENTS_SHA256),
                 profile="baseline",
             )
 
@@ -883,9 +946,7 @@ class NativeBenchmarkBlockTests(TestCase):
                 plan_path=PLAN,
                 fixture_root_path=FIXTURES,
                 input_ledger_path=input_ledger,
-                effective_runtime_arguments_sha256=(
-                    EFFECTIVE_RUNTIME_ARGUMENTS_SHA256
-                ),
+                effective_runtime_arguments_sha256=(EFFECTIVE_RUNTIME_ARGUMENTS_SHA256),
                 profile="baseline",
             )
 
