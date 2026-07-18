@@ -1,18 +1,127 @@
 {
-  "schemaVersion": "s1.4x-scala-source-inputs-v1",
-  "language": "scala-3.8.4",
-  "roots": [
-    "project.scala",
-    "selected-profile.scala",
-    "src/main/scala",
-    "src/test/scala",
-    "benchmarks"
-  ],
-  "toolRoots": [
-    "tools"
-  ],
-  "formatterConfig": ".scalafmt.conf",
-  "scalafixConfig": ".scalafix.conf",
-  "sourceLocalExclusions": [],
-  "generatedSourcesTracked": false
+  "schemaVersion": "s1.4x-source-input-manifest-v1",
+  "language": "scala",
+  "files": {
+    "benchmarks/scala/ai/trading/coach/s14x/benchmark/BenchmarkInvocation.scala": {
+      "role": "benchmark",
+      "sha256": "d3b2ceb83ae48bb4e7f5e9c8b8404189af35599229d3b2af9d27b1b6e1e7cf78"
+    },
+    "benchmarks/scala/ai/trading/coach/s14x/benchmark/BenchmarkSetupProbeMain.scala": {
+      "role": "benchmark",
+      "sha256": "55811cba582a6e45b941e9e303a2256ae5a1e25e0f6aa0cb24af81562bf19855"
+    },
+    "benchmarks/scala/s1_4x/benchmarks/classical_path_risk/ClassicalPathRiskBenchmark.scala": {
+      "role": "benchmark",
+      "sha256": "5c44f2dd517c68814c778eb1503f7f03eae89e4f37877e1e74e3c21685b15886"
+    },
+    "benchmarks/scala/s1_4x/benchmarks/coverage_batch/CoverageBatchBenchmark.scala": {
+      "role": "benchmark",
+      "sha256": "1f9a5ebd6fe91bc7cf2576eec13ff67a4d82b29b881eef2f4af64e7cdc16a79c"
+    },
+    "benchmarks/scala/s1_4x/benchmarks/intraday_realized/IntradayRealizedBenchmark.scala": {
+      "role": "benchmark",
+      "sha256": "4bf16aefa15f6eea2758ae4d0469c729078c7e912a03a9246e57a6c1b4bb8fcf"
+    },
+    "benchmarks/scala/s1_4x/benchmarks/path_transform/PathTransformBenchmark.scala": {
+      "role": "benchmark",
+      "sha256": "f3981eff3ad5c50e6b420d6036eba57ba32f173f7e66113583a1dbedd831d7c7"
+    },
+    "benchmarks/scala/s1_4x/benchmarks/probabilistic_scalar/ProbabilisticScalarBenchmark.scala": {
+      "role": "benchmark",
+      "sha256": "00e38ca61873d1b343c94114f02842a62f20f37db3b1a88331aca1f2958ece7a"
+    },
+    "benchmarks/scala/s1_4x/benchmarks/serial_sharpe/SerialSharpeBenchmark.scala": {
+      "role": "benchmark",
+      "sha256": "78c5eaa06a341c31f5d5dff00a69be27cfd97f81f819d4084af8299513334cd7"
+    },
+    "project.scala": {
+      "role": "configuration",
+      "sha256": "9b5fed6695823c3d4297d71570e97ba39a618e7a55e1accec5fb2c4dd862030b"
+    },
+    "selected-profile.scala": {
+      "role": "configuration",
+      "sha256": "78260658189047f9a7b24c2bff766796c2b395554b774c6bbe7d57241e7835b8"
+    },
+    "src/main/scala/ai/trading/coach/s14x/core/AdvancedRisk.scala": {
+      "role": "main",
+      "sha256": "1c8ef646aadb69038fe8d6c23fcae0a17446bf60fd908a9f9b782120b66b95b2"
+    },
+    "src/main/scala/ai/trading/coach/s14x/core/Models.scala": {
+      "role": "main",
+      "sha256": "7e0fbc60dc2d364885e5d8a41d95595a03264ecc6529d66887d9d906d4175951"
+    },
+    "src/main/scala/ai/trading/coach/s14x/core/NumericPrimitives.scala": {
+      "role": "main",
+      "sha256": "60d84eaaa822d7347b98c06a4de42dbe169054b98f256e90a311e6b78b65eb8b"
+    },
+    "src/main/scala/ai/trading/coach/s14x/core/ProductionMetrics.scala": {
+      "role": "main",
+      "sha256": "530be7b00348b082d05348e4c4c6da9c3978a7b080ccf62aa5c8c939ad12c7fa"
+    },
+    "src/main/scala/ai/trading/coach/s14x/core/StableError.scala": {
+      "role": "main",
+      "sha256": "51a4d832422265650e888ee675983adf8fbe647da9797b9221a5aaec86a43a7a"
+    },
+    "src/main/scala/ai/trading/coach/s14x/core/Validation.scala": {
+      "role": "main",
+      "sha256": "85fa0505fb89e4270a9ebd138f781c28c978038ecb51ff72469a5da1e9e7515d"
+    },
+    "src/main/scala/ai/trading/coach/s14x/shell/BinaryArrayReader.scala": {
+      "role": "main",
+      "sha256": "9270e86a6c5ded04b7ebd2cbea30d0524f5929a205db74b9bbd4c0a6be1fff5b"
+    },
+    "src/main/scala/ai/trading/coach/s14x/shell/CandidateRunner.scala": {
+      "role": "main",
+      "sha256": "46af07ab843a666624323ab416992aaf1fd6304070ffb58d9dc9d415782afc03"
+    },
+    "src/main/scala/ai/trading/coach/s14x/shell/ContractDecoder.scala": {
+      "role": "main",
+      "sha256": "1f12b0caef246ef9904a0a315633531d791298dd1b124731fa29600e26b160c9"
+    },
+    "src/main/scala/ai/trading/coach/s14x/shell/JsonSupport.scala": {
+      "role": "main",
+      "sha256": "a126dd5cca68d144ca3037cc693c3aa5b49362cf2de0da25a113acf9ebc9854d"
+    },
+    "src/main/scala/ai/trading/coach/s14x/shell/Main.scala": {
+      "role": "main",
+      "sha256": "9814a1c81edd587e53752c3c2574297aeec099579a0093954282ea294c2a2184"
+    },
+    "src/test/scala/ai/trading/coach/s14x/core/AdvancedRiskSuite.scala": {
+      "role": "test",
+      "sha256": "bf4df7054977eb08de261b33b571dfd1b20bfd909e8c89f6447f692c5763a42d"
+    },
+    "src/test/scala/ai/trading/coach/s14x/core/FrozenPropertyPlan.scala": {
+      "role": "test",
+      "sha256": "66a2f739f47a2bb6dd65fc4671c1f7f1cd30e3f5a3f177a1b388315c42390b04"
+    },
+    "src/test/scala/ai/trading/coach/s14x/core/NumericPropertiesSuite.scala": {
+      "role": "test",
+      "sha256": "d5b1bf1504fdb0ff6e61289047dd9cade7aaa5860d451f6d65af65bbfd801dce"
+    },
+    "src/test/scala/ai/trading/coach/s14x/core/ProductionMetricsSuite.scala": {
+      "role": "test",
+      "sha256": "d94a1bd1f5344b58412775cd54df1533ed1ec87caa7746dde53be056a1fef4fa"
+    },
+    "src/test/scala/ai/trading/coach/s14x/shell/ContractShellSuite.scala": {
+      "role": "test",
+      "sha256": "2136643c60de98ed448ec45b760ac649eb72d71ac32074ffca3a1844463caf4a"
+    },
+    "src/test/scala/ai/trading/coach/s14x/shell/PropertyEvidenceClosureSuite.scala": {
+      "role": "test",
+      "sha256": "354c9bed17d83c0a895afcdd35e69ea85d2cb3987ea3721fef98fe3c3e6f5213"
+    },
+    "src/test/scala/ai/trading/coach/s14x/shell/PropertyEvidenceMain.scala": {
+      "role": "test",
+      "sha256": "b7f69e7960447183bcf8ca4bebba8ce570f7992a931b0aa8c3e711db54d3662d"
+    }
+  },
+  "inputSets": {
+    "tracked": "files",
+    "manifest": "files",
+    "format": "files",
+    "compile": "files",
+    "lint": "files",
+    "profileRun": "files"
+  },
+  "canonicalManifestSha256": "a823e04dc98a282f3107a19e947d84d6b09039f78c9fb5ed7747e7fb5f2413db"
 }

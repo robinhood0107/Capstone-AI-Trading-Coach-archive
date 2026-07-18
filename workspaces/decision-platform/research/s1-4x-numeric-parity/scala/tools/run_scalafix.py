@@ -15,6 +15,8 @@ import zipfile
 from pathlib import Path
 from typing import Any
 
+from source_input_manifest import validated_source_files as source_files
+
 
 class SemanticPolicyError(ValueError):
     """Semantic source-policy evidence를 완전하게 만들 수 없음을 나타낸다."""
@@ -123,31 +125,6 @@ def run_process(
     write_exclusive_bytes(log_root / f"{log_id}.stdout", completed.stdout)
     write_exclusive_bytes(log_root / f"{log_id}.stderr", completed.stderr)
     return completed
-
-
-def source_files(scala_root: Path, manifest: dict[str, Any]) -> list[Path]:
-    roots = manifest.get("roots")
-    if (
-        manifest.get("schemaVersion") != "s1.4x-scala-source-inputs-v1"
-        or not isinstance(roots, list)
-        or not all(isinstance(item, str) for item in roots)
-    ):
-        raise SemanticPolicyError("SOURCE_INPUT_MANIFEST_INVALID")
-    files: list[Path] = []
-    for root_name in roots:
-        root = scala_root / root_name
-        if root.is_symlink():
-            raise SemanticPolicyError(f"SYMLINK_SOURCE_ROOT:{root_name}")
-        if root.is_file() and root.suffix == ".scala":
-            files.append(root)
-        elif root.is_dir():
-            for path in root.rglob("*.scala"):
-                if path.is_symlink() or not path.is_file():
-                    raise SemanticPolicyError(f"UNSAFE_SOURCE:{path}")
-                files.append(path)
-        else:
-            raise SemanticPolicyError(f"SOURCE_ROOT_MISSING:{root_name}")
-    return sorted(set(files), key=lambda path: path.relative_to(scala_root).as_posix())
 
 
 def fixture_path(fixture_root: Path, file_name: str) -> Path:
@@ -271,7 +248,12 @@ def run(arguments: argparse.Namespace) -> Path:
     ):
         raise SemanticPolicyError("NEGATIVE_FIXTURE_MATRIX_INVALID")
 
-    sources = source_files(scala_root, manifest)
+    sources = source_files(
+        scala_root,
+        manifest,
+        policy=policy,
+        require_git_source_equality=True,
+    )
     checked_files = [
         path.relative_to(scala_root).as_posix() for path in sources
     ]

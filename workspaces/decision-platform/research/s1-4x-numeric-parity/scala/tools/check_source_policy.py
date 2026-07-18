@@ -7,10 +7,12 @@ import argparse
 import hashlib
 import json
 import re
-import subprocess
 import sys
 from pathlib import Path
 from typing import Any
+
+from source_input_manifest import production_roots
+from source_input_manifest import validated_source_files as collect_sources
 
 
 def sha256(path: Path) -> str:
@@ -119,62 +121,26 @@ def add_matches(
         )
 
 
-def collect_sources(scala_root: Path, manifest: dict[str, Any]) -> tuple[list[Path], list[str]]:
-    files: list[Path] = []
-    violations: list[str] = []
-    for root_name in manifest["roots"]:
+def non_scala_source_violations(
+    scala_root: Path,
+    roots: list[str],
+) -> list[dict[str, Any]]:
+    """production root에 숨은 Java/Kotlin source가 있으면 Scala-only 계약을 거부한다."""
+
+    violations: list[dict[str, Any]] = []
+    for root_name in roots:
         root = scala_root / root_name
-        if root.is_file():
-            if root.is_symlink():
-                violations.append(f"{root_name}:symlink-source")
-            elif root.suffix == ".scala":
-                files.append(root)
-        elif root.is_dir():
-            for candidate in sorted(path for path in root.rglob("*") if path.is_file()):
-                if candidate.is_symlink():
-                    violations.append(
-                        f"{candidate.relative_to(scala_root).as_posix()}:symlink-source"
-                    )
-                elif candidate.suffix == ".scala":
-                    files.append(candidate)
-                elif candidate.suffix in {".java", ".kt", ".kts"}:
-                    violations.append(
-                        f"{candidate.relative_to(scala_root).as_posix()}:non-scala-source"
-                    )
-        else:
-            violations.append(f"{root_name}:missing-source-root")
-    unique = sorted(set(files), key=lambda path: path.relative_to(scala_root).as_posix())
-    return unique, violations
-
-
-def git_source_files(scala_root: Path, roots: list[str]) -> tuple[list[str], list[str]]:
-    """Manifest roots의 tracked+untracked non-ignored Scala 입력을 Git에서 독립 열거한다."""
-
-    completed = subprocess.run(
-        [
-            "git",
-            "ls-files",
-            "--cached",
-            "--others",
-            "--exclude-standard",
-            "--",
-            *roots,
-        ],
-        cwd=scala_root,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    if completed.returncode != 0:
-        return [], ["git-source-enumeration-failed"]
-    files = sorted(
-        {
-            line
-            for line in completed.stdout.splitlines()
-            if line.endswith(".scala")
-        }
-    )
-    return files, []
+        candidates = [root] if root.is_file() else root.rglob("*") if root.is_dir() else []
+        for candidate in candidates:
+            if candidate.is_file() and candidate.suffix in {".java", ".kt", ".kts"}:
+                violations.append(
+                    {
+                        "file": candidate.relative_to(scala_root).as_posix(),
+                        "line": 1,
+                        "rule": "non-scala-source",
+                    }
+                )
+    return violations
 
 
 def audit_file(path: Path, scala_root: Path) -> list[dict[str, Any]]:
@@ -379,33 +345,19 @@ def main() -> int:
     if policy.get("schemaVersion") != "s1.4x-scala-source-policy-v1":
         print("invalid Scala source policy", file=sys.stderr)
         return 1
-    if manifest.get("schemaVersion") != "s1.4x-scala-source-inputs-v1":
-        print("invalid Scala source input manifest", file=sys.stderr)
+    try:
+        files = collect_sources(
+            scala_root,
+            manifest,
+            policy=policy,
+            require_git_source_equality=arguments.require_git_source_equality,
+        )
+        roots = production_roots(policy)
+    except ValueError as error:
+        print(f"Scala source input manifest closure mismatch: {error}", file=sys.stderr)
         return 1
-    expected_roots = [
-        path.removeprefix("scala/")
-        for path in policy.get("productionRoots", [])
-        if isinstance(path, str) and path.startswith("scala/")
-    ]
-    if (
-        manifest.get("roots") != expected_roots
-        or manifest.get("sourceLocalExclusions") != []
-        or manifest.get("generatedSourcesTracked") is not False
-    ):
-        print("Scala source input manifest closure mismatch", file=sys.stderr)
-        return 1
-
-    files, source_set_violations = collect_sources(scala_root, manifest)
     checked_files = [path.relative_to(scala_root).as_posix() for path in files]
-    if arguments.require_git_source_equality:
-        git_files, git_violations = git_source_files(scala_root, manifest["roots"])
-        source_set_violations.extend(git_violations)
-        if checked_files != git_files:
-            source_set_violations.append("tracked-manifest-source-set-mismatch")
-    violations = [
-        {"file": item.split(":", 1)[0], "line": 1, "rule": item.split(":", 1)[1]}
-        for item in source_set_violations
-    ]
+    violations = non_scala_source_violations(scala_root, roots)
     for path in files:
         violations.extend(audit_file(path, scala_root))
     if violations:
