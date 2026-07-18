@@ -216,8 +216,11 @@ def main() -> int:
         "assert-selected-profile.sh",
         "--mode full",
         "S1_4X_SCALA_SELECTED_PROFILE_RESULT",
+        'basename -- "$OUTPUT_DIR"',
+        '"scala-jmh"',
     ):
         assert marker in native_full
+    assert "native_benchmark_block.py" not in native_full
 
     benchmark_invocation = (
         SCALA_ROOT
