@@ -6,11 +6,14 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
+import stat
 import subprocess
 import sys
-from collections.abc import Mapping, Sequence
-from pathlib import Path
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from gate import exclusive_json_write, strict_json_load
@@ -20,6 +23,13 @@ COMMIT = re.compile(r"^[0-9a-f]{40}$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 EVIDENCE_SCHEMA = "s1.4x-final-candidate-audit-evidence-v1"
 LEDGER_SCHEMA = "s1.4x-final-candidate-audit-v1"
+S1_4X_PREFIX = "workspaces/decision-platform/research/s1-4x-numeric-parity"
+SUBJECT_REPORT_ROOT = f"{S1_4X_PREFIX}/reports"
+SUBJECT_REPORT_SUFFIXES = {".json", ".md", ".sha256"}
+SUBJECT_DOCUMENT_PATHS = {
+    f"{S1_4X_PREFIX}/README.md",
+    f"{S1_4X_PREFIX}/integration/README.md",
+}
 FROZEN_SCALA_CLI_SHA256 = (
     "54b93b8401e333095526da5e4853780d5bf37494baa1ba5486e9e643084253d0"
 )
@@ -186,6 +196,15 @@ class FinalAuditError(ValueError):
     """최종 audit evidence 또는 ledger가 fail-closed 계약을 위반했다."""
 
 
+@dataclass(frozen=True)
+class _RegularFileSnapshot:
+    """동일 file descriptor에서 읽고 해시한 변경 불가능한 바이트 snapshot이다."""
+
+    path: Path
+    payload: bytes
+    sha256: str
+
+
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
@@ -208,26 +227,124 @@ def _exact_object(
 def _validate_subject(repository_root: Path, commit: str) -> Path:
     if COMMIT.fullmatch(commit) is None:
         raise FinalAuditError("FINAL_AUDIT_SUBJECT_INVALID")
-    repo = repository_root.resolve(strict=True)
-    completed = subprocess.run(
-        ["git", "rev-parse", "--verify", "HEAD"],
-        cwd=repo,
-        capture_output=True,
-        check=False,
-        text=True,
-        timeout=10,
-    )
-    exists = subprocess.run(
-        ["git", "cat-file", "-e", f"{commit}^{{commit}}"],
-        cwd=repo,
-        capture_output=True,
-        check=False,
-        text=True,
-        timeout=10,
-    )
-    if completed.returncode != 0 or completed.stdout.strip() != commit or exists.returncode != 0:
+    try:
+        repo = repository_root.resolve(strict=True)
+    except OSError as exc:
+        raise FinalAuditError("FINAL_AUDIT_SUBJECT_INVALID") from exc
+
+    def run_git(*arguments: str) -> subprocess.CompletedProcess[bytes]:
+        return subprocess.run(
+            ["git", *arguments],
+            cwd=repo,
+            capture_output=True,
+            check=False,
+            timeout=10,
+        )
+
+    head_result = run_git("rev-parse", "--verify", "HEAD")
+    exists = run_git("cat-file", "-e", f"{commit}^{{commit}}")
+    try:
+        head = head_result.stdout.strip().decode("ascii")
+    except UnicodeDecodeError as exc:
+        raise FinalAuditError("FINAL_AUDIT_SUBJECT_INVALID") from exc
+    if (
+        head_result.returncode != 0
+        or COMMIT.fullmatch(head) is None
+        or exists.returncode != 0
+    ):
         raise FinalAuditError("FINAL_AUDIT_SUBJECT_INVALID")
+
+    ancestor = run_git("merge-base", "--is-ancestor", commit, head)
+    clean = run_git(
+        "status",
+        "--porcelain=v1",
+        "-z",
+        "--untracked-files=all",
+    )
+    if ancestor.returncode != 0 or clean.returncode != 0 or clean.stdout:
+        raise FinalAuditError("FINAL_AUDIT_SUBJECT_INVALID")
+
+    changed = run_git(
+        "diff",
+        "--name-status",
+        "-z",
+        "--no-renames",
+        f"{commit}..{head}",
+        "--",
+    )
+    if changed.returncode != 0:
+        raise FinalAuditError("FINAL_AUDIT_SUBJECT_INVALID")
+    fields = changed.stdout.split(b"\0")
+    if fields[-1] != b"":
+        raise FinalAuditError("FINAL_AUDIT_SUBJECT_INVALID")
+    fields.pop()
+    if len(fields) % 2 != 0:
+        raise FinalAuditError("FINAL_AUDIT_SUBJECT_INVALID")
+    for index in range(0, len(fields), 2):
+        status_value, path_value = fields[index : index + 2]
+        if status_value not in {b"A", b"M"}:
+            raise FinalAuditError("FINAL_AUDIT_SUBJECT_INVALID")
+        try:
+            relative_path = path_value.decode("utf-8", errors="strict")
+        except UnicodeDecodeError as exc:
+            raise FinalAuditError("FINAL_AUDIT_SUBJECT_INVALID") from exc
+        if not _subject_descendant_path_allowed(relative_path):
+            raise FinalAuditError("FINAL_AUDIT_SUBJECT_INVALID")
+        if (
+            _git_tree_entry(run_git, head, relative_path)
+            != (b"100644", b"blob")
+        ):
+            raise FinalAuditError("FINAL_AUDIT_SUBJECT_INVALID")
+        if status_value == b"M" and (
+            _git_tree_entry(run_git, commit, relative_path)
+            != (b"100644", b"blob")
+        ):
+            raise FinalAuditError("FINAL_AUDIT_SUBJECT_INVALID")
     return repo
+
+
+def _subject_descendant_path_allowed(path_value: str) -> bool:
+    if path_value in SUBJECT_DOCUMENT_PATHS:
+        return True
+    if (
+        not path_value
+        or "\\" in path_value
+        or any(ord(character) < 32 or ord(character) == 127 for character in path_value)
+    ):
+        return False
+    path = PurePosixPath(path_value)
+    if path.is_absolute() or ".." in path.parts or path.as_posix() != path_value:
+        return False
+    report_root = PurePosixPath(SUBJECT_REPORT_ROOT)
+    try:
+        report_relative = path.relative_to(report_root)
+    except ValueError:
+        return False
+    return (
+        bool(report_relative.parts)
+        and path.suffix in SUBJECT_REPORT_SUFFIXES
+    )
+
+
+def _git_tree_entry(
+    run_git: Callable[..., subprocess.CompletedProcess[bytes]],
+    revision: str,
+    path_value: str,
+) -> tuple[bytes, bytes] | None:
+    result = run_git("ls-tree", "-z", revision, "--", path_value)
+    entries = result.stdout.split(b"\0")
+    if (
+        result.returncode != 0
+        or entries[-1] != b""
+        or len(entries) != 2
+        or b"\t" not in entries[0]
+    ):
+        return None
+    metadata, actual_path = entries[0].split(b"\t", 1)
+    fields = metadata.split()
+    if len(fields) != 3 or actual_path != path_value.encode("utf-8"):
+        return None
+    return fields[0], fields[1]
 
 
 def _has_symlink_component(root: Path, relative: Path) -> bool:
@@ -269,29 +386,146 @@ def _portable_regular_file(
     root: Path,
     path_value: Any,
     *,
-    expected_sha256: Any,
+    expected_sha256: Any | None,
     error: str,
-) -> Path:
+) -> _RegularFileSnapshot:
+    relative = _portable_relative_file(path_value, error=error)
     if (
-        not isinstance(path_value, str)
-        or not path_value
-        or Path(path_value).is_absolute()
-        or ".." in Path(path_value).parts
-        or not isinstance(expected_sha256, str)
-        or SHA256.fullmatch(expected_sha256) is None
+        expected_sha256 is not None
+        and (
+            not isinstance(expected_sha256, str)
+            or SHA256.fullmatch(expected_sha256) is None
+        )
     ):
         raise FinalAuditError(error)
-    relative = Path(path_value)
-    path = root / relative
+    try:
+        resolved_root = root.resolve(strict=True)
+    except OSError as exc:
+        raise FinalAuditError(error) from exc
+    path = resolved_root / relative
     if _has_symlink_component(root, relative):
         raise FinalAuditError(error)
     try:
-        path.resolve(strict=True).relative_to(root.resolve(strict=True))
+        path.resolve(strict=True).relative_to(resolved_root)
     except (OSError, ValueError) as exc:
         raise FinalAuditError(error) from exc
-    if path.is_symlink() or not path.is_file() or _sha256(path) != expected_sha256:
+    snapshot = _read_regular_file_snapshot(
+        resolved_root,
+        relative,
+        error=error,
+    )
+    # 읽은 뒤에도 같은 portable lexical path가 symlink 없이 root 아래를 가리켜야 한다.
+    if (
+        _portable_relative_file(path_value, error=error) != relative
+        or _has_symlink_component(resolved_root, relative)
+    ):
         raise FinalAuditError(error)
-    return path
+    try:
+        path.resolve(strict=True).relative_to(resolved_root)
+    except (OSError, ValueError) as exc:
+        raise FinalAuditError(error) from exc
+    if expected_sha256 is not None and snapshot.sha256 != expected_sha256:
+        raise FinalAuditError(error)
+    return snapshot
+
+
+def _portable_relative_file(path_value: Any, *, error: str) -> Path:
+    if (
+        not isinstance(path_value, str)
+        or not path_value
+        or "\\" in path_value
+        or any(ord(character) < 32 or ord(character) == 127 for character in path_value)
+    ):
+        raise FinalAuditError(error)
+    relative = Path(path_value)
+    if (
+        relative.is_absolute()
+        or ".." in relative.parts
+        or not relative.parts
+        or relative.as_posix() != path_value
+    ):
+        raise FinalAuditError(error)
+    return relative
+
+
+def _read_regular_file_snapshot(
+    root: Path,
+    relative: Path,
+    *,
+    error: str,
+) -> _RegularFileSnapshot:
+    no_follow = getattr(os, "O_NOFOLLOW", None)
+    if no_follow is None:
+        raise FinalAuditError(error)
+    close_on_exec = getattr(os, "O_CLOEXEC", 0)
+    directory_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | no_follow
+        | close_on_exec
+    )
+    file_flags = os.O_RDONLY | no_follow | close_on_exec
+    directory_fds: list[int] = []
+    file_fd: int | None = None
+    try:
+        directory_fd = os.open(root, directory_flags)
+        directory_fds.append(directory_fd)
+        for component in relative.parts[:-1]:
+            directory_fd = os.open(
+                component,
+                directory_flags,
+                dir_fd=directory_fd,
+            )
+            directory_fds.append(directory_fd)
+        file_fd = os.open(
+            relative.name,
+            file_flags,
+            dir_fd=directory_fd,
+        )
+        before = os.fstat(file_fd)
+        if not stat.S_ISREG(before.st_mode):
+            raise FinalAuditError(error)
+        blocks: list[bytes] = []
+        while block := os.read(file_fd, 1024 * 1024):
+            blocks.append(block)
+        payload = b"".join(blocks)
+        after = os.fstat(file_fd)
+        current = os.stat(
+            relative.name,
+            dir_fd=directory_fd,
+            follow_symlinks=False,
+        )
+        if (
+            _stable_file_identity(before) != _stable_file_identity(after)
+            or _stable_file_identity(after) != _stable_file_identity(current)
+            or len(payload) != after.st_size
+        ):
+            raise FinalAuditError(error)
+    except FinalAuditError:
+        raise
+    except OSError as exc:
+        raise FinalAuditError(error) from exc
+    finally:
+        if file_fd is not None:
+            os.close(file_fd)
+        for directory_fd in reversed(directory_fds):
+            os.close(directory_fd)
+    return _RegularFileSnapshot(
+        path=root / relative,
+        payload=payload,
+        sha256=hashlib.sha256(payload).hexdigest(),
+    )
+
+
+def _stable_file_identity(value: os.stat_result) -> tuple[int, ...]:
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_mode,
+        value.st_size,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+    )
 
 
 def _sha256_value(value: Any) -> bool:
@@ -688,7 +922,7 @@ def _validate_rubric_source(
         )
         if (
             str(artifact["path"]) in reviewed_paths
-            or reviewed.resolve(strict=True) == source_path.resolve(strict=True)
+            or reviewed.path == source_path
         ):
             raise FinalAuditError(error)
         reviewed_paths.add(str(artifact["path"]))
@@ -791,15 +1025,15 @@ def _validate_source_artifacts(
             or artifact["path"] in paths
         ):
             raise FinalAuditError(error)
-        source_path = _portable_regular_file(
+        source_snapshot = _portable_regular_file(
             audit_root,
             artifact["path"],
             expected_sha256=artifact["sha256"],
             error=error,
         )
-        if source_path.resolve(strict=True) == envelope_path.resolve(strict=True):
+        if source_snapshot.path == envelope_path:
             raise FinalAuditError(error)
-        source = strict_json_load(source_path)
+        source = strict_json_load(source_snapshot.payload)
         if (
             not isinstance(source, Mapping)
             or source.get("schemaVersion") != expected_schema
@@ -812,7 +1046,7 @@ def _validate_source_artifacts(
             role=expected_role,
             benchmark_subject_commit=benchmark_subject_commit,
             audit_root=audit_root,
-            source_path=source_path,
+            source_path=source_snapshot.path,
             error=error,
         )
         paths.add(str(artifact["path"]))
@@ -821,7 +1055,7 @@ def _validate_source_artifacts(
 
 
 def _validate_evidence_envelope(
-    path: Path,
+    snapshot: _RegularFileSnapshot,
     *,
     audit_root: Path,
     candidate: str,
@@ -830,7 +1064,7 @@ def _validate_evidence_envelope(
 ) -> dict[str, Any]:
     error = f"FINAL_AUDIT_EVIDENCE_INVALID:{candidate}:{evidence_id}"
     envelope = _exact_object(
-        strict_json_load(path),
+        strict_json_load(snapshot.payload),
         {
             "schemaVersion",
             "candidate",
@@ -857,7 +1091,7 @@ def _validate_evidence_envelope(
         candidate=candidate,
         evidence_id=evidence_id,
         benchmark_subject_commit=benchmark_subject_commit,
-        envelope_path=path,
+        envelope_path=snapshot.path,
         error=error,
     )
     return envelope
@@ -905,13 +1139,14 @@ def generate_final_candidate_audit(
         for evidence_id in EXPECTED_EVIDENCE_CLAIMS:
             envelope_path = evidence / candidate / f"{evidence_id}.json"
             envelope_relative = envelope_path.relative_to(audit_root)
-            if (
-                _has_symlink_component(audit_root, envelope_relative)
-                or not envelope_path.is_file()
-            ):
-                raise FinalAuditError(f"FINAL_AUDIT_EVIDENCE_MISSING:{candidate}:{evidence_id}")
+            envelope_snapshot = _portable_regular_file(
+                audit_root,
+                str(envelope_relative),
+                expected_sha256=None,
+                error=f"FINAL_AUDIT_EVIDENCE_MISSING:{candidate}:{evidence_id}",
+            )
             _validate_evidence_envelope(
-                envelope_path,
+                envelope_snapshot,
                 audit_root=audit_root,
                 candidate=candidate,
                 evidence_id=evidence_id,
@@ -921,7 +1156,7 @@ def generate_final_candidate_audit(
                 {
                     "evidenceId": evidence_id,
                     "path": str(envelope_path.relative_to(audit_root)),
-                    "sha256": _sha256(envelope_path),
+                    "sha256": envelope_snapshot.sha256,
                     "schemaVersion": EVIDENCE_SCHEMA,
                     "status": "PASS",
                 }
@@ -969,14 +1204,18 @@ def validate_final_candidate_audit(
     """Ledger와 모든 portable source artifact를 다시 읽어 고정 점수만 도출한다."""
 
     _validate_subject(repository_root, benchmark_subject_commit)
-    if ledger_path.is_symlink():
-        raise FinalAuditError("FINAL_AUDIT_LEDGER_INVALID")
-    ledger = ledger_path.resolve(strict=True)
-    if not ledger.is_file():
-        raise FinalAuditError("FINAL_AUDIT_LEDGER_INVALID")
-    audit_root = ledger.parent.resolve(strict=True)
+    try:
+        audit_root = ledger_path.parent.resolve(strict=True)
+    except OSError as exc:
+        raise FinalAuditError("FINAL_AUDIT_LEDGER_INVALID") from exc
+    ledger_snapshot = _portable_regular_file(
+        audit_root,
+        ledger_path.name,
+        expected_sha256=None,
+        error="FINAL_AUDIT_LEDGER_INVALID",
+    )
     document = _exact_object(
-        strict_json_load(ledger),
+        strict_json_load(ledger_snapshot.payload),
         {
             "schemaVersion",
             "benchmarkSubjectCommit",
@@ -1050,18 +1289,20 @@ def validate_final_candidate_audit(
                 or evidence_entry["status"] != "PASS"
             ):
                 raise FinalAuditError(error)
-            envelope_path = _portable_regular_file(
+            envelope_snapshot = _portable_regular_file(
                 audit_root,
                 evidence_entry["path"],
                 expected_sha256=evidence_entry["sha256"],
                 error=error,
             )
             try:
-                envelope_path.resolve(strict=True).relative_to(evidence_root.resolve(strict=True))
+                envelope_snapshot.path.relative_to(
+                    evidence_root.resolve(strict=True)
+                )
             except ValueError as exc:
                 raise FinalAuditError(error) from exc
             _validate_evidence_envelope(
-                envelope_path,
+                envelope_snapshot,
                 audit_root=audit_root,
                 candidate=candidate,
                 evidence_id=expected_id,
@@ -1083,7 +1324,7 @@ def validate_final_candidate_audit(
             "integrationFitPoints": 5.0,
             "evidenceSha256": evidence_sha256,
         }
-    return document, derived, _sha256(ledger)
+    return document, derived, ledger_snapshot.sha256
 
 
 def _parser() -> argparse.ArgumentParser:
