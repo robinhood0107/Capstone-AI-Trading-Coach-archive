@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import signal
-import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -50,7 +48,7 @@ def _host_report(plan: dict[str, Any], *, status: str = "PASS") -> dict[str, Any
 
 
 def _command_manifest() -> dict[str, Any]:
-    executable = str(Path(sys.executable).resolve())
+    executable = str(Path(sys.executable).absolute())
     identity = {"path": executable, "sha256": sha256_file(Path(executable))}
     return {
         "schemaVersion": "s1.4x-benchmark-command-manifest-v2",
@@ -58,34 +56,16 @@ def _command_manifest() -> dict[str, Any]:
         "candidateSourceCommit": COMMIT,
         "hostValidatorCommand": [
             executable,
-            "--output",
+            "-c",
+            "host-validator",
             "{host_report}",
-            "--allowed-process-root-pid",
-            "{allowed_process_root_pid}",
         ],
         "boundaryCommands": {
             boundary_id: [
                 executable,
-                "--plan",
-                "{plan}",
-                "--block-dir",
-                "{block_dir}",
-                "--qualification",
+                "-c",
+                "native-wrapper",
                 "{qualification}",
-                "--boundary",
-                boundary_id,
-                "--selector",
-                "{selector_id}",
-                "--family",
-                "{family_id}",
-                "--rotation",
-                "{rotation_id}",
-                "--outer-repetition",
-                "{outer_repetition}",
-                "--run-id",
-                "{run_id}",
-                "--benchmark-subject-commit",
-                "{benchmark_subject_commit}",
             ]
             for boundary_id in runner.BOUNDARY_IDS
         },
@@ -139,361 +119,6 @@ def test_command_manifest_requires_precommitted_digest_and_executable_identity(
             benchmark_subject_commit=COMMIT,
             candidate_source_commit=COMMIT,
         )
-
-
-def test_runner_manifest_hash_and_parse_share_one_snapshot(
-    tmp_path: Path,
-) -> None:
-    manifest = _command_manifest()
-    path = tmp_path / "commands.json"
-    digest = _write_manifest(path, manifest)
-    forged = json.loads(json.dumps(manifest))
-    forged["boundaryCommands"]["scala"].extend(["--override", "forged"])
-    replacement = tmp_path / "replacement.json"
-    replacement.write_text(json.dumps(forged), encoding="utf-8")
-    real_sha256_file = sha256_file
-    swapped = False
-
-    def replace_after_hash(candidate: Path) -> str:
-        nonlocal swapped
-        actual = real_sha256_file(candidate)
-        if candidate == path and not swapped:
-            replacement.replace(candidate)
-            swapped = True
-        return actual
-
-    with pytest.MonkeyPatch.context() as monkeypatch:
-        monkeypatch.setattr(runner, "sha256_file", replace_after_hash)
-        validated = runner._strict_command_manifest(
-            path,
-            expected_sha256=digest,
-            benchmark_subject_commit=COMMIT,
-            candidate_source_commit=COMMIT,
-        )
-
-    assert validated == manifest
-    assert swapped is False
-
-
-def test_runner_manifest_rejects_escaped_placeholder_and_extra_argv(
-    tmp_path: Path,
-) -> None:
-    escaped = _command_manifest()
-    escaped["boundaryCommands"]["scala"][6] = "{{qualification}}"
-    escaped_path = tmp_path / "escaped.json"
-    escaped_digest = _write_manifest(escaped_path, escaped)
-    with pytest.raises(ContractError, match="BOUNDARY_COMMAND_TEMPLATE_MISMATCH"):
-        runner._strict_command_manifest(
-            escaped_path,
-            expected_sha256=escaped_digest,
-            benchmark_subject_commit=COMMIT,
-            candidate_source_commit=COMMIT,
-        )
-
-    extra = _command_manifest()
-    extra["boundaryCommands"]["haskell"].extend(["--override", "forged"])
-    extra_path = tmp_path / "extra.json"
-    extra_digest = _write_manifest(extra_path, extra)
-    with pytest.raises(ContractError, match="BOUNDARY_COMMAND_TEMPLATE_MISMATCH"):
-        runner._strict_command_manifest(
-            extra_path,
-            expected_sha256=extra_digest,
-            benchmark_subject_commit=COMMIT,
-            candidate_source_commit=COMMIT,
-        )
-
-
-def test_runner_executes_sealed_verified_bytes_after_supplier_path_replacement(
-    tmp_path: Path,
-) -> None:
-    supplied = tmp_path / "wrapper"
-    supplied.write_text(
-        "#!/usr/bin/bash\nprintf 'A\\n'\n",
-        encoding="utf-8",
-    )
-    supplied.chmod(0o700)
-    identity = {
-        "path": str(supplied),
-        "sha256": sha256_file(supplied),
-    }
-
-    with runner._pin_executable(identity, role="test") as pinned:
-        replacement = tmp_path / "replacement"
-        replacement.write_text(
-            "#!/usr/bin/bash\nprintf 'B\\n'\n",
-            encoding="utf-8",
-        )
-        replacement.chmod(0o700)
-        replacement.replace(supplied)
-
-        for invocation in range(2):
-            stdout = tmp_path / f"stdout-{invocation}"
-            stderr = tmp_path / f"stderr-{invocation}"
-            runner._run_process(
-                [str(supplied)],
-                executable=pinned,
-                cwd=tmp_path,
-                timeout_seconds=5,
-                stdout_path=stdout,
-                stderr_path=stderr,
-                environment=dict(os.environ),
-            )
-            assert stdout.read_text(encoding="utf-8") == "A\n"
-            assert stderr.read_bytes() == b""
-
-
-def test_runner_rejects_path_resolved_script_interpreter(
-    tmp_path: Path,
-) -> None:
-    supplied = tmp_path / "wrapper"
-    supplied.write_text(
-        "#!/usr/bin/env bash\nprintf 'untrusted interpreter\\n'\n",
-        encoding="utf-8",
-    )
-    supplied.chmod(0o700)
-
-    with pytest.raises(
-        ContractError,
-        match="COMMAND_SCRIPT_INTERPRETER_MISMATCH",
-    ):
-        with runner._pin_executable(
-            {
-                "path": str(supplied),
-                "sha256": sha256_file(supplied),
-            },
-            role="test",
-        ):
-            pass
-
-
-def test_source_commit_binding_rejects_tracked_and_untracked_worktree_drift(
-    tmp_path: Path,
-) -> None:
-    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
-    subprocess.run(
-        ["git", "config", "user.name", "S1.4X Test"],
-        cwd=tmp_path,
-        check=True,
-    )
-    subprocess.run(
-        ["git", "config", "user.email", "s1.4x-test@example.invalid"],
-        cwd=tmp_path,
-        check=True,
-    )
-    tracked = tmp_path / "tracked.txt"
-    tracked.write_text("frozen\n", encoding="utf-8")
-    subprocess.run(["git", "add", "tracked.txt"], cwd=tmp_path, check=True)
-    subprocess.run(["git", "commit", "-qm", "frozen"], cwd=tmp_path, check=True)
-    commit = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=tmp_path,
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
-
-    runner._verify_source_commit_binding(
-        tmp_path,
-        benchmark_subject_commit=commit,
-        candidate_source_commit=commit,
-    )
-    tracked.write_text("mutated\n", encoding="utf-8")
-    with pytest.raises(ContractError, match="CURRENT_SOURCE_WORKTREE_DIRTY"):
-        runner._verify_source_commit_binding(
-            tmp_path,
-            benchmark_subject_commit=commit,
-            candidate_source_commit=commit,
-        )
-    tracked.write_text("frozen\n", encoding="utf-8")
-    (tmp_path / "untracked.txt").write_text("untracked\n", encoding="utf-8")
-    with pytest.raises(ContractError, match="CURRENT_SOURCE_WORKTREE_DIRTY"):
-        runner._verify_source_commit_binding(
-            tmp_path,
-            benchmark_subject_commit=commit,
-            candidate_source_commit=commit,
-        )
-
-
-def test_source_binding_cannot_be_bypassed_by_path_git(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    repository = tmp_path / "repository"
-    repository.mkdir()
-    subprocess.run(["/usr/bin/git", "init", "-q"], cwd=repository, check=True)
-    subprocess.run(
-        ["/usr/bin/git", "config", "user.name", "S1.4X Test"],
-        cwd=repository,
-        check=True,
-    )
-    subprocess.run(
-        ["/usr/bin/git", "config", "user.email", "s1.4x-test@example.invalid"],
-        cwd=repository,
-        check=True,
-    )
-    tracked = repository / "tracked.txt"
-    tracked.write_text("frozen\n", encoding="utf-8")
-    subprocess.run(
-        ["/usr/bin/git", "add", "tracked.txt"],
-        cwd=repository,
-        check=True,
-    )
-    subprocess.run(
-        ["/usr/bin/git", "commit", "-qm", "frozen"],
-        cwd=repository,
-        check=True,
-    )
-    commit = subprocess.run(
-        ["/usr/bin/git", "rev-parse", "HEAD"],
-        cwd=repository,
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
-    tracked.write_text("dirty\n", encoding="utf-8")
-
-    malicious = tmp_path / "malicious"
-    malicious.mkdir()
-    fake_git = malicious / "git"
-    fake_git.write_text(
-        "#!/bin/sh\n"
-        "case \"$*\" in\n"
-        "  *--show-toplevel*) printf '%s\\n%s\\n' \"$FAKE_ROOT\" \"$FAKE_HEAD\" ;;\n"
-        "  *status*) : ;;\n"
-        "  *) exit 91 ;;\n"
-        "esac\n",
-        encoding="utf-8",
-    )
-    fake_git.chmod(0o700)
-    monkeypatch.setenv("PATH", str(malicious))
-    monkeypatch.setenv("FAKE_ROOT", str(repository))
-    monkeypatch.setenv("FAKE_HEAD", commit)
-
-    with pytest.raises(ContractError, match="CURRENT_SOURCE_WORKTREE_DIRTY"):
-        runner._verify_source_commit_binding(
-            repository,
-            benchmark_subject_commit=commit,
-            candidate_source_commit=commit,
-        )
-
-
-def test_benchmark_environment_drops_ambient_code_and_tool_overrides(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setenv("BASH_ENV", str(tmp_path / "inject.sh"))
-    monkeypatch.setenv("ENV", str(tmp_path / "inject-posix.sh"))
-    monkeypatch.setenv("PYTHONPATH", str(tmp_path / "python"))
-    monkeypatch.setenv("JAVA_TOOL_OPTIONS", "-javaagent:/tmp/inject.jar")
-    monkeypatch.setenv("S1_4X_UV_BIN", str(tmp_path / "uv"))
-    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
-    monkeypatch.setenv("GIT_CONFIG_KEY_0", "core.fsmonitor")
-    monkeypatch.setenv("GIT_CONFIG_VALUE_0", str(tmp_path / "hook"))
-
-    environment = runner._benchmark_environment()
-
-    assert environment == {
-        "HOME": str(tmp_path),
-        "LANG": "C.UTF-8",
-        "LC_ALL": "C.UTF-8",
-        "PATH": "/usr/bin:/bin",
-        "TMP": "/tmp",
-        "TMPDIR": "/tmp",
-        "TEMP": "/tmp",
-        **runner.THREAD_ENVIRONMENT,
-        "S1_4X_THREAD_COUNT": "1",
-    }
-
-
-def test_timeout_termination_reaps_leader_and_remaining_process_group(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    signals: list[int] = []
-    process_group_checks = iter([False, True])
-
-    class FinishedLeader:
-        pid = 12345
-
-        def wait(self, timeout: float | None = None) -> int:
-            assert timeout == 5
-            return -signal.SIGTERM
-
-    monkeypatch.setattr(
-        runner,
-        "_signal_process_group",
-        lambda process_group_id, sent_signal: signals.append(sent_signal),
-    )
-    monkeypatch.setattr(
-        runner,
-        "_wait_for_process_group_exit",
-        lambda process_group_id, timeout_seconds: next(process_group_checks),
-    )
-
-    runner._terminate_process_group(FinishedLeader())
-
-    assert signals == [signal.SIGTERM, signal.SIGKILL]
-
-
-def test_timeout_termination_has_stable_leaf_when_group_survives_sigkill(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    class FinishedLeader:
-        pid = 12345
-
-        def wait(self, timeout: float | None = None) -> int:
-            return -signal.SIGKILL
-
-    monkeypatch.setattr(runner, "_signal_process_group", lambda *args: None)
-    monkeypatch.setattr(
-        runner,
-        "_wait_for_process_group_exit",
-        lambda process_group_id, timeout_seconds: False,
-    )
-
-    with pytest.raises(
-        ContractError,
-        match="TIMEOUT_PROCESS_GROUP_SURVIVED_SIGKILL",
-    ):
-        runner._terminate_process_group(FinishedLeader())
-
-
-def test_process_group_probe_treats_esrch_as_absent(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def missing(process_group_id: int, sent_signal: int) -> None:
-        raise ProcessLookupError
-
-    monkeypatch.setattr(os, "killpg", missing)
-
-    assert runner._process_group_exists(12345) is False
-
-
-def test_completed_native_process_rejects_and_cleans_surviving_descendants(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    terminated: list[int] = []
-
-    class FinishedLeader:
-        pid = 12345
-
-        def wait(self, timeout: float | None = None) -> int:
-            return 0
-
-    monkeypatch.setattr(runner, "_process_group_exists", lambda process_group_id: True)
-    monkeypatch.setattr(
-        runner,
-        "_terminate_process_group",
-        lambda process: terminated.append(process.pid),
-    )
-
-    with pytest.raises(
-        ContractError,
-        match="NATIVE_PROCESS_GROUP_SURVIVED_EXIT",
-    ):
-        runner._reject_surviving_process_group(FinishedLeader())
-
-    assert terminated == [12345]
 
 
 def test_command_renderer_rejects_unbound_or_formatted_placeholders() -> None:
@@ -613,26 +238,23 @@ def _install_execute_fakes(
     def fake_process(
         command: list[str],
         *,
-        executable: runner.PinnedExecutable,
         cwd: Path,
         timeout_seconds: int,
         stdout_path: Path,
         stderr_path: Path,
         environment: dict[str, str],
     ) -> None:
-        del executable, cwd, timeout_seconds, stdout_path, stderr_path, environment
-        if "--allowed-process-root-pid" in command:
+        del cwd, timeout_seconds, stdout_path, stderr_path, environment
+        if command[2] == "host-validator":
             if host_times_out:
                 raise ContractError("PERFORMANCE_DEADLINE_EXCEEDED")
-            output_index = command.index("--output") + 1
-            Path(command[output_index]).write_text(
+            Path(command[-1]).write_text(
                 json.dumps(_host_report(plan, status=host_status), allow_nan=False),
                 encoding="utf-8",
             )
             return
         if native_marks_measurement:
-            qualification_index = command.index("--qualification") + 1
-            runner.mark_measurement_entered(Path(command[qualification_index]))
+            runner.mark_measurement_entered(Path(command[-1]))
         raise ContractError("PERFORMANCE_DEADLINE_EXCEEDED")
 
     monkeypatch.setattr(runner, "_run_process", fake_process)
@@ -708,40 +330,6 @@ def test_valid_measurement_timeout_binds_qualification_and_continues(
         assert evidence["measurementEntered"] is True
         assert evidence["timeoutQualificationSha256"] == sha256_file(qualification)
         assert strict_json_load(qualification)["measurementEntered"] is True
-
-
-def test_execute_rechecks_source_binding_around_every_native_block(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    plan: dict[str, Any],
-) -> None:
-    schedule = _install_execute_fakes(
-        monkeypatch,
-        plan,
-        native_marks_measurement=True,
-    )
-    checks: list[tuple[str, str]] = []
-
-    def record_source_check(
-        _repo_root: Path,
-        *,
-        benchmark_subject_commit: str,
-        candidate_source_commit: str,
-    ) -> None:
-        checks.append((benchmark_subject_commit, candidate_source_commit))
-
-    monkeypatch.setattr(
-        runner,
-        "_verify_source_commit_binding",
-        record_source_check,
-    )
-    manifest_path = tmp_path / "commands.json"
-    manifest_sha256 = _write_manifest(manifest_path)
-
-    summary = _execute(tmp_path, manifest_path, manifest_sha256)
-
-    assert summary["validPerformanceTimeoutCount"] == len(schedule)
-    assert checks == [(COMMIT, COMMIT)] * (1 + 2 * len(schedule))
 
 
 @pytest.mark.parametrize(

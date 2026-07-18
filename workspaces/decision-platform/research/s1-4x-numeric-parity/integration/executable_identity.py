@@ -1,4 +1,4 @@
-"""Benchmark wrapper path와 실제 실행 바이트를 fail-closed로 결속한다."""
+"""Gate 2 wrapper path와 실제 실행 바이트를 fail-closed로 결속한다."""
 
 from __future__ import annotations
 
