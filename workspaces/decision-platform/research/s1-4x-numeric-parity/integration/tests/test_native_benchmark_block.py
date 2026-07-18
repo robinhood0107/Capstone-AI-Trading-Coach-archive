@@ -6,6 +6,7 @@ import copy
 import hashlib
 import json
 import math
+import os
 import statistics
 import sys
 import tempfile
@@ -23,6 +24,7 @@ sys.path.insert(0, str(INTEGRATION))
 sys.path.insert(0, str(BENCHMARKS))
 
 import native_benchmark_block as native_block_module  # noqa: E402
+from executable_identity import inspect_regular_file_path  # noqa: E402
 from gate import GateError, strict_json_load  # noqa: E402
 from mark_benchmark_measurement import main as mark_measurement_main  # noqa: E402
 from native_benchmark_block import (  # noqa: E402
@@ -47,6 +49,42 @@ def _canonical_sha256(value: Any) -> str:
 
 
 class NativeBenchmarkBlockTests(TestCase):
+    def test_native_json_snapshot_keeps_digest_and_payload_on_one_descriptor(
+        self,
+    ) -> None:
+        temporary = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        real_inspector = inspect_regular_file_path
+
+        for role in ("criterion-raw", "execution-receipt"):
+            with self.subTest(role=role):
+                source = temporary / f"{role}.json"
+                replacement = temporary / f"{role}.replacement.json"
+                original = {"identity": "original", "role": role}
+                swapped = {"identity": "swapped", "role": role}
+                source.write_text(json.dumps(original), encoding="utf-8")
+                original_sha256 = hashlib.sha256(source.read_bytes()).hexdigest()
+                replacement.write_text(json.dumps(swapped), encoding="utf-8")
+
+                def inspect_then_swap(path: Path, *, role: str) -> Any:
+                    snapshot = real_inspector(path, role=role)
+                    os.replace(replacement, source)
+                    return snapshot
+
+                with patch.object(
+                    native_block_module,
+                    "inspect_regular_file_path",
+                    side_effect=inspect_then_swap,
+                ):
+                    snapshot, document = native_block_module._snapshot_json_file(
+                        source,
+                        role=role,
+                        error=f"{role.upper()}_SNAPSHOT_INVALID",
+                    )
+
+                self.assertEqual(snapshot.sha256, original_sha256)
+                self.assertEqual(document, original)
+                self.assertEqual(strict_json_load(source), swapped)
+
     def test_haskell_native_batch_seconds_are_normalized_from_frozen_ops(self) -> None:
         plan = strict_json_load(PLAN)
         selector = next(
@@ -167,16 +205,69 @@ class NativeBenchmarkBlockTests(TestCase):
         )
         input_ledger = temporary / "input-ledger.json"
         input_ledger.write_text('{"status":"fixture"}', encoding="utf-8")
-        benchmark_executable = temporary / "criterion-benchmark"
+        benchmark_executable = (
+            haskell_root
+            / ".stack-work/dist/x86_64-linux/ghc-9.10.3/build/"
+            "s1-4x-haskell-benchmark/s1-4x-haskell-benchmark"
+        )
+        benchmark_executable.parent.mkdir(parents=True)
         benchmark_executable.write_bytes(b"criterion executable fixture")
+        benchmark_executable.chmod(0o700)
         ghcup = temporary / "ghcup"
         ghcup.write_bytes(b"ghcup fixture")
         stack = temporary / "stack"
         stack.write_bytes(b"stack fixture")
+        authoritative_ghc = temporary / "ghc-9.10.3"
+        authoritative_ghc.write_bytes(b"authoritative ghc fixture")
+        authoritative_ghc.chmod(0o700)
+        authoritative_ghc_sha256 = hashlib.sha256(
+            authoritative_ghc.read_bytes()
+        ).hexdigest()
+        self.enterContext(
+            patch.object(
+                native_block_module,
+                "FROZEN_GHC_910_SHA256",
+                authoritative_ghc_sha256,
+            )
+        )
+        for candidate_root in ("src", "app", "test", "benchmark"):
+            (haskell_root / candidate_root).mkdir()
+        candidate_sources = {
+            "app/Main.hs": "module Main where\nmain = pure ()\n",
+            "benchmark/Main.hs": "module BenchmarkMain where\nbenchmark = 1\n",
+            "src/Core.hs": "module Core where\nvalue = 1\n",
+            "test/Spec.hs": "module Spec where\nspec = True\n",
+        }
+        for relative_path, payload in candidate_sources.items():
+            (haskell_root / relative_path).write_text(payload, encoding="utf-8")
+        package_yaml = haskell_root / "package.yaml"
+        package_yaml.write_text("name: native-evidence-fixture\n", encoding="utf-8")
+        cabal_file = haskell_root / "s1-4x-haskell.cabal"
+        cabal_file.write_text("name: native-evidence-fixture\n", encoding="utf-8")
         stack_yaml = haskell_root / "stack.yaml"
         stack_yaml.write_text("resolver: ghc-9.10.3\n", encoding="utf-8")
+        stack_lock = haskell_root / "stack.yaml.lock"
+        stack_lock.write_text("snapshots: []\npackages: []\n", encoding="utf-8")
         selected_options = ["-O0", "-fasm"]
         effective_options_sha256 = _canonical_sha256(selected_options)
+        source_tree_paths = [
+            *candidate_sources,
+            "package.yaml",
+            "s1-4x-haskell.cabal",
+            "stack.yaml",
+            "stack.yaml.lock",
+        ]
+        source_tree_sha256 = _canonical_sha256(
+            [
+                {
+                    "path": relative_path,
+                    "sha256": hashlib.sha256(
+                        (haskell_root / relative_path).read_bytes()
+                    ).hexdigest(),
+                }
+                for relative_path in sorted(source_tree_paths, key=str.encode)
+            ]
+        )
         selected_profile = haskell_root / "selected-profile.v1.json"
         selected_profile.write_text(
             json.dumps(
@@ -185,8 +276,8 @@ class NativeBenchmarkBlockTests(TestCase):
                     "profileId": "baseline-o0-fasm",
                     "ghcOptions": selected_options,
                     "compilerVersion": "9.10.3",
-                    "compilerSha256": native_block_module.FROZEN_GHC_910_SHA256,
-                    "sourceTreeSha256": "5" * 64,
+                    "compilerSha256": authoritative_ghc_sha256,
+                    "sourceTreeSha256": source_tree_sha256,
                     "optionsSha256": effective_options_sha256,
                     "fullCorrectnessSha256": "6" * 64,
                     "qualificationPlanSha256": hashlib.sha256(
@@ -207,11 +298,27 @@ class NativeBenchmarkBlockTests(TestCase):
             encoding="utf-8",
         )
         source_input_manifest = haskell_root / "source-inputs.v1.json"
+        source_manifest_paths = [
+            *candidate_sources,
+            "package.yaml",
+            "selected-profile.v1.json",
+        ]
         source_manifest_files = {
-            "selected-profile.v1.json": {
-                "role": "configuration",
-                "sha256": hashlib.sha256(selected_profile.read_bytes()).hexdigest(),
+            relative_path: {
+                "role": (
+                    "configuration"
+                    if relative_path in {"package.yaml", "selected-profile.v1.json"}
+                    else "test"
+                    if relative_path.startswith("test/")
+                    else "benchmark"
+                    if relative_path.startswith("benchmark/")
+                    else "main"
+                ),
+                "sha256": hashlib.sha256(
+                    (haskell_root / relative_path).read_bytes()
+                ).hexdigest(),
             }
+            for relative_path in sorted(source_manifest_paths, key=str.encode)
         }
         source_input_manifest.write_text(
             json.dumps(
@@ -228,9 +335,9 @@ class NativeBenchmarkBlockTests(TestCase):
                         "profileRun": "files",
                     },
                     "canonicalManifestSha256": hashlib.sha256(
-                        (
-                            f"{source_manifest_files['selected-profile.v1.json']['sha256']}"
-                            "  selected-profile.v1.json\n"
+                        "".join(
+                            f"{source_manifest_files[path]['sha256']}  {path}\n"
+                            for path in sorted(source_manifest_files, key=str.encode)
                         ).encode()
                     ).hexdigest(),
                 },
@@ -380,6 +487,22 @@ class NativeBenchmarkBlockTests(TestCase):
         )
         selector_id = selector["selectorId"]
         expected_case_ids = selector["expectedCaseIds"]
+        runtime_identity = temporary / "benchmark-runtime-identity.json"
+        benchmark_executable_sha256 = hashlib.sha256(
+            benchmark_executable.read_bytes()
+        ).hexdigest()
+        runtime_identity_document = {
+            "schemaVersion": "s1.4x-haskell-benchmark-runtime-identity-v1",
+            "boundaryId": "haskell",
+            "selectorId": selector_id,
+            "executedBenchmarkPath": str(benchmark_executable.resolve()),
+            "executedBenchmarkSha256": benchmark_executable_sha256,
+            "status": "PASS",
+        }
+        runtime_identity.write_text(
+            json.dumps(runtime_identity_document, sort_keys=True),
+            encoding="utf-8",
+        )
         receipt_provenance = {
             "planPath": str(plan_path.resolve()),
             "planSha256": hashlib.sha256(plan_path.read_bytes()).hexdigest(),
@@ -390,9 +513,7 @@ class NativeBenchmarkBlockTests(TestCase):
             "selectorId": selector_id,
             "caseIds": expected_case_ids,
             "benchmarkExecutablePath": str(benchmark_executable.resolve()),
-            "benchmarkExecutableSha256": hashlib.sha256(
-                benchmark_executable.read_bytes()
-            ).hexdigest(),
+            "benchmarkExecutableSha256": benchmark_executable_sha256,
             "effectiveRuntimeArgumentsSha256": effective_options_sha256,
             "candidateProvenance": {
                 "kind": "haskell",
@@ -420,6 +541,14 @@ class NativeBenchmarkBlockTests(TestCase):
                 "stackSha256": hashlib.sha256(stack.read_bytes()).hexdigest(),
                 "stackYamlPath": str(stack_yaml.resolve()),
                 "stackYamlSha256": hashlib.sha256(stack_yaml.read_bytes()).hexdigest(),
+                "runtimeIdentityPath": str(runtime_identity.resolve()),
+                "runtimeIdentitySha256": hashlib.sha256(
+                    runtime_identity.read_bytes()
+                ).hexdigest(),
+                "executedBenchmarkPath": str(benchmark_executable.resolve()),
+                "executedBenchmarkSha256": benchmark_executable_sha256,
+                "authoritativeGhcPath": str(authoritative_ghc.resolve()),
+                "authoritativeGhcSha256": authoritative_ghc_sha256,
                 "selectedGhcOptions": selected_options,
                 "toolchainLockPath": str(toolchain_lock.resolve()),
                 "toolchainLockSha256": hashlib.sha256(toolchain_lock.read_bytes()).hexdigest(),
@@ -984,6 +1113,208 @@ class NativeBenchmarkBlockTests(TestCase):
             updated_receipt_sha = hashlib.sha256(receipt_path.read_bytes()).hexdigest()
             for evidence_case in evidence["cases"]:
                 evidence_case["executionReceiptSha256"] = updated_receipt_sha
+
+        original_raw_bytes = raw_path.read_bytes()
+        original_receipt_bytes = receipt_path.read_bytes()
+        for swapped_path, role_prefix in (
+            (raw_path, "native-raw:"),
+            (receipt_path, "native-execution-receipt:"),
+        ):
+            with self.subTest(same_fd_swap=swapped_path.name):
+                swapped = False
+
+                def inspect_then_swap(path: Path, *, role: str) -> Any:
+                    nonlocal swapped
+                    snapshot = inspect_regular_file_path(path, role=role)
+                    if not swapped and path == swapped_path and role.startswith(role_prefix):
+                        swapped_path.write_text('{"forged":true}', encoding="utf-8")
+                        swapped = True
+                    return snapshot
+
+                with patch.object(
+                    native_block_module,
+                    "inspect_regular_file_path",
+                    side_effect=inspect_then_swap,
+                ):
+                    validate_native_contract_evidence(
+                        evidence,
+                        boundary_id="haskell",
+                        selector_id=selector_id,
+                        block_directory=temporary,
+                        native_cases=cases,
+                        native_statistics_cases=statistics_cases,
+                        plan_path=plan_path,
+                        fixture_root_path=FIXTURES,
+                        input_ledger_path=input_ledger,
+                        effective_runtime_arguments_sha256=effective_options_sha256,
+                        profile="baseline-o0-fasm",
+                    )
+                self.assertTrue(swapped)
+                raw_path.write_bytes(original_raw_bytes)
+                receipt_path.write_bytes(original_receipt_bytes)
+                install_receipt(receipt_document)
+
+        original_manifest_bytes = source_input_manifest.read_bytes()
+        omitted_manifest = json.loads(original_manifest_bytes)
+        omitted_manifest["files"].pop("app/Main.hs")
+        omitted_manifest["canonicalManifestSha256"] = hashlib.sha256(
+            "".join(
+                f"{omitted_manifest['files'][path]['sha256']}  {path}\n"
+                for path in sorted(omitted_manifest["files"], key=str.encode)
+            ).encode()
+        ).hexdigest()
+        source_input_manifest.write_text(
+            json.dumps(omitted_manifest, sort_keys=True),
+            encoding="utf-8",
+        )
+        omitted_source_receipt = copy.deepcopy(receipt_document)
+        omitted_source_receipt["provenance"]["candidateProvenance"][
+            "sourceInputManifestSha256"
+        ] = hashlib.sha256(source_input_manifest.read_bytes()).hexdigest()
+        install_receipt(omitted_source_receipt)
+        with self.assertRaisesRegex(
+            GateError,
+            "NATIVE_EXECUTION_PROVENANCE_INVALID",
+        ):
+            validate_native_contract_evidence(
+                evidence,
+                boundary_id="haskell",
+                selector_id=selector_id,
+                block_directory=temporary,
+                native_cases=cases,
+                native_statistics_cases=statistics_cases,
+                plan_path=plan_path,
+                fixture_root_path=FIXTURES,
+                input_ledger_path=input_ledger,
+                effective_runtime_arguments_sha256=effective_options_sha256,
+                profile="baseline-o0-fasm",
+            )
+        source_input_manifest.write_bytes(original_manifest_bytes)
+        install_receipt(receipt_document)
+
+        source_path = haskell_root / "app/Main.hs"
+        original_source_bytes = source_path.read_bytes()
+        source_path.write_bytes(original_source_bytes + b"-- mutated\n")
+        with self.assertRaisesRegex(
+            GateError,
+            "NATIVE_EXECUTION_PROVENANCE_INVALID",
+        ):
+            validate_native_contract_evidence(
+                evidence,
+                boundary_id="haskell",
+                selector_id=selector_id,
+                block_directory=temporary,
+                native_cases=cases,
+                native_statistics_cases=statistics_cases,
+                plan_path=plan_path,
+                fixture_root_path=FIXTURES,
+                input_ledger_path=input_ledger,
+                effective_runtime_arguments_sha256=effective_options_sha256,
+                profile="baseline-o0-fasm",
+            )
+        source_path.write_bytes(original_source_bytes)
+
+        original_cabal_bytes = cabal_file.read_bytes()
+        cabal_file.write_bytes(original_cabal_bytes + b"-- mutated\n")
+        with self.assertRaisesRegex(
+            GateError,
+            "NATIVE_EXECUTION_PROVENANCE_INVALID",
+        ):
+            validate_native_contract_evidence(
+                evidence,
+                boundary_id="haskell",
+                selector_id=selector_id,
+                block_directory=temporary,
+                native_cases=cases,
+                native_statistics_cases=statistics_cases,
+                plan_path=plan_path,
+                fixture_root_path=FIXTURES,
+                input_ledger_path=input_ledger,
+                effective_runtime_arguments_sha256=effective_options_sha256,
+                profile="baseline-o0-fasm",
+            )
+        cabal_file.write_bytes(original_cabal_bytes)
+
+        original_ghc_bytes = authoritative_ghc.read_bytes()
+        for mutation in ("missing", "mutated"):
+            with self.subTest(authoritative_ghc=mutation):
+                if mutation == "missing":
+                    authoritative_ghc.unlink()
+                else:
+                    authoritative_ghc.write_bytes(b"substituted GHC")
+                    authoritative_ghc.chmod(0o700)
+                with self.assertRaisesRegex(
+                    GateError,
+                    "NATIVE_EXECUTION_PROVENANCE_INVALID",
+                ):
+                    validate_native_contract_evidence(
+                        evidence,
+                        boundary_id="haskell",
+                        selector_id=selector_id,
+                        block_directory=temporary,
+                        native_cases=cases,
+                        native_statistics_cases=statistics_cases,
+                        plan_path=plan_path,
+                        fixture_root_path=FIXTURES,
+                        input_ledger_path=input_ledger,
+                        effective_runtime_arguments_sha256=effective_options_sha256,
+                        profile="baseline-o0-fasm",
+                    )
+                authoritative_ghc.write_bytes(original_ghc_bytes)
+                authoritative_ghc.chmod(0o700)
+
+        substitute_artifact = temporary / "substitute-criterion-benchmark"
+        substitute_artifact.write_bytes(b"substitute benchmark executable")
+        substitute_artifact.chmod(0o700)
+        substitute_sha256 = hashlib.sha256(
+            substitute_artifact.read_bytes()
+        ).hexdigest()
+        substituted_identity = {
+            **runtime_identity_document,
+            "executedBenchmarkPath": str(substitute_artifact.resolve()),
+            "executedBenchmarkSha256": substitute_sha256,
+        }
+        runtime_identity.write_text(
+            json.dumps(substituted_identity, sort_keys=True),
+            encoding="utf-8",
+        )
+        substituted_receipt = copy.deepcopy(receipt_document)
+        substituted_provenance = substituted_receipt["provenance"]
+        substituted_candidate = substituted_provenance["candidateProvenance"]
+        substituted_provenance["benchmarkExecutablePath"] = str(
+            substitute_artifact.resolve()
+        )
+        substituted_provenance["benchmarkExecutableSha256"] = substitute_sha256
+        substituted_candidate["executedBenchmarkPath"] = str(
+            substitute_artifact.resolve()
+        )
+        substituted_candidate["executedBenchmarkSha256"] = substitute_sha256
+        substituted_candidate["runtimeIdentitySha256"] = hashlib.sha256(
+            runtime_identity.read_bytes()
+        ).hexdigest()
+        install_receipt(substituted_receipt)
+        with self.assertRaisesRegex(
+            GateError,
+            "NATIVE_EXECUTION_PROVENANCE_INVALID",
+        ):
+            validate_native_contract_evidence(
+                evidence,
+                boundary_id="haskell",
+                selector_id=selector_id,
+                block_directory=temporary,
+                native_cases=cases,
+                native_statistics_cases=statistics_cases,
+                plan_path=plan_path,
+                fixture_root_path=FIXTURES,
+                input_ledger_path=input_ledger,
+                effective_runtime_arguments_sha256=effective_options_sha256,
+                profile="baseline-o0-fasm",
+            )
+        runtime_identity.write_text(
+            json.dumps(runtime_identity_document, sort_keys=True),
+            encoding="utf-8",
+        )
+        install_receipt(receipt_document)
 
         direct_executable_receipt = copy.deepcopy(receipt_document)
         direct_executable_receipt["commandArgv"] = [
