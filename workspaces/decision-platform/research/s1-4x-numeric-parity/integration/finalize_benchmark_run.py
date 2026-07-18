@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from benchmark_input_ledger import validate_input_ledger
+from final_candidate_audit import validate_final_candidate_audit
 from gate import exclusive_json_write, strict_json_load
 from native_benchmark_block import validate_native_contract_evidence
 
@@ -458,70 +459,6 @@ def _native_statistics(
     return validated
 
 
-def _audit_points(
-    path: Path,
-    *,
-    benchmark_subject_commit: str,
-) -> tuple[dict[str, Any], str]:
-    ledger = strict_json_load(path.resolve(strict=True))
-    if (
-        not isinstance(ledger, dict)
-        or set(ledger)
-        != {
-            "schemaVersion",
-            "benchmarkSubjectCommit",
-            "candidates",
-            "status",
-        }
-        or ledger["schemaVersion"] != "s1.4x-final-candidate-audit-v1"
-        or ledger["benchmarkSubjectCommit"] != benchmark_subject_commit
-        or ledger["status"] != "PASS"
-        or not isinstance(ledger["candidates"], dict)
-        or set(ledger["candidates"]) != set(CANDIDATES)
-    ):
-        raise BenchmarkSummaryError("FINAL_AUDIT_LEDGER_INVALID")
-    limits = {
-        "purityAuditabilityPoints": 20.0,
-        "maintainabilityPoints": 10.0,
-        "integrationFitPoints": 5.0,
-    }
-    for candidate in CANDIDATES:
-        entry = ledger["candidates"][candidate]
-        if (
-            not isinstance(entry, dict)
-            or set(entry)
-            != {
-                "correctnessMismatchCount",
-                "regressionStatus",
-                *limits,
-                "evidenceSha256",
-            }
-            or entry["correctnessMismatchCount"] != 0
-            or entry["regressionStatus"] != "PASS"
-            or not isinstance(entry["evidenceSha256"], list)
-            or not entry["evidenceSha256"]
-            or any(
-                not isinstance(digest, str)
-                or len(digest) != SHA256_LENGTH
-                or any(character not in "0123456789abcdef" for character in digest)
-                for digest in entry["evidenceSha256"]
-            )
-        ):
-            raise BenchmarkSummaryError(f"FINAL_AUDIT_CANDIDATE_INVALID:{candidate}")
-        for field, limit in limits.items():
-            value = entry[field]
-            if (
-                not isinstance(value, (int, float))
-                or isinstance(value, bool)
-                or not math.isfinite(float(value))
-                or not 0.0 <= float(value) <= limit
-            ):
-                raise BenchmarkSummaryError(
-                    f"FINAL_AUDIT_POINTS_INVALID:{candidate}:{field}"
-                )
-    return ledger, sha256_file(path)
-
-
 def finalize_run(
     *,
     plan_path: Path,
@@ -542,8 +479,9 @@ def finalize_run(
     schedule = build_schedule(plan)
     if len(schedule) != 87:
         raise BenchmarkSummaryError("BENCHMARK_SCHEDULE_COUNT_INVALID")
-    audit, audit_sha256 = _audit_points(
+    _, audit_points, audit_sha256 = validate_final_candidate_audit(
         audit_ledger_path,
+        repository_root=repo_root,
         benchmark_subject_commit=benchmark_subject_commit,
     )
     reports = []
@@ -798,14 +736,20 @@ def finalize_run(
     )
     score_candidates = {}
     for candidate in CANDIDATES:
-        audit_candidate = audit["candidates"][candidate]
+        audit_candidate = audit_points[candidate]
         categories = {
-            "correctness": {"maxPoints": 35.0, "points": 35.0},
+            "correctness": {
+                "maxPoints": 35.0,
+                "points": float(audit_candidate["correctnessPoints"]),
+            },
             "purityAuditability": {
                 "maxPoints": 20.0,
                 "points": float(audit_candidate["purityAuditabilityPoints"]),
             },
-            "reproducibility": {"maxPoints": 15.0, "points": 15.0},
+            "reproducibility": {
+                "maxPoints": 15.0,
+                "points": float(audit_candidate["reproducibilityPoints"]),
+            },
             "performance": {
                 "maxPoints": 15.0,
                 "points": performance[candidate]["performancePoints"],
