@@ -741,4 +741,8 @@ jobs:
           uv sync --frozen --all-groups
           uv run --frozen ruff check .
           uv run --frozen mypy src benchmarks
-          uv run --frozen pytest -q
+          S1_4X="$GITHUB_WORKSPACE/workspaces/decision-platform/research/s1-4x-numeric-parity"
+          uv run --frozen --project "$S1_4X/oracle" pytest -q \
+            "$S1_4X/integration/tests/test_s1_4r_regression_boundary.py"
+          uv run --frozen pytest -q \
+            --deselect=tests/test_production_isolation.py::test_branch_diff_is_confined_to_the_research_project_and_two_workflows
