@@ -9,6 +9,11 @@ REPO_ROOT = Path(__file__).resolve().parents[6]
 WORKFLOW_ROOT = REPO_ROOT / ".github" / "workflows"
 CORRECTNESS = WORKFLOW_ROOT / "s1-4x-numeric-parity-correctness.yml"
 BENCHMARK = WORKFLOW_ROOT / "s1-4x-numeric-parity-benchmark.yml"
+AGGREGATE = (
+    REPO_ROOT
+    / "workspaces/decision-platform/research/s1-4x-numeric-parity/"
+    "integration/tools/run-native-oci-regression-gates.sh"
+)
 
 EXPECTED_PATHS = (
     "workspaces/decision-platform/research/s1-4x-numeric-parity/**",
@@ -287,11 +292,80 @@ class NumericParityBenchmarkWorkflowTests(unittest.TestCase):
         self.assertIn("cancel-in-progress: false", self.text)
         correctness = self.jobs["correctness-before-timing"]
         timing = self.jobs["bounded-timing"]
-        self.assertIn("run-integration-correctness.sh", correctness)
-        self.assertIn("run-native-oci-regression-gates.sh", correctness)
+        self.assertEqual(
+            correctness.count("run-native-oci-regression-gates.sh"),
+            1,
+        )
+        self.assertNotIn("run-integration-correctness.sh", correctness)
         self.assertIn("needs: correctness-before-timing", timing)
         self.assertIn("needs.correctness-before-timing.result == 'success'", timing)
         self.assertNotIn("run-ghc-9.14.1-compatibility.sh", timing)
+
+    def test_correctness_uses_the_full_serial_native_oci_aggregate(self) -> None:
+        source = _read(AGGREGATE)
+        self.assertNotIn("command -v", source)
+        self.assertIn('S1_4X_UV_BIN:?', source)
+        for token in (
+            "run-hard-compiler-profile.sh",
+            "run-scalafmt-idempotence.sh",
+            "run-scalafix.sh",
+            "check-source-policy.sh",
+            "audit-scala-dependency-edges.sh",
+            "run-correctness-profile.sh",
+            "run-profile-qualification.sh",
+            "select-proven-profile.sh",
+            "check-format.sh",
+            "check-hlint.sh",
+            "run-ghc-9.14.1-compatibility.sh",
+            "validate-ghc-9.14.1-compatibility.sh",
+            "coverage_execution.py",
+            "coverage_gate.py",
+            "run-integration-correctness.sh",
+            "build-oci-image.sh",
+            "run-oci-correctness.sh",
+            "test_s1_4r_regression_boundary.py",
+        ):
+            self.assertIn(token, source)
+        self.assertIn("--output-dir", source)
+        self.assertIn("ghc-9.14.1-compatibility.v1.json", source)
+
+    def test_full_mode_binds_exact_v3_runtime_and_evidence_roles(self) -> None:
+        timing = self.jobs["bounded-timing"]
+        self.assertNotIn("--uv ", timing)
+        for role in (
+            "uv",
+            "benchmarkPython",
+            "scalaCli",
+            "java",
+            "scalafix",
+            "scalafmt",
+            "ghcup",
+            "stack",
+            "authoritativeGhc",
+            "compatibilityGhc",
+            "hlint",
+            "stylishHaskell",
+        ):
+            self.assertIn(
+                f'--runtime-executable "{role}=',
+                timing,
+            )
+        for role in (
+            "scalafmtArchive",
+            "selectedProfileResult",
+            "profileQualificationResult",
+            "jvmAllowlistResult",
+            "correctnessA",
+            "correctnessB",
+            "correctnessC",
+            "baselineCorrectness",
+            "optimizedCorrectness",
+            "profileQualification",
+        ):
+            self.assertIn(
+                f'--runtime-evidence "{role}=',
+                timing,
+            )
 
     def test_two_bounded_modes_and_artifact_policy(self) -> None:
         timing = self.jobs["bounded-timing"]
