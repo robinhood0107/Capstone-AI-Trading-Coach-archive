@@ -7,7 +7,8 @@ import qualified Data.Vector.Unboxed as U
 
 import           S14X.Core.AdvancedRisk (christoffersenConditionalCoverageTest,
                                          christoffersenIndependenceTest, deflatedSharpeRatio,
-                                         historicalExpectedShortfall, loAdjustedSharpeRatio,
+                                         historicalExpectedShortfall,
+                                         kupiecUnconditionalCoverageTest, loAdjustedSharpeRatio,
                                          probabilisticSharpeRatio, realizedVariance,
                                          realizedVolatilityIntraday)
 import           S14X.Core.Error (StableError (DenominatorZero, InputTooShort, MomentInvalid, PricesNonPositive, ResearchInputTooShort, SimpleReturnBelowMinusOne))
@@ -31,7 +32,10 @@ tests =
       testCase "compensated sum preserves cancellation residuals" compensatedSummation,
       testCase "pure sort midpoint division is total on every guarded length" pureSortTotality,
       testCase "stable validation precedence" stableErrors,
-      testCase "backtest records preserve exact integer fields" backtestRecords
+      testCase "backtest records preserve exact integer fields" backtestRecords,
+      testCase
+        "all 20 kernels are exactly deterministic for repeated identical input"
+        repeatedInputDeterminism
     ]
 
 productionHandFixtures :: IO ()
@@ -137,6 +141,49 @@ backtestRecords = do
       observations @?= 5
       exceptions @?= 2
       conditioned @?= 4
+
+repeatedInputDeterminism :: IO ()
+repeatedInputDeterminism = do
+  let prices = U.fromList [100.0, 101.0, 99.0, 103.0, 104.0]
+      returns = U.fromList [-0.02, 0.01, 0.03, -0.01, 0.02]
+      losses = U.fromList [0.0, 2.0, 0.0, 2.0, 0.0]
+      forecasts = U.replicate 5 1.0
+      provenance =
+        TrialProvenance
+          "s1.4r-effective-trials-v1"
+          "pre_registered_independent"
+          2
+          2
+          "daily"
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          1
+  simpleReturns prices @?= simpleReturns prices
+  logReturns prices @?= logReturns prices
+  cumulativeReturn returns @?= cumulativeReturn returns
+  cagr prices 252 @?= cagr prices 252
+  realizedVolatility returns @?= realizedVolatility returns
+  annualizedVolatility returns 252 @?= annualizedVolatility returns 252
+  maxDrawdown prices @?= maxDrawdown prices
+  sharpeRatio returns 0.0 252 @?= sharpeRatio returns 0.0 252
+  sortinoRatio returns 0.0 252 @?= sortinoRatio returns 0.0 252
+  historicalVar returns 0.95 @?= historicalVar returns 0.95
+  historicalCvar returns 0.95 @?= historicalCvar returns 0.95
+  historicalExpectedShortfall returns 0.95
+    @?= historicalExpectedShortfall returns 0.95
+  realizedVariance returns @?= realizedVariance returns
+  realizedVolatilityIntraday returns @?= realizedVolatilityIntraday returns
+  loAdjustedSharpeRatio returns 2 0.0
+    @?= loAdjustedSharpeRatio returns 2 0.0
+  probabilisticSharpeRatio 1.0 0.0 6 0.0 3.0
+    @?= probabilisticSharpeRatio 1.0 0.0 6 0.0 3.0
+  deflatedSharpeRatio 1.0 6 0.0 3.0 2 1.0 provenance
+    @?= deflatedSharpeRatio 1.0 6 0.0 3.0 2 1.0 provenance
+  kupiecUnconditionalCoverageTest losses forecasts 0.75 0.05
+    @?= kupiecUnconditionalCoverageTest losses forecasts 0.75 0.05
+  christoffersenIndependenceTest losses forecasts 0.05
+    @?= christoffersenIndependenceTest losses forecasts 0.05
+  christoffersenConditionalCoverageTest losses forecasts 0.75 0.05
+    @?= christoffersenConditionalCoverageTest losses forecasts 0.75 0.05
 
 assertScalarClose :: Double -> Either StableError Double -> IO ()
 assertScalarClose expected actual =
