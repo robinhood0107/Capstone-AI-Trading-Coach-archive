@@ -66,6 +66,27 @@ class PortableToolPathTests(unittest.TestCase):
         self.assertNotIn("S1_4X_STYLISH_BIN", formatter)
         self.assertIn('${S1_4X_HLINT_BIN:?', lint)
 
+    def test_format_gate_scopes_python_module_discovery_to_haskell_root(self) -> None:
+        formatter = (TOOLS_ROOT / "check-format.sh").read_text(encoding="utf-8")
+        self.assertIn(
+            'PYTHONPATH="$HASKELL_ROOT" python3 -m unittest -v',
+            formatter,
+        )
+
+    def test_arbitrary_cwd_runner_covers_all_three_acceptance_wrappers(self) -> None:
+        runner = (
+            TOOLS_ROOT / "tests/assert-wrappers-arbitrary-cwd.sh"
+        ).read_text(encoding="utf-8")
+        for wrapper in (
+            "assert-toolchain.sh",
+            "check-format.sh",
+            "check-hlint.sh",
+        ):
+            with self.subTest(wrapper=wrapper):
+                self.assertIn(f'"$HASKELL_ROOT/tools/{wrapper}"', runner)
+        self.assertIn('cd "$temporary_cwd"', runner)
+        self.assertIn('${S1_4X_EVIDENCE_ROOT:?', runner)
+
     def test_provisional_test_inherits_explicit_paths_without_defaults(self) -> None:
         script = (TOOLS_ROOT / "tests/assert-provisional-toolchain.sh").read_text(
             encoding="utf-8"
