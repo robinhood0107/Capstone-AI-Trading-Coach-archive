@@ -68,6 +68,34 @@ def _parse_role_paths(
     return parsed
 
 
+def _assert_distinct_role_paths(
+    executable_paths: dict[str, Path],
+    evidence_paths: dict[str, Path],
+) -> None:
+    """서로 다른 semantic role이 같은 inode를 공유해 검증을 우회하지 못하게 한다."""
+
+    seen: dict[tuple[int, int], str] = {}
+    for kind, paths in (
+        ("executable", executable_paths),
+        ("evidence", evidence_paths),
+    ):
+        for role, path in paths.items():
+            try:
+                metadata = path.stat(follow_symlinks=False)
+            except OSError as exc:
+                raise ValueError(
+                    f"runtime role path unavailable: {kind}:{role}"
+                ) from exc
+            inode = (metadata.st_dev, metadata.st_ino)
+            current = f"{kind}:{role}"
+            previous = seen.get(inode)
+            if previous is not None:
+                raise ValueError(
+                    f"runtime role file alias: {previous}={current}"
+                )
+            seen[inode] = current
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo-root", type=Path, required=True)
@@ -166,6 +194,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             expected_roles=evidence_roles,
             label="runtime evidence",
         )
+        _assert_distinct_role_paths(executable_paths, evidence_paths)
         runtime_identities = {
             role: _identity(path)
             for role, path in executable_paths.items()
