@@ -168,6 +168,22 @@ class HLintInventoryTests(unittest.TestCase):
         self.assertIn("Exception.throwIO", fixture)
         hlint_inventory.validate_throw_io_restrictions(configuration)
 
+    def test_base_is_digit_replaces_the_stale_managed_exception(self) -> None:
+        configuration = (HASKELL_ROOT / ".hlint.yaml").read_text(encoding="utf-8")
+        manifest = (HASKELL_ROOT / "lint-exceptions.v1.json").read_text(
+            encoding="utf-8"
+        )
+        process = (
+            HASKELL_ROOT / "src/contract/S14X/Contract/Process.hs"
+        ).read_text(encoding="utf-8")
+
+        self.assertNotIn("Use isDigit", configuration)
+        self.assertNotIn('"rule": "Use isDigit"', manifest)
+        self.assertNotIn("isDigitAscii", process)
+        self.assertIn("Data.Char (isDigit)", process)
+        self.assertIn("isDigit character", process)
+        self.assertEqual(len(hlint_inventory._ignore_pairs(configuration)), 4)
+
     def test_extra_managed_ignored_diagnostic_is_rejected(self) -> None:
         configuration = """\
 - ignore:
