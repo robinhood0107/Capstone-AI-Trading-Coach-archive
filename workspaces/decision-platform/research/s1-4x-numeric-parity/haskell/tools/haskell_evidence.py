@@ -52,6 +52,7 @@ WORKFLOW_INPUT_PATHS = (
     "ghc-compatibility-solve-failure.v1.json",
     "lint-exceptions.v1.json",
     "stack-ghc-9.14.1.yaml",
+    "stack-ghc-9.14.1.yaml.lock",
     "stylish-ghc2024-fallback.v1.json",
     "toolchain-lock.v1.json",
     "tools/assert-toolchain.sh",

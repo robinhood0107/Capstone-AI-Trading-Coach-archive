@@ -127,6 +127,7 @@ python3 - \
   "$HASKELL_ROOT/stack.yaml" \
   "$HASKELL_ROOT/stack-ghc-9.14.1.yaml" \
   "$HASKELL_ROOT/stack.yaml.lock" \
+  "$HASKELL_ROOT/stack-ghc-9.14.1.yaml.lock" \
   "$COMPATIBILITY_EVIDENCE" \
   "$COMPATIBILITY_RESULT" <<'PY'
 import hashlib
@@ -166,6 +167,7 @@ def strict_json(path: Path):
     stack_path,
     compatibility_path,
     stack_lock_path,
+    compatibility_stack_lock_path,
     compatibility_evidence_path,
     compatibility_result_path,
 ) = map(Path, sys.argv[1:])
@@ -310,7 +312,7 @@ expected_compatibility_plan = {
     "stackYamlPath": "haskell/stack-ghc-9.14.1.yaml",
     "stackYamlSha256": sha256(compatibility_path),
     "stackLockPath": "haskell/stack-ghc-9.14.1.yaml.lock",
-    "stackLockSha256": "e376d075c33c8bc14aebc6f27c6de3a6be81056354a1fc332d71f959f4870154",
+    "stackLockSha256": sha256(compatibility_stack_lock_path),
     "failureEvidencePath": "haskell/ghc-compatibility-solve-failure.v1.json",
     "failureEvidenceSha256": sha256(compatibility_evidence_path),
     "failureResultPath": "reports/ghc-compatibility-result.v1.json",
@@ -325,7 +327,7 @@ expected_configurations = {
     "compatibilityPath": "haskell/stack-ghc-9.14.1.yaml",
     "compatibilitySha256": sha256(compatibility_path),
     "compatibilityLockPath": "haskell/stack-ghc-9.14.1.yaml.lock",
-    "compatibilityLockSha256": "e376d075c33c8bc14aebc6f27c6de3a6be81056354a1fc332d71f959f4870154",
+    "compatibilityLockSha256": sha256(compatibility_stack_lock_path),
     "authoritativeLockPath": "haskell/stack.yaml.lock",
     "authoritativeLockSha256": sha256(stack_lock_path),
 }
