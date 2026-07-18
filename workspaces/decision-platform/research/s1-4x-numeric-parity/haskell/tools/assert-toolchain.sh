@@ -13,19 +13,13 @@ SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 HASKELL_ROOT="$(realpath "${SCRIPT_PATH%/*}/..")"
 NUMERIC_ROOT="$(realpath "$HASKELL_ROOT/..")"
 
-GHCUP_BIN="${S1_4X_GHCUP_BIN:-/home/pjjpj/.local/bin/ghcup}"
-GHC_BIN="${S1_4X_GHC_BIN:-/home/pjjpj/.ghcup/ghc/9.10.3/bin/ghc-9.10.3}"
-GHC_914_BIN="${S1_4X_GHC_914_BIN:-/home/pjjpj/.ghcup/ghc/9.14.1/bin/ghc-9.14.1}"
-STACK_BIN="${S1_4X_STACK_BIN:-/home/pjjpj/.ghcup/stack/3.11.1/stack}"
-HLINT_BIN="${S1_4X_HLINT_BIN:-/home/pjjpj/.local/share/s1-4x/haskell-tools/bin/hlint}"
-STYLISH_FROM_LONG="${S1_4X_STYLISH_HASKELL_BIN:-}"
-STYLISH_FROM_PROMPT="${S1_4X_STYLISH_BIN:-}"
-if [[ -n "$STYLISH_FROM_LONG" && -n "$STYLISH_FROM_PROMPT" \
-  && "$STYLISH_FROM_LONG" != "$STYLISH_FROM_PROMPT" ]]; then
-  echo "conflicting stylish-haskell executable overrides" >&2
-  exit 64
-fi
-STYLISH_BIN="${STYLISH_FROM_LONG:-${STYLISH_FROM_PROMPT:-/home/pjjpj/.local/share/s1-4x/haskell-tools/bin/stylish-haskell}}"
+# readiness packet의 runtime path를 명시적으로 주입해 tracked host path와 PATH discovery를 금지한다.
+GHCUP_BIN="${S1_4X_GHCUP_BIN:?S1_4X_GHCUP_BIN readiness path is required}"
+GHC_BIN="${S1_4X_GHC_BIN:?S1_4X_GHC_BIN readiness path is required}"
+GHC_914_BIN="${S1_4X_GHC_914_BIN:?S1_4X_GHC_914_BIN readiness path is required}"
+STACK_BIN="${S1_4X_STACK_BIN:?S1_4X_STACK_BIN readiness path is required}"
+HLINT_BIN="${S1_4X_HLINT_BIN:?S1_4X_HLINT_BIN readiness path is required}"
+STYLISH_BIN="${S1_4X_STYLISH_HASKELL_BIN:?S1_4X_STYLISH_HASKELL_BIN readiness path is required}"
 
 assert_regular_executable() {
   local label="$1"

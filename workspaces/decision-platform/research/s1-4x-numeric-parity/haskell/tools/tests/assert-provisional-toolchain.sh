@@ -4,6 +4,14 @@ set -euo pipefail
 SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 HASKELL_ROOT="$(realpath "${SCRIPT_PATH%/*}/../..")"
 
+# provisional test도 caller가 전달한 readiness packet path만 상속한다.
+: "${S1_4X_GHCUP_BIN:?S1_4X_GHCUP_BIN readiness path is required}"
+: "${S1_4X_GHC_BIN:?S1_4X_GHC_BIN readiness path is required}"
+: "${S1_4X_GHC_914_BIN:?S1_4X_GHC_914_BIN readiness path is required}"
+: "${S1_4X_STACK_BIN:?S1_4X_STACK_BIN readiness path is required}"
+: "${S1_4X_HLINT_BIN:?S1_4X_HLINT_BIN readiness path is required}"
+: "${S1_4X_STYLISH_HASKELL_BIN:?S1_4X_STYLISH_HASKELL_BIN readiness path is required}"
+
 temporary="$(mktemp -d)"
 trap 'rm -rf -- "$temporary"' EXIT
 
