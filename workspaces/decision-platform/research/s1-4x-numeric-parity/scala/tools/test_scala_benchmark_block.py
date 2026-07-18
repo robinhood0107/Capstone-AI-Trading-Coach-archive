@@ -200,6 +200,20 @@ def main() -> int:
     else:
         raise AssertionError("zero case index must be rejected")
 
+    marker = Path("/repo/numeric/integration/run_rotated_blocks.py")
+    qualification = block / "timeout-qualification.json"
+    assert helper.build_measurement_marker_command(
+        python=python,
+        marker=marker,
+        qualification=qualification,
+    ) == [
+        str(python),
+        str(marker),
+        "mark-measurement-entered",
+        "--qualification",
+        str(qualification),
+    ]
+
     assert helper.RAW_CASE_FILES == (
         "native.json",
         "scala-jmh-run-result.v1.json",
@@ -253,6 +267,7 @@ def main() -> int:
     assert 'integration_root / "run_rotated_blocks.py"' in source
     assert "benchmarks/run_rotated_blocks.py" not in source
     assert "produce-scala-native" in source
+    assert "exclusive_json_write" not in source
     assert "import statistics" not in source
     assert "import math" not in source
 
