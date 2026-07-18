@@ -158,6 +158,27 @@ class StylishFallbackTests(unittest.TestCase):
         ):
             self.validate(drifted)
 
+    def test_format_gate_reproduces_capability_leaf_before_real_source_check(self) -> None:
+        script = (TOOLS_ROOT / "check-format.sh").read_text(encoding="utf-8")
+        probe = 'python3 "$HASKELL_ROOT/tools/stylish_fallback.py" probe'
+        source_inputs = (
+            'python3 "$HASKELL_ROOT/tools/haskell_evidence.py" source-inputs'
+        )
+
+        self.assertLess(script.index(probe), script.index(source_inputs))
+        self.assertIn(
+            'CONFIGURATION="$HASKELL_ROOT/.stylish-haskell-ghc2024-expanded.yaml"',
+            script,
+        )
+        self.assertIn(
+            '"--config=$CONFIGURATION"',
+            script,
+        )
+        self.assertNotIn(
+            '"--config=$MANDATED_CONFIGURATION"',
+            script,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
