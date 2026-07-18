@@ -288,6 +288,7 @@ class NumericParityBenchmarkWorkflowTests(unittest.TestCase):
         correctness = self.jobs["correctness-before-timing"]
         timing = self.jobs["bounded-timing"]
         self.assertIn("run-integration-correctness.sh", correctness)
+        self.assertIn("run-native-oci-regression-gates.sh", correctness)
         self.assertIn("needs: correctness-before-timing", timing)
         self.assertIn("needs.correctness-before-timing.result == 'success'", timing)
         self.assertNotIn("run-ghc-9.14.1-compatibility.sh", timing)
