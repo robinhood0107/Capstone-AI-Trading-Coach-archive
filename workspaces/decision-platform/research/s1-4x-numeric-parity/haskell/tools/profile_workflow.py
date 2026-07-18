@@ -717,7 +717,7 @@ def build_oci_build_command(
 def build_oci_run_command(
     *,
     docker: Path,
-    image_tag: str,
+    image_id: str,
     output_directory: Path,
     output_name: str,
     request_path: str,
@@ -727,7 +727,7 @@ def build_oci_run_command(
     """Source, user directory, credential mount 없이 offline replay command를 만든다."""
 
     if (
-        re.fullmatch(r"local/s1-4x-haskell:[a-z0-9._-]+", image_tag) is None
+        re.fullmatch(r"sha256:[0-9a-f]{64}", image_id) is None
         or not output_directory.is_absolute()
         or re.fullmatch(r"[a-z0-9._-]+\.json", output_name) is None
         or not request_path.startswith("/opt/s1-4x/fixtures/")
@@ -758,7 +758,7 @@ def build_oci_run_command(
         "/tmp:rw,noexec,nosuid,nodev,size=16m",
         "--mount",
         f"type=bind,src={output_directory},dst=/out",
-        image_tag,
+        image_id,
         "--request",
         request_path,
         "--fixture-root",
@@ -766,6 +766,39 @@ def build_oci_run_command(
         "--output",
         f"/out/{output_name}",
     ]
+
+
+def validate_oci_image_inspection(
+    document: object,
+    *,
+    image_tag: str,
+    expected_image_id: str | None,
+) -> str:
+    """Tag inspection이 최초 immutable image ID를 계속 가리키는지 검증한다."""
+
+    if (
+        re.fullmatch(r"local/s1-4x-haskell:[a-z0-9._-]+", image_tag) is None
+        or not isinstance(document, dict)
+    ):
+        raise WorkflowError("OCI_IMAGE_INSPECTION_INVALID")
+    image_id = document.get("Id")
+    repository_tags = document.get("RepoTags")
+    if (
+        type(image_id) is not str
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", image_id) is None
+        or not isinstance(repository_tags, list)
+        or any(type(tag) is not str for tag in repository_tags)
+        or image_tag not in repository_tags
+        or (
+            expected_image_id is not None
+            and (
+                re.fullmatch(r"sha256:[0-9a-f]{64}", expected_image_id) is None
+                or image_id != expected_image_id
+            )
+        )
+    ):
+        raise WorkflowError("OCI_IMAGE_TAG_BINDING_INVALID")
+    return image_id
 
 
 def _iso_now() -> str:
@@ -2228,23 +2261,43 @@ def _oci_correctness(arguments: argparse.Namespace) -> None:
         "{{json .}}",
         image_tag,
     ]
-    commands.append(
-        _run_logged(
-            inspect_command,
-            cwd=cache_root,
-            environment=environment,
-            phase="oci-image-inspect",
-            output_directory=output,
+    image_tag_binding_checks: list[dict[str, Any]] = []
+
+    def inspect_tag_binding(
+        phase: str,
+        *,
+        expected_image_id: str | None,
+    ) -> str:
+        commands.append(
+            _run_logged(
+                inspect_command,
+                cwd=cache_root,
+                environment=environment,
+                phase=phase,
+                output_directory=output,
+            )
         )
+        inspect_path = output / f"{phase}.stdout"
+        inspected_image_id = validate_oci_image_inspection(
+            strict_json_load(inspect_path),
+            image_tag=image_tag,
+            expected_image_id=expected_image_id,
+        )
+        image_tag_binding_checks.append(
+            {
+                "phase": phase,
+                "imageTag": image_tag,
+                "imageId": inspected_image_id,
+                "inspectionSha256": sha256_file(inspect_path),
+                "status": "PASS",
+            }
+        )
+        return inspected_image_id
+
+    image_id = inspect_tag_binding(
+        "oci-image-inspect",
+        expected_image_id=None,
     )
-    inspect_path = output / "oci-image-inspect.stdout"
-    image = strict_json_load(inspect_path)
-    image_id = image.get("Id") if isinstance(image, dict) else None
-    if (
-        type(image_id) is not str
-        or re.fullmatch(r"sha256:[0-9a-f]{64}", image_id) is None
-    ):
-        raise WorkflowError("OCI_IMAGE_ID_INVALID")
     runtime_output = output / "runtime"
     runtime_output.mkdir(mode=0o700)
     compare_script = _absolute_regular(
@@ -2276,7 +2329,7 @@ def _oci_correctness(arguments: argparse.Namespace) -> None:
         comparison = output / f"{label}.oci-comparison.json"
         run_command = build_oci_run_command(
             docker=docker,
-            image_tag=image_tag,
+            image_id=image_id,
             output_directory=runtime_output,
             output_name=actual.name,
             request_path=container_request,
@@ -2291,6 +2344,10 @@ def _oci_correctness(arguments: argparse.Namespace) -> None:
                 phase=f"oci-{label}-run",
                 output_directory=output,
             )
+        )
+        inspect_tag_binding(
+            f"oci-{label}-tag-check",
+            expected_image_id=image_id,
         )
         _absolute_regular(actual, label=f"OCI_{label.upper()}_ACTUAL")
         compare_command = [
@@ -2347,6 +2404,11 @@ def _oci_correctness(arguments: argparse.Namespace) -> None:
         "dockerSha256": docker_sha256,
         "imageTag": image_tag,
         "imageId": image_id,
+        "runtimeImageSubject": {
+            "referenceType": "immutable-image-id",
+            "imageId": image_id,
+        },
+        "imageTagBindingChecks": image_tag_binding_checks,
         "buildNetwork": "none",
         "runtimeNetwork": "none",
         "runtimeMounts": ["output-only"],
