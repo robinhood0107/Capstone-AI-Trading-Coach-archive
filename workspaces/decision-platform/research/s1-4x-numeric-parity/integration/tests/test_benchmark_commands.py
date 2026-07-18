@@ -17,7 +17,9 @@ sys.path.insert(0, str(INTEGRATION))
 from benchmark_commands import (  # noqa: E402
     BOUNDARY_IDS,
     CommandManifestError,
+    boundary_command_template,
     build_manifest,
+    host_command_template,
     inspect_executable_identity,
     validate_manifest,
     validate_manifest_file,
@@ -84,19 +86,9 @@ class BenchmarkCommandManifestTests(TestCase):
         manifest = build_manifest(
             benchmark_subject_commit=commit,
             candidate_source_commit=commit,
-            host_validator_command=[
-                str(executable),
-                "host.py",
-                "--output",
-                "{host_report}",
-            ],
+            host_validator_command=host_command_template(str(executable)),
             boundary_commands={
-                boundary: [
-                    str(executable),
-                    f"{boundary}.py",
-                    "--qualification",
-                    "{qualification}",
-                ]
+                boundary: boundary_command_template(str(executable), boundary)
                 for boundary in BOUNDARY_IDS
             },
             allowed_executables={
@@ -268,15 +260,23 @@ class BenchmarkCommandManifestTests(TestCase):
                 self.assertNotIn("command -v", source)
                 self.assertNotIn("S1_4X_UV_BIN", source)
 
+    def test_manifest_rejects_duplicate_qualification_placeholder(self) -> None:
+        executable = Path(sys.executable).resolve()
+        identity = {
+            "path": str(executable),
+            "sha256": hashlib.sha256(executable.read_bytes()).hexdigest(),
+        }
+        manifest = self._manifest_for_identity(identity)
+        commands = manifest["boundaryCommands"]
         commands["scala"] = [str(executable), "{qualification}", "{qualification}"]
         with self.assertRaisesRegex(
             CommandManifestError,
-            "QUALIFICATION_PLACEHOLDER_COUNT",
+            "BOUNDARY_COMMAND_TEMPLATE_MISMATCH",
         ):
             build_manifest(
                 benchmark_subject_commit="a" * 40,
                 candidate_source_commit="a" * 40,
-                host_validator_command=[str(executable), "{host_report}"],
+                host_validator_command=host_command_template(str(executable)),
                 boundary_commands=commands,
                 allowed_executables={
                     "hostValidator": identity,
@@ -291,9 +291,9 @@ class BenchmarkCommandManifestTests(TestCase):
         manifest = build_manifest(
             benchmark_subject_commit="b" * 40,
             candidate_source_commit="b" * 40,
-            host_validator_command=[str(executable), "{host_report}"],
+            host_validator_command=host_command_template(str(executable)),
             boundary_commands={
-                boundary: [str(executable), "{qualification}"]
+                boundary: boundary_command_template(str(executable), boundary)
                 for boundary in BOUNDARY_IDS
             },
             allowed_executables={

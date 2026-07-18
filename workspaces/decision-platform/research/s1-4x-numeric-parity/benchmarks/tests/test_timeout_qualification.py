@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -57,16 +58,34 @@ def _command_manifest() -> dict[str, Any]:
         "candidateSourceCommit": COMMIT,
         "hostValidatorCommand": [
             executable,
-            "-c",
-            "host-validator",
+            "--output",
             "{host_report}",
+            "--allowed-process-root-pid",
+            "{allowed_process_root_pid}",
         ],
         "boundaryCommands": {
             boundary_id: [
                 executable,
-                "-c",
-                "native-wrapper",
+                "--plan",
+                "{plan}",
+                "--block-dir",
+                "{block_dir}",
+                "--qualification",
                 "{qualification}",
+                "--boundary",
+                boundary_id,
+                "--selector",
+                "{selector_id}",
+                "--family",
+                "{family_id}",
+                "--rotation",
+                "{rotation_id}",
+                "--outer-repetition",
+                "{outer_repetition}",
+                "--run-id",
+                "{run_id}",
+                "--benchmark-subject-commit",
+                "{benchmark_subject_commit}",
             ]
             for boundary_id in runner.BOUNDARY_IDS
         },
@@ -153,6 +172,34 @@ def test_runner_manifest_hash_and_parse_share_one_snapshot(
         )
 
     assert validated == manifest
+
+
+def test_runner_manifest_rejects_escaped_placeholder_and_extra_argv(
+    tmp_path: Path,
+) -> None:
+    escaped = _command_manifest()
+    escaped["boundaryCommands"]["scala"][6] = "{{qualification}}"
+    escaped_path = tmp_path / "escaped.json"
+    escaped_digest = _write_manifest(escaped_path, escaped)
+    with pytest.raises(ContractError, match="BOUNDARY_COMMAND_TEMPLATE_MISMATCH"):
+        runner._strict_command_manifest(
+            escaped_path,
+            expected_sha256=escaped_digest,
+            benchmark_subject_commit=COMMIT,
+            candidate_source_commit=COMMIT,
+        )
+
+    extra = _command_manifest()
+    extra["boundaryCommands"]["haskell"].extend(["--override", "forged"])
+    extra_path = tmp_path / "extra.json"
+    extra_digest = _write_manifest(extra_path, extra)
+    with pytest.raises(ContractError, match="BOUNDARY_COMMAND_TEMPLATE_MISMATCH"):
+        runner._strict_command_manifest(
+            extra_path,
+            expected_sha256=extra_digest,
+            benchmark_subject_commit=COMMIT,
+            candidate_source_commit=COMMIT,
+        )
 
 
 def test_runner_executes_sealed_verified_bytes_after_supplier_path_replacement(
@@ -358,6 +405,69 @@ def test_benchmark_environment_drops_ambient_code_and_tool_overrides(
     }
 
 
+def test_timeout_termination_reaps_leader_and_remaining_process_group(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    signals: list[int] = []
+    process_group_checks = iter([False, True])
+
+    class FinishedLeader:
+        pid = 12345
+
+        def wait(self, timeout: float) -> int:
+            assert timeout == 5
+            return -signal.SIGTERM
+
+    monkeypatch.setattr(
+        runner,
+        "_signal_process_group",
+        lambda process_group_id, sent_signal: signals.append(sent_signal),
+    )
+    monkeypatch.setattr(
+        runner,
+        "_wait_for_process_group_exit",
+        lambda process_group_id, timeout_seconds: next(process_group_checks),
+    )
+
+    runner._terminate_process_group(FinishedLeader())
+
+    assert signals == [signal.SIGTERM, signal.SIGKILL]
+
+
+def test_timeout_termination_has_stable_leaf_when_group_survives_sigkill(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FinishedLeader:
+        pid = 12345
+
+        def wait(self, timeout: float) -> int:
+            return -signal.SIGKILL
+
+    monkeypatch.setattr(runner, "_signal_process_group", lambda *args: None)
+    monkeypatch.setattr(
+        runner,
+        "_wait_for_process_group_exit",
+        lambda process_group_id, timeout_seconds: False,
+    )
+
+    with pytest.raises(
+        ContractError,
+        match="TIMEOUT_PROCESS_GROUP_SURVIVED_SIGKILL",
+    ):
+        runner._terminate_process_group(FinishedLeader())
+
+
+def test_process_group_probe_treats_esrch_as_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def missing(process_group_id: int, sent_signal: int) -> None:
+        raise ProcessLookupError
+
+    monkeypatch.setattr(os, "killpg", missing)
+
+    assert runner._process_group_exists(12345) is False
+
+
 def test_command_renderer_rejects_unbound_or_formatted_placeholders() -> None:
     with pytest.raises(ContractError, match="UNKNOWN_COMMAND_PLACEHOLDER"):
         runner._render_command(["tool", "{unbound}"], {"bound": "value"})
@@ -483,16 +593,18 @@ def _install_execute_fakes(
         environment: dict[str, str],
     ) -> None:
         del executable, cwd, timeout_seconds, stdout_path, stderr_path, environment
-        if command[2] == "host-validator":
+        if "--allowed-process-root-pid" in command:
             if host_times_out:
                 raise ContractError("PERFORMANCE_DEADLINE_EXCEEDED")
-            Path(command[-1]).write_text(
+            output_index = command.index("--output") + 1
+            Path(command[output_index]).write_text(
                 json.dumps(_host_report(plan, status=host_status), allow_nan=False),
                 encoding="utf-8",
             )
             return
         if native_marks_measurement:
-            runner.mark_measurement_entered(Path(command[-1]))
+            qualification_index = command.index("--qualification") + 1
+            runner.mark_measurement_entered(Path(command[qualification_index]))
         raise ContractError("PERFORMANCE_DEADLINE_EXCEEDED")
 
     monkeypatch.setattr(runner, "_run_process", fake_process)
