@@ -172,6 +172,12 @@ ledger는 finalization에서 거부된다.
 잘못된 역할, stale hash, 절대 경로, path traversal, leaf·중간 symlink, self-review rubric,
 다른 subject commit은 거부된다.
 
+감사 subject 뒤에 evidence/report 문서를 커밋한 다음 validator를 재실행할 수 있다. 단,
+subject는 현재 `HEAD`의 ancestor여야 하고 worktree·index·untracked 상태는 깨끗해야 한다.
+`subject..HEAD`에는 S1.4X `reports/` 아래 `.json`·`.md`·`.sha256` 파일과 S1.4X 루트
+`README.md`, `integration/README.md`의 추가·수정만 허용한다. 삭제·이름 변경·파일 타입
+변경과 candidate·lock·contract·oracle·benchmark·integration code 변경은 모두 거부된다.
+
 실제 evidence envelope를 `<audit-root>/evidence/{scala,haskell}/`에 준비한 뒤 ledger를
 생성하고 다시 검증한다. 출력 파일은 실행 전에 존재하면 안 된다.
 
@@ -249,7 +255,8 @@ TMPDIR=/tmp TEMP=/tmp TMP=/tmp \
 ## 실패 원인 찾기
 
 - `*_OUTPUT_ALREADY_EXISTS`: 새 absolute output 경로를 사용한다. 산출물을 덮어쓰지 않는다.
-- `FINAL_AUDIT_SUBJECT_INVALID`: 요청한 40자리 commit이 현재 `HEAD`인지 확인한다.
+- `FINAL_AUDIT_SUBJECT_INVALID`: 요청한 40자리 commit이 `HEAD`의 ancestor인지, 이후
+  변경이 위 report/README allowlist뿐인지, worktree·index·untracked 상태가 깨끗한지 확인한다.
 - `FINAL_AUDIT_EVIDENCE_INVALID`: evidence ID의 source 역할, schema, hash, subject와
   candidate를 함께 확인한다.
 - `BENCHMARK_*_INCOMPLETE`: 누락 block을 임의로 보충하지 말고 해당 run 전체를 폐기한 뒤
