@@ -93,7 +93,7 @@ def test_official_full_rotation_uses_integration_runtime_only() -> None:
 
 def test_integration_runbook_has_no_local_user_or_global_tmp_path() -> None:
     documentation = INTEGRATION_README.read_text(encoding="utf-8")
-    assert "/home/pjjpj" not in documentation
+    assert re.search(r"/home/[^/\s]+", documentation) is None
     assert "TMPDIR=/tmp" not in documentation
     assert 'CACHE_ROOT="${S1_4X_CACHE_ROOT:-$HOME/.cache/s1-4x}"' in documentation
 

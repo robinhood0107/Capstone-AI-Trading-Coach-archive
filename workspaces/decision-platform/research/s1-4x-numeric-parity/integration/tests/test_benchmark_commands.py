@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -261,7 +262,7 @@ class BenchmarkCommandManifestTests(TestCase):
                 source = wrapper.read_text(encoding="utf-8")
                 self.assertTrue(source.startswith("#!/usr/bin/bash\n"))
                 self.assertIn("/usr/bin/git", source)
-                self.assertNotIn("/home/pjjpj/.local/bin/uv", source)
+                self.assertNotRegex(source, r"/home/[^/\s]+/\.local/bin/uv")
                 self.assertNotIn("command -v", source)
                 self.assertIn("S1_4X_UV_BIN", source)
                 self.assertIn("/proc/self/fd/", source)
@@ -270,7 +271,7 @@ class BenchmarkCommandManifestTests(TestCase):
         source = (INTEGRATION / "prepare_benchmark_commands.py").read_text(
             encoding="utf-8"
         )
-        self.assertNotIn("/home/pjjpj", source)
+        self.assertIsNone(re.search(r"/home/[^/\s]+", source))
         self.assertIn('os.environ.get("HOME")', source)
 
     def test_manifest_requires_exact_uv_runtime_dependency(self) -> None:
