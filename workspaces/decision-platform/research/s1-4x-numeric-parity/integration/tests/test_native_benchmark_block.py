@@ -157,18 +157,56 @@ class NativeBenchmarkBlockTests(TestCase):
                 "timeLimitSeconds": 5,
                 "rtsArguments": ["+RTS", "-N1", "-RTS"],
             },
-            "cases": [
+            "cases": [],
+            "status": "PASS",
+        }
+        receipts = temporary / "receipts"
+        receipts.mkdir()
+        for case in cases:
+            receipt_relative = f"receipts/{case['caseId']}.json"
+            receipt = receipts / f"{case['caseId']}.json"
+            receipt.write_text(
+                json.dumps(
+                    {
+                        "schemaVersion": (
+                            "s1.4x-native-case-execution-receipt-v1"
+                        ),
+                        "boundaryId": "haskell",
+                        "selectorId": "haskell/test",
+                        "caseId": case["caseId"],
+                        "commandArgv": [
+                            "stack",
+                            "bench",
+                            (
+                                "--benchmark-arguments=--time-limit 5 "
+                                f"--json {raw} +RTS -N1 -RTS"
+                            ),
+                        ],
+                        "environment": {
+                            "S1_4X_BENCHMARK_CASE_ID": case["caseId"]
+                        },
+                        "exitCode": 0,
+                        "rawEvidencePath": "raw/criterion.json",
+                        "rawEvidenceSha256": raw_sha,
+                        "status": "PASS",
+                    },
+                    sort_keys=True,
+                ),
+                encoding="utf-8",
+            )
+            evidence["cases"].append(
                 {
                     "caseId": case["caseId"],
                     "nativeSampleCount": 100,
                     "rawEvidencePath": "raw/criterion.json",
                     "rawEvidenceSha256": raw_sha,
+                    "executionReceiptPath": receipt_relative,
+                    "executionReceiptSha256": hashlib.sha256(
+                        receipt.read_bytes()
+                    ).hexdigest(),
                     "status": "PASS",
                 }
-                for case in cases
-            ],
-            "status": "PASS",
-        }
+            )
         validate_native_contract_evidence(
             evidence,
             boundary_id="haskell",
@@ -186,6 +224,177 @@ class NativeBenchmarkBlockTests(TestCase):
                 selector_id="haskell/test",
                 block_directory=temporary,
                 native_cases=cases,
+            )
+
+    def test_scala_contract_parses_jmh_forks_iterations_and_score(self) -> None:
+        temporary = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        raw = temporary / "raw/000.json"
+        receipt = temporary / "receipts/000.json"
+        raw.parent.mkdir()
+        receipt.parent.mkdir()
+        native_cases: list[dict[str, Any]] = [
+            {
+                "caseId": "case-a",
+                "nativeValue": 12.0,
+                "samples": 30,
+                "warmupIterations": 5,
+                "measurementIterations": 10,
+            }
+        ]
+        raw_document: list[dict[str, Any]] = [
+            {
+                "jmhVersion": "1.37",
+                "benchmark": "s1_4x.Benchmark.run",
+                "mode": "avgt",
+                "threads": 1,
+                "forks": 3,
+                "warmupIterations": 5,
+                "warmupTime": "1 s",
+                "measurementIterations": 10,
+                "measurementTime": "1 s",
+                "primaryMetric": {
+                    "score": 12.0,
+                    "scoreUnit": "ns/op",
+                    "rawData": [[12.0] * 10 for _ in range(3)],
+                },
+            }
+        ]
+
+        def evidence_for(document: list[dict[str, Any]]) -> dict[str, Any]:
+            raw.write_text(json.dumps(document), encoding="utf-8")
+            raw_sha = hashlib.sha256(raw.read_bytes()).hexdigest()
+            receipt.write_text(
+                json.dumps(
+                    {
+                        "schemaVersion": (
+                            "s1.4x-native-case-execution-receipt-v1"
+                        ),
+                        "boundaryId": "scala",
+                        "selectorId": "scala/test",
+                        "caseId": "case-a",
+                        "commandArgv": [
+                            "scala-cli",
+                            "-bm",
+                            "avgt",
+                            "-tu",
+                            "ns",
+                            "-t",
+                            "1",
+                            "-f",
+                            "3",
+                            "-wi",
+                            "5",
+                            "-i",
+                            "10",
+                            "-w",
+                            "1s",
+                            "-r",
+                            "1s",
+                            "-rf",
+                            "json",
+                            "-rff",
+                            str(raw),
+                        ],
+                        "environment": {
+                            "S1_4X_BENCHMARK_CASE_ID": "case-a"
+                        },
+                        "exitCode": 0,
+                        "rawEvidencePath": "raw/000.json",
+                        "rawEvidenceSha256": raw_sha,
+                        "status": "PASS",
+                    },
+                    sort_keys=True,
+                ),
+                encoding="utf-8",
+            )
+            return {
+                "schemaVersion": "s1.4x-native-contract-validation-v1",
+                "boundaryId": "scala",
+                "selectorId": "scala/test",
+                "framework": "JMH",
+                "frameworkVersion": "1.37",
+                "configuration": {
+                    "benchmarkMode": "AverageTime",
+                    "nativeTimeUnit": "ns",
+                    "threads": 1,
+                    "forks": 3,
+                    "warmupIterations": 5,
+                    "warmupSeconds": 1,
+                    "measurementIterations": 10,
+                    "measurementSeconds": 1,
+                },
+                "cases": [
+                    {
+                        "caseId": "case-a",
+                        "nativeSampleCount": 30,
+                        "rawEvidencePath": "raw/000.json",
+                        "rawEvidenceSha256": raw_sha,
+                        "executionReceiptPath": "receipts/000.json",
+                        "executionReceiptSha256": hashlib.sha256(
+                            receipt.read_bytes()
+                        ).hexdigest(),
+                        "status": "PASS",
+                    }
+                ],
+                "status": "PASS",
+            }
+
+        validate_native_contract_evidence(
+            evidence_for(raw_document),
+            boundary_id="scala",
+            selector_id="scala/test",
+            block_directory=temporary,
+            native_cases=native_cases,
+        )
+
+        wrong_shape = copy.deepcopy(raw_document)
+        wrong_shape[0]["primaryMetric"]["rawData"] = [[12.0] * 10] * 2
+        with self.assertRaisesRegex(GateError, "JMH_RAW_CONTRACT_INVALID"):
+            validate_native_contract_evidence(
+                evidence_for(wrong_shape),
+                boundary_id="scala",
+                selector_id="scala/test",
+                block_directory=temporary,
+                native_cases=native_cases,
+            )
+
+        wrong_score = copy.deepcopy(raw_document)
+        wrong_score[0]["primaryMetric"]["score"] = 13.0
+        with self.assertRaisesRegex(GateError, "JMH_RAW_CONTRACT_INVALID"):
+            validate_native_contract_evidence(
+                evidence_for(wrong_score),
+                boundary_id="scala",
+                selector_id="scala/test",
+                block_directory=temporary,
+                native_cases=native_cases,
+            )
+
+        wrong_version = copy.deepcopy(raw_document)
+        wrong_version[0]["jmhVersion"] = "1.36"
+        with self.assertRaisesRegex(GateError, "JMH_RAW_CONTRACT_INVALID"):
+            validate_native_contract_evidence(
+                evidence_for(wrong_version),
+                boundary_id="scala",
+                selector_id="scala/test",
+                block_directory=temporary,
+                native_cases=native_cases,
+            )
+
+        tampered_receipt_evidence = evidence_for(raw_document)
+        receipt.write_text(
+            receipt.read_text(encoding="utf-8") + "\n",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(
+            GateError,
+            "NATIVE_EXECUTION_RECEIPT_DIGEST_INVALID",
+        ):
+            validate_native_contract_evidence(
+                tampered_receipt_evidence,
+                boundary_id="scala",
+                selector_id="scala/test",
+                block_directory=temporary,
+                native_cases=native_cases,
             )
 
     def test_marker_cli_performs_only_pre_run_to_measurement_transition(self) -> None:

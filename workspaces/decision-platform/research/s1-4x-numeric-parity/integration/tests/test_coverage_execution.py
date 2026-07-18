@@ -14,6 +14,10 @@ from unittest import TestCase
 INTEGRATION = Path(__file__).resolve().parents[1]
 S1_4X = INTEGRATION.parent
 CONTRACT = S1_4X / "contract"
+SEED_CORPUS = CONTRACT / "fixtures/property/property-seeds.v1.json"
+REAL_WRAPPER_FIXTURE = (
+    INTEGRATION / "tests/fixtures/coverage_wrapper.py"
+)
 sys.path.insert(0, str(INTEGRATION))
 
 from coverage_execution import CoverageExecutionError, run_candidate_coverage  # noqa: E402
@@ -32,6 +36,35 @@ def _canonical_sha256(value: Any) -> str:
 
 
 class CandidateCoverageExecutionTests(TestCase):
+    def test_real_wrapper_subprocess_binds_outer_argv_and_wrapper_bytes(self) -> None:
+        temporary = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        output = temporary / "candidate-output"
+        receipt = temporary / "receipt.json"
+
+        result = run_candidate_coverage(
+            candidate="scala",
+            runner_path=REAL_WRAPPER_FIXTURE,
+            output_directory=output,
+            receipt_path=receipt,
+            property_plan_path=CONTRACT / "property-plan.v1.json",
+            function_registry_path=CONTRACT / "function-registry.v1.json",
+            error_registry_path=CONTRACT / "error-registry.v1.json",
+        )
+
+        expected_command = [
+            str(REAL_WRAPPER_FIXTURE.resolve()),
+            "--output-dir",
+            str(output.resolve()),
+        ]
+        self.assertEqual(
+            result["runner"]["commandArgvSha256"],
+            _canonical_sha256(expected_command),
+        )
+        self.assertEqual(
+            result["runner"]["sha256"],
+            hashlib.sha256(REAL_WRAPPER_FIXTURE.read_bytes()).hexdigest(),
+        )
+
     def test_receipt_binds_actual_runner_command_and_artifact_bytes(self) -> None:
         temporary = self.enterContext(tempfile.TemporaryDirectory())
         root = Path(temporary)
@@ -55,11 +88,15 @@ class CandidateCoverageExecutionTests(TestCase):
             plan_sha = hashlib.sha256(
                 (CONTRACT / "property-plan.v1.json").read_bytes()
             ).hexdigest()
+            seed_corpus = json.loads(SEED_CORPUS.read_text(encoding="utf-8"))
+            seed_corpus_sha = hashlib.sha256(SEED_CORPUS.read_bytes()).hexdigest()
+            successes_per_seed = 42
+            successful_tests = len(seed_corpus["seeds"]) * successes_per_seed
             implementation = "scala-test"
             properties = [
                 {
                     "propertyId": item["propertyId"],
-                    "successfulTests": 1000,
+                    "successfulTests": successful_tests,
                     "discardedTests": 0,
                     "status": "PASS",
                 }
@@ -68,9 +105,25 @@ class CandidateCoverageExecutionTests(TestCase):
             execution_properties = [
                 {
                     **item,
-                    "attemptedTests": 1000,
-                    "originalSeed": index,
-                    "replayToken": f"scalacheck:{index}",
+                    "attemptedTests": successful_tests,
+                    "seedCount": len(seed_corpus["seeds"]),
+                    "seedExecutions": [
+                        {
+                            "seedIndex": seed_index,
+                            "originalSeed": seed,
+                            "successfulTests": successes_per_seed,
+                            "discardedTests": 0,
+                            "attemptedTests": successes_per_seed,
+                            "replayToken": (
+                                f"scalacheck:{index}:{seed_index}"
+                            ),
+                            "shrinks": 0,
+                            "status": "PASS",
+                        }
+                        for seed_index, seed in enumerate(
+                            seed_corpus["seeds"]
+                        )
+                    ],
                     "shrinks": 0,
                 }
                 for index, item in enumerate(properties)
@@ -105,6 +158,9 @@ class CandidateCoverageExecutionTests(TestCase):
                     "schemaVersion": "s1.4x-candidate-property-execution-v1",
                     "implementation": implementation,
                     "propertyPlanSha256": plan_sha,
+                    "seedCorpusSha256": seed_corpus_sha,
+                    "seedCount": len(seed_corpus["seeds"]),
+                    "minimumSuccessfulPerSeed": successes_per_seed,
                     "framework": "scala-check-1.19.0",
                     "toolchainProfile": "A",
                     "commandArgvSha256": _canonical_sha256(command),

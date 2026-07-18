@@ -12,6 +12,7 @@ from unittest import TestCase
 INTEGRATION = Path(__file__).resolve().parents[1]
 S1_4X = INTEGRATION.parent
 CONTRACT = S1_4X / "contract"
+SEED_CORPUS = CONTRACT / "fixtures/property/property-seeds.v1.json"
 sys.path.insert(0, str(INTEGRATION))
 
 from coverage_gate import CoverageError, validate_candidate_coverage  # noqa: E402
@@ -35,6 +36,10 @@ def _candidate_reports() -> tuple[
     plan_sha = hashlib.sha256(
         (CONTRACT / "property-plan.v1.json").read_bytes()
     ).hexdigest()
+    seed_corpus = json.loads(SEED_CORPUS.read_text(encoding="utf-8"))
+    seed_corpus_sha = hashlib.sha256(SEED_CORPUS.read_bytes()).hexdigest()
+    successes_per_seed = 42
+    successful_tests = len(seed_corpus["seeds"]) * successes_per_seed
     property_report = {
         "schemaVersion": "s1.4x-candidate-property-coverage-v1",
         "implementation": "candidate-test",
@@ -42,7 +47,7 @@ def _candidate_reports() -> tuple[
         "properties": [
             {
                 "propertyId": item["propertyId"],
-                "successfulTests": plan["minimumSuccessfulPerProperty"],
+                "successfulTests": successful_tests,
                 "discardedTests": 0,
                 "status": "PASS",
             }
@@ -72,6 +77,9 @@ def _candidate_reports() -> tuple[
         "schemaVersion": "s1.4x-candidate-property-execution-v1",
         "implementation": "candidate-test",
         "propertyPlanSha256": plan_sha,
+        "seedCorpusSha256": seed_corpus_sha,
+        "seedCount": len(seed_corpus["seeds"]),
+        "minimumSuccessfulPerSeed": successes_per_seed,
         "framework": "test-framework-1.0",
         "toolchainProfile": "test-profile",
         "commandArgvSha256": "a" * 64,
@@ -83,11 +91,23 @@ def _candidate_reports() -> tuple[
         "properties": [
             {
                 "propertyId": item["propertyId"],
-                "successfulTests": plan["minimumSuccessfulPerProperty"],
+                "successfulTests": successful_tests,
                 "discardedTests": 0,
-                "attemptedTests": plan["minimumSuccessfulPerProperty"],
-                "originalSeed": index,
-                "replayToken": f"test:{index}",
+                "attemptedTests": successful_tests,
+                "seedCount": len(seed_corpus["seeds"]),
+                "seedExecutions": [
+                    {
+                        "seedIndex": seed_index,
+                        "originalSeed": seed,
+                        "successfulTests": successes_per_seed,
+                        "discardedTests": 0,
+                        "attemptedTests": successes_per_seed,
+                        "replayToken": f"test:{index}:{seed_index}",
+                        "shrinks": 0,
+                        "status": "PASS",
+                    }
+                    for seed_index, seed in enumerate(seed_corpus["seeds"])
+                ],
                 "shrinks": 0,
                 "status": "PASS",
             }
@@ -161,9 +181,52 @@ class CandidateCoverageTests(TestCase):
 
     def test_property_counts_must_match_actual_execution_sidecar(self) -> None:
         property_report, registry_report, execution_report = _candidate_reports()
-        execution_report["properties"][0]["successfulTests"] = 1001
-        execution_report["properties"][0]["attemptedTests"] = 1001
+        execution_report["properties"][0]["successfulTests"] += 1
+        execution_report["properties"][0]["attemptedTests"] += 1
         with self.assertRaisesRegex(CoverageError, "PROPERTY_EXECUTION_REPORT_MISMATCH"):
+            validate_candidate_coverage(
+                implementation_label="scala",
+                property_plan_path=CONTRACT / "property-plan.v1.json",
+                function_registry_path=CONTRACT / "function-registry.v1.json",
+                error_registry_path=CONTRACT / "error-registry.v1.json",
+                property_report=property_report,
+                registry_report=registry_report,
+                execution_report=execution_report,
+            )
+
+    def test_every_frozen_seed_is_bound_in_order_with_per_seed_minimum(self) -> None:
+        property_report, registry_report, execution_report = _candidate_reports()
+        execution_report["properties"][0]["seedExecutions"][0]["originalSeed"] = 999
+        with self.assertRaisesRegex(CoverageError, "PROPERTY_EXECUTION_SEED_MISMATCH"):
+            validate_candidate_coverage(
+                implementation_label="scala",
+                property_plan_path=CONTRACT / "property-plan.v1.json",
+                function_registry_path=CONTRACT / "function-registry.v1.json",
+                error_registry_path=CONTRACT / "error-registry.v1.json",
+                property_report=property_report,
+                registry_report=registry_report,
+                execution_report=execution_report,
+            )
+
+        property_report, registry_report, execution_report = _candidate_reports()
+        execution_report["properties"][0]["seedExecutions"][0][
+            "successfulTests"
+        ] = 41
+        with self.assertRaisesRegex(CoverageError, "PROPERTY_EXECUTION_SEED_MISMATCH"):
+            validate_candidate_coverage(
+                implementation_label="haskell",
+                property_plan_path=CONTRACT / "property-plan.v1.json",
+                function_registry_path=CONTRACT / "function-registry.v1.json",
+                error_registry_path=CONTRACT / "error-registry.v1.json",
+                property_report=property_report,
+                registry_report=registry_report,
+                execution_report=execution_report,
+            )
+
+    def test_seed_corpus_digest_is_bound_to_frozen_bytes(self) -> None:
+        property_report, registry_report, execution_report = _candidate_reports()
+        execution_report["seedCorpusSha256"] = "0" * 64
+        with self.assertRaisesRegex(CoverageError, "PROPERTY_EXECUTION_IDENTITY_INVALID"):
             validate_candidate_coverage(
                 implementation_label="scala",
                 property_plan_path=CONTRACT / "property-plan.v1.json",
