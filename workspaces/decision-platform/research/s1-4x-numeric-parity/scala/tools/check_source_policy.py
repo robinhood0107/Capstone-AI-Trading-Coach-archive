@@ -13,10 +13,34 @@ from typing import Any
 
 from source_input_manifest import production_roots
 from source_input_manifest import validated_source_files as collect_sources
+from t3_evidence import T3EvidenceError
+from t3_evidence import canonical_sha256
+from t3_evidence import validate_semantic_receipt
 
 
 def sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def strict_json(path: Path) -> dict[str, Any]:
+    def unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"DUPLICATE_JSON_KEY:{key}")
+            result[key] = value
+        return result
+
+    value = json.loads(
+        path.read_text(encoding="utf-8"),
+        object_pairs_hook=unique_object,
+        parse_constant=lambda token: (_ for _ in ()).throw(
+            ValueError(f"NONFINITE_JSON:{token}")
+        ),
+    )
+    if not isinstance(value, dict):
+        raise ValueError(f"JSON_OBJECT_REQUIRED:{path}")
+    return value
 
 
 def strip_comments_and_literals(source: str) -> str:
@@ -291,57 +315,11 @@ def parse_arguments() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def semantic_receipt_valid(
-    receipt: dict[str, Any],
-    *,
-    policy_sha256: str,
-    manifest_sha256: str,
-    checked_files: list[str],
-) -> bool:
-    sha256_pattern = re.compile(r"^[0-9a-f]{64}$")
-    semanticdb = receipt.get("semanticdb")
-    scalafix = receipt.get("scalafix")
-    rule = receipt.get("rule")
-    negative = receipt.get("negativeMatrix")
-    return (
-        receipt.get("schemaVersion")
-        == "s1.4x-scala-semantic-policy-receipt-v1"
-        and receipt.get("policySha256") == policy_sha256
-        and receipt.get("sourceInputManifestSha256") == manifest_sha256
-        and receipt.get("checkedFiles") == checked_files
-        and receipt.get("checkerMode") == "semanticdb"
-        and receipt.get("semanticSmokeStatus") == "PASS"
-        and receipt.get("status") == "PASS"
-        and isinstance(semanticdb, dict)
-        and type(semanticdb.get("fileCount")) is int
-        and semanticdb["fileCount"] > 0
-        and sha256_pattern.fullmatch(str(semanticdb.get("rootSha256"))) is not None
-        and sha256_pattern.fullmatch(str(semanticdb.get("classpathSha256")))
-        is not None
-        and isinstance(scalafix, dict)
-        and scalafix.get("version") == "0.14.7"
-        and sha256_pattern.fullmatch(str(scalafix.get("binarySha256"))) is not None
-        and sha256_pattern.fullmatch(str(scalafix.get("commandArgvSha256")))
-        is not None
-        and isinstance(rule, dict)
-        and sha256_pattern.fullmatch(str(rule.get("sourceSha256"))) is not None
-        and sha256_pattern.fullmatch(str(rule.get("classpathSha256"))) is not None
-        and isinstance(negative, list)
-        and len(negative) >= 1
-        and all(
-            isinstance(item, dict)
-            and item.get("status") == "PASS"
-            and sha256_pattern.fullmatch(str(item.get("evidenceSha256"))) is not None
-            for item in negative
-        )
-    )
-
-
 def main() -> int:
     arguments = parse_arguments()
     scala_root = arguments.scala_root.resolve()
-    policy = json.loads(arguments.policy.read_text(encoding="utf-8"))
-    manifest = json.loads(arguments.manifest.read_text(encoding="utf-8"))
+    policy = strict_json(arguments.policy)
+    manifest = strict_json(arguments.manifest)
     if policy.get("schemaVersion") != "s1.4x-scala-source-policy-v1":
         print("invalid Scala source policy", file=sys.stderr)
         return 1
@@ -368,27 +346,51 @@ def main() -> int:
         print("semantic receipt is required; token audit is supplemental only", file=sys.stderr)
         return 1
     try:
-        semantic_receipt = json.loads(
-            arguments.semantic_receipt.read_text(encoding="utf-8")
-        )
+        semantic_receipt = strict_json(arguments.semantic_receipt)
     except (OSError, ValueError) as error:
         print(f"invalid semantic receipt: {error}", file=sys.stderr)
         return 1
     policy_sha256 = sha256(arguments.policy)
     manifest_sha256 = sha256(arguments.manifest)
-    if not isinstance(semantic_receipt, dict) or not semantic_receipt_valid(
-        semantic_receipt,
-        policy_sha256=policy_sha256,
-        manifest_sha256=manifest_sha256,
-        checked_files=checked_files,
-    ):
+    fixture_matrix_path = (
+        scala_root / "tools/fixtures/source-policy-negative.v1.json"
+    )
+    toolchain_lock = strict_json(scala_root / "toolchain-lock.v1.json")
+    rule_source = (
+        scala_root / "tools/scalafix/S1_4XForbiddenSymbols.scala"
+    )
+    try:
+        validate_semantic_receipt(
+            semantic_receipt,
+            policy=policy,
+            matrix=strict_json(fixture_matrix_path),
+            policy_sha256=policy_sha256,
+            manifest_sha256=manifest_sha256,
+            source_tree_sha256=canonical_sha256(
+                [
+                    {
+                        "path": path.relative_to(scala_root).as_posix(),
+                        "sha256": sha256(path),
+                    }
+                    for path in files
+                ]
+            ),
+            checked_files=checked_files,
+            scalafix_binary_sha256=toolchain_lock["scalafix"][
+                "binarySha256"
+            ],
+            rule_source_sha256=sha256(rule_source),
+        )
+    except (KeyError, OSError, T3EvidenceError, ValueError) as error:
         print("semantic receipt identity mismatch", file=sys.stderr)
+        print(str(error), file=sys.stderr)
         return 1
 
     result = {
         "schemaVersion": "s1.4x-scala-source-policy-result-v1",
         "policySha256": policy_sha256,
         "sourceInputManifestSha256": manifest_sha256,
+        "semanticReceiptSha256": sha256(arguments.semantic_receipt),
         "checkerMode": "semanticdb",
         "semanticSmokeStatus": "PASS",
         "checkedFiles": checked_files,

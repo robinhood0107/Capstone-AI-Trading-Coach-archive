@@ -75,12 +75,21 @@ def utc_now() -> str:
 
 
 def strict_json(path: Path) -> dict[str, Any]:
+    def unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, item in pairs:
+            if key in result:
+                raise SemanticPolicyError(f"DUPLICATE_JSON_KEY:{key}")
+            result[key] = item
+        return result
+
     with path.open(encoding="utf-8") as stream:
         value = json.load(
             stream,
             parse_constant=lambda token: (_ for _ in ()).throw(
                 SemanticPolicyError(f"NONFINITE_JSON:{token}")
             ),
+            object_pairs_hook=unique_object,
         )
     if not isinstance(value, dict):
         raise SemanticPolicyError(f"JSON_OBJECT_REQUIRED:{path}")
@@ -177,9 +186,13 @@ def scalafix_rule_classpath_sha256(scalafix: Path) -> str:
 def process_evidence(
     command: list[str],
     completed: subprocess.CompletedProcess[bytes],
+    *,
+    portable_argv: list[str],
 ) -> dict[str, Any]:
     value = {
         "commandArgvSha256": canonical_sha256(command),
+        "portableArgv": portable_argv,
+        "portableArgvSha256": canonical_sha256(portable_argv),
         "exitCode": completed.returncode,
         "stdoutSha256": sha256_bytes(completed.stdout),
         "stderrSha256": sha256_bytes(completed.stderr),
@@ -312,6 +325,32 @@ def run(arguments: argparse.Namespace) -> Path:
     environment["NO_COLOR"] = "1"
     started_at = utc_now()
 
+    def evidence(
+        command: list[str],
+        completed: subprocess.CompletedProcess[bytes],
+    ) -> dict[str, Any]:
+        portable = []
+        for item in command:
+            replaced = item.replace(str(scala_root), "SCALA_ROOT").replace(
+                str(output_root),
+                "SEMANTIC_EVIDENCE_ROOT",
+            )
+            if item == str(scala_cli):
+                replaced = "SCALA_CLI_1_15_0"
+            elif item == str(scalafix):
+                replaced = "SCALAFIX_0_14_7"
+            elif replaced.startswith("/"):
+                replaced = (
+                    "ABSOLUTE_RUNTIME_INPUT_SHA256:"
+                    f"{sha256_bytes(item.encode('utf-8'))}"
+                )
+            portable.append(replaced)
+        return process_evidence(
+            command,
+            completed,
+            portable_argv=portable,
+        )
+
     syntactic_command = [
         str(scalafix),
         "--check",
@@ -339,10 +378,7 @@ def run(arguments: argparse.Namespace) -> Path:
         str(scala_cli),
         "--power",
         "compile",
-        str(scala_root / "project.scala"),
-        str(scala_root / "selected-profile.scala"),
-        str(scala_root / "src"),
-        str(scala_root / "benchmarks"),
+        *map(str, sources),
         "--test",
         "--server=false",
         "--jvm",
@@ -544,14 +580,14 @@ def run(arguments: argparse.Namespace) -> Path:
             detected_expected = expected_symbol in combined
         if completed.returncode == 0 or not detected_expected:
             raise SemanticPolicyError(f"NEGATIVE_FIXTURE_NOT_DETECTED:{fixture_id}")
-        evidence = process_evidence(command, completed)
+        process = evidence(command, completed)
         negative_results.append(
             {
                 "fixtureId": fixture_id,
                 "expectedPolicySymbol": expected_symbol,
                 "expectedDisposition": disposition,
                 "detectedResolvedSymbols": detected,
-                **evidence,
+                **process,
                 "status": "PASS",
             }
         )
@@ -599,12 +635,12 @@ def run(arguments: argparse.Namespace) -> Path:
         "execution": {
             "startedAt": started_at,
             "finishedAt": finished_at,
-            "cleanSyntactic": process_evidence(syntactic_command, syntactic),
-            "cleanExplicitResultTypes": process_evidence(
+            "cleanSyntactic": evidence(syntactic_command, syntactic),
+            "cleanExplicitResultTypes": evidence(
                 explicit_result_types_command,
                 explicit_result_types,
             ),
-            "cleanCustomSemanticRule": process_evidence(
+            "cleanCustomSemanticRule": evidence(
                 custom_rule_command,
                 custom_rule,
             ),

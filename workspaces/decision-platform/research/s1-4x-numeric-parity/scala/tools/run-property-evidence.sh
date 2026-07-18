@@ -4,7 +4,7 @@ set -euo pipefail
 SCALA_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 S1_ROOT="$(cd -- "$SCALA_ROOT/.." && pwd -P)"
 RUNNER_PATH="$(readlink -f -- "${BASH_SOURCE[0]}")"
-SCALA_CLI="${S1_4X_SCALA_CLI_BIN:-/home/pjjpj/.local/bin/scala-cli}"
+SCALA_CLI="${S1_4X_SCALA_CLI_BIN:?set exact Scala CLI 1.15.0 binary path from readiness packet}"
 PROFILE="A"
 OUTPUT_DIR=""
 ORIGINAL_ARGUMENTS=("$@")
@@ -55,22 +55,32 @@ export TEMP="$TMPDIR"
 export TMP="$TMPDIR"
 export COURSIER_CACHE="$CACHE_ROOT/coursier"
 
-profile_options=()
-case "$PROFILE" in
-  B)
-    profile_options+=(--scalac-option=-opt)
-    ;;
-  C)
-    profile_options+=(--scalac-option=-opt)
-    profile_options+=('--scalac-option=-opt-inline:ai.trading.coach.s14x.**')
-    ;;
-esac
+PROFILE_CONFIG="$SCALA_ROOT/compiler-profiles.v1.json"
+"$SCALA_ROOT/tools/assert-compiler-profiles.sh" >/dev/null
+jq -e --arg profile "$PROFILE" \
+  '.schemaVersion == "s1.4x-scala-compiler-profiles-v1" and
+   (.profiles[$profile] != null)' "$PROFILE_CONFIG" >/dev/null
+mapfile -t profile_options < <(
+  jq -er --arg profile "$PROFILE" \
+    '.profiles[$profile].scalaCliArguments[]' "$PROFILE_CONFIG"
+)
+mapfile -t property_sources < <(
+  python3 "$SCALA_ROOT/tools/source_input_manifest.py" \
+    --scala-root "$SCALA_ROOT" \
+    --manifest "$SCALA_ROOT/source-inputs.v1.json" \
+    --policy "$S1_ROOT/contract/scala-source-policy.v1.json" \
+    --role configuration \
+    --role main \
+    --role test
+)
+[[ "${#property_sources[@]}" -gt 2 ]] || {
+  printf 'property source manifest closure is empty\n' >&2
+  exit 1
+}
 
 command_prefix=(
   "$SCALA_CLI" --power run
-  "$SCALA_ROOT/project.scala"
-  "$SCALA_ROOT/selected-profile.scala"
-  "$SCALA_ROOT/src"
+  "${property_sources[@]}"
   --test
   --server=false
   --jvm system
@@ -83,6 +93,7 @@ runner_arguments=(
   --s1-root "$S1_ROOT"
   --profile "$PROFILE"
   --runner-path "$RUNNER_PATH"
+  --scala-cli-sha256 "$(sha256sum "$SCALA_CLI" | awk '{print $1}')"
 )
 command_argv_sha="$(
   python3 - "$RUNNER_PATH" "${ORIGINAL_ARGUMENTS[@]}" <<'PY'

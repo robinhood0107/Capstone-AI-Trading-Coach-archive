@@ -2,8 +2,8 @@
 set -euo pipefail
 
 SCALA_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
-SCALA_CLI="${S1_4X_SCALA_CLI_BIN:-/home/pjjpj/.local/bin/scala-cli}"
-SCALAFIX="${S1_4X_SCALAFIX_BIN:-/home/pjjpj/.local/share/s1-4x/scalafix-0.14.7/bin/scalafix}"
+SCALA_CLI="${S1_4X_SCALA_CLI_BIN:?set exact Scala CLI 1.15.0 binary path from readiness packet}"
+SCALAFIX="${S1_4X_SCALAFIX_BIN:?set exact Scalafix 0.14.7 binary path from readiness packet}"
 POLICY=""
 FIXTURE_MATRIX=""
 OUTPUT_DIR=""

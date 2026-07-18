@@ -3,9 +3,12 @@
 
 from __future__ import annotations
 
+import argparse
 import hashlib
+import json
 import re
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -102,15 +105,13 @@ def under_root(path: str, root: str) -> bool:
 
 
 def git_source_files(scala_root: Path, roots: list[str]) -> list[str]:
-    """Git production closure의 compiled escape를 거부한 뒤 `.scala` 집합을 반환한다."""
+    """Git index에 실제로 등록된 production `.scala` 집합만 반환한다."""
 
     completed = subprocess.run(
         [
             "git",
             "ls-files",
             "--cached",
-            "--others",
-            "--exclude-standard",
             "--",
             *roots,
         ],
@@ -136,6 +137,35 @@ def git_source_files(scala_root: Path, roots: list[str]) -> list[str]:
         )
     return sorted(
         {line for line in production_files if line.endswith(".scala")},
+        key=lambda value: value.encode("utf-8"),
+    )
+
+
+def git_untracked_source_files(scala_root: Path, roots: list[str]) -> list[str]:
+    """production root의 untracked compiled source는 manifest 입력으로 승격하지 않고 거부한다."""
+
+    completed = subprocess.run(
+        [
+            "git",
+            "ls-files",
+            "--others",
+            "--exclude-standard",
+            "--",
+            *roots,
+        ],
+        cwd=scala_root,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode != 0:
+        raise SourceInputManifestError("GIT_UNTRACKED_SOURCE_ENUMERATION_FAILED")
+    return sorted(
+        {
+            path
+            for path in completed.stdout.splitlines()
+            if path.endswith(FORBIDDEN_COMPILED_SUFFIXES)
+        },
         key=lambda value: value.encode("utf-8"),
     )
 
@@ -207,6 +237,68 @@ def validated_source_files(
     if require_git_source_equality:
         if policy is None:
             raise SourceInputManifestError("POLICY_REQUIRED_FOR_GIT_SOURCE_EQUALITY")
+        untracked = git_untracked_source_files(resolved_root, roots)
+        if untracked:
+            raise SourceInputManifestError(
+                f"UNTRACKED_PRODUCTION_SOURCE:{untracked[0]}"
+            )
         if ordered_paths != git_source_files(resolved_root, roots):
             raise SourceInputManifestError("TRACKED_MANIFEST_SOURCE_SET_MISMATCH")
     return resolved
+
+
+def strict_json(path: Path) -> dict[str, Any]:
+    def unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        value: dict[str, Any] = {}
+        for key, item in pairs:
+            if key in value:
+                raise SourceInputManifestError(f"DUPLICATE_JSON_KEY:{key}")
+            value[key] = item
+        return value
+
+    parsed = json.loads(
+        path.read_text(encoding="utf-8"),
+        object_pairs_hook=unique_object,
+        parse_constant=lambda value: (_ for _ in ()).throw(
+            SourceInputManifestError(f"NONFINITE_JSON:{value}")
+        ),
+    )
+    if not isinstance(parsed, dict):
+        raise SourceInputManifestError(f"JSON_OBJECT_REQUIRED:{path}")
+    return parsed
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--scala-root", type=Path, required=True)
+    parser.add_argument("--manifest", type=Path, required=True)
+    parser.add_argument("--policy", type=Path, required=True)
+    parser.add_argument(
+        "--role",
+        action="append",
+        choices=("configuration", "main", "test", "benchmark"),
+        required=True,
+    )
+    arguments = parser.parse_args()
+    try:
+        manifest = strict_json(arguments.manifest)
+        policy = strict_json(arguments.policy)
+        sources = validated_source_files(
+            arguments.scala_root,
+            manifest,
+            policy=policy,
+            require_git_source_equality=True,
+        )
+        roles = set(arguments.role)
+        for source in sources:
+            relative = source.relative_to(arguments.scala_root).as_posix()
+            if manifest["files"][relative]["role"] in roles:
+                print(source)
+    except (OSError, UnicodeError, ValueError, SourceInputManifestError) as error:
+        print(f"SCALA_SOURCE_INPUT_FAIL:{error}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

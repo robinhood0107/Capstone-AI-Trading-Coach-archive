@@ -5,13 +5,10 @@ SCALA_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 S1_ROOT="$(cd -- "$SCALA_ROOT/.." && pwd -P)"
 LOCK="$SCALA_ROOT/toolchain-lock.v1.json"
 PROVENANCE="$S1_ROOT/contract/toolchain-provenance.v1.json"
-SCALA_CLI="${S1_4X_SCALA_CLI_BIN:-/home/pjjpj/.local/bin/scala-cli}"
-SCALAFIX="${S1_4X_SCALAFIX_BIN:-/home/pjjpj/.local/share/s1-4x/scalafix-0.14.7/bin/scalafix}"
-CACHE_ROOT="${S1_4X_CACHE_ROOT:-$HOME/.cache/s1-4x}"
-COURSIER_ARCHIVE_CACHE="${S1_4X_COURSIER_ARCHIVE_CACHE:-$HOME/.cache/coursier/arc}"
-SCALAFMT_RELATIVE="https/github.com/scalameta/scalafmt/releases/download/v3.11.4/scalafmt-x86_64-pc-linux.zip"
-SCALAFMT_ARCHIVE="${S1_4X_SCALAFMT_ARCHIVE:-$CACHE_ROOT/coursier/$SCALAFMT_RELATIVE}"
-SCALAFMT_EXECUTABLE="${S1_4X_SCALAFMT_BIN:-$COURSIER_ARCHIVE_CACHE/$SCALAFMT_RELATIVE/scalafmt}"
+SCALA_CLI="${S1_4X_SCALA_CLI_BIN:?set exact Scala CLI 1.15.0 binary path from readiness packet}"
+SCALAFIX="${S1_4X_SCALAFIX_BIN:?set exact Scalafix 0.14.7 binary path from readiness packet}"
+SCALAFMT_ARCHIVE="${S1_4X_SCALAFMT_ARCHIVE:?set exact pinned Scalafmt 3.11.4 archive path}"
+SCALAFMT_EXECUTABLE="${S1_4X_SCALAFMT_BIN:?set exact resolved Scalafmt 3.11.4 executable path}"
 
 fail() {
   printf 'SCALA_TOOLCHAIN_FAIL %s\n' "$1" >&2
@@ -64,8 +61,7 @@ done
   fail "ambient JVM option variables must be empty"
 
 java_path="$(realpath -- "$JAVA_HOME/bin/java")"
-path_java="$(realpath -- "$(command -v java)")"
-[[ "$java_path" == "$path_java" ]] || fail "PATH java does not match JAVA_HOME"
+export PATH="$JAVA_HOME/bin:$PATH"
 
 release_value() {
   local key="$1"

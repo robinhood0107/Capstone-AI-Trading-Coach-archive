@@ -89,16 +89,41 @@ def formatted_source_patch(
 
 
 def strict_json(path: Path) -> dict[str, Any]:
+    def unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, item in pairs:
+            if key in result:
+                raise ScalafmtEvidenceError(f"DUPLICATE_JSON_KEY:{key}")
+            result[key] = item
+        return result
+
     with path.open(encoding="utf-8") as stream:
         value = json.load(
             stream,
             parse_constant=lambda token: (_ for _ in ()).throw(
                 ScalafmtEvidenceError(f"NONFINITE_JSON:{token}")
             ),
+            object_pairs_hook=unique_object,
         )
     if not isinstance(value, dict):
         raise ScalafmtEvidenceError(f"JSON_OBJECT_REQUIRED:{path}")
     return value
+
+
+def create_temporary_directory(configured_tmp: str | None) -> Path:
+    """승인된 TMPDIR 바로 아래에만 formatter copy root를 배타 생성한다."""
+
+    if configured_tmp is None:
+        raise ScalafmtEvidenceError("TMPDIR_REQUIRED")
+    temporary_root = Path(configured_tmp).resolve()
+    if not temporary_root.is_dir() or temporary_root.is_symlink():
+        raise ScalafmtEvidenceError("SAFE_TMPDIR_REQUIRED")
+    temporary = Path(
+        tempfile.mkdtemp(prefix="s1-4x-scalafmt.", dir=temporary_root)
+    ).resolve()
+    if temporary.parent != temporary_root:
+        raise ScalafmtEvidenceError("UNSAFE_TEMPORARY_DIRECTORY")
+    return temporary
 
 
 def format_command(
@@ -151,12 +176,16 @@ def run_process(
 def process_evidence(
     command: list[str],
     completed: subprocess.CompletedProcess[bytes],
+    *,
+    portable_argv: list[str],
 ) -> dict[str, Any]:
     combined = (completed.stdout + b"\n" + completed.stderr).decode(
         "utf-8", errors="replace"
     )
     value = {
         "commandArgvSha256": canonical_sha256(command),
+        "portableArgv": portable_argv,
+        "portableArgvSha256": canonical_sha256(portable_argv),
         "exitCode": completed.returncode,
         "stdoutSha256": hashlib.sha256(completed.stdout).hexdigest(),
         "stderrSha256": hashlib.sha256(completed.stderr).hexdigest(),
@@ -317,12 +346,39 @@ def run(arguments: argparse.Namespace) -> Path:
     environment["NO_COLOR"] = "1"
     source_before = source_tree_sha256(scala_root, sources)
 
-    temporary = Path(tempfile.mkdtemp(prefix="s1-4x-scalafmt."))
-    if temporary.parent != Path("/tmp") and not str(temporary).startswith(
-        str(Path(os.environ.get("TMPDIR", "/tmp")).resolve()) + os.sep
-    ):
-        raise ScalafmtEvidenceError("UNSAFE_TEMPORARY_DIRECTORY")
+    temporary = create_temporary_directory(os.environ.get("TMPDIR"))
     try:
+        def evidence(
+            command: list[str],
+            completed: subprocess.CompletedProcess[bytes],
+        ) -> dict[str, Any]:
+            portable = []
+            for item in command:
+                if item == str(arguments.scala_cli):
+                    portable.append("SCALA_CLI_1_15_0")
+                elif item == str(arguments.scalafmt_launcher):
+                    portable.append("SCALAFMT_3_11_4")
+                elif item == str(scala_root):
+                    portable.append("SCALA_ROOT")
+                elif item.startswith(f"{scala_root}/"):
+                    portable.append(
+                        f"SCALA_ROOT/{item.removeprefix(f'{scala_root}/')}"
+                    )
+                elif item == str(temporary):
+                    portable.append("SCALAFMT_WORK_ROOT")
+                elif item.startswith(f"{temporary}/"):
+                    portable.append(
+                        "SCALAFMT_WORK_ROOT/"
+                        f"{item.removeprefix(f'{temporary}/')}"
+                    )
+                else:
+                    portable.append(item)
+            return process_evidence(
+                command,
+                completed,
+                portable_argv=portable,
+            )
+
         temporary_config = temporary / ".scalafmt.conf"
         shutil.copy2(config, temporary_config)
         temporary_sources: list[Path] = []
@@ -348,7 +404,7 @@ def run(arguments: argparse.Namespace) -> Path:
         )
         if first.returncode != 0:
             raise ScalafmtEvidenceError("FIRST_SCALAFMT_APPLY_FAILED")
-        if process_evidence(first_command, first)["downloadLineCount"] != 0:
+        if evidence(first_command, first)["downloadLineCount"] != 0:
             raise ScalafmtEvidenceError("FIRST_SCALAFMT_NETWORK_ACCESS_DETECTED")
         first_hash = source_tree_sha256(temporary, temporary_sources)
 
@@ -368,7 +424,7 @@ def run(arguments: argparse.Namespace) -> Path:
         )
         if second.returncode != 0:
             raise ScalafmtEvidenceError("SECOND_SCALAFMT_APPLY_FAILED")
-        if process_evidence(second_command, second)["downloadLineCount"] != 0:
+        if evidence(second_command, second)["downloadLineCount"] != 0:
             raise ScalafmtEvidenceError("SECOND_SCALAFMT_NETWORK_ACCESS_DETECTED")
         second_hash = source_tree_sha256(temporary, temporary_sources)
         if first_hash != second_hash:
@@ -403,7 +459,7 @@ def run(arguments: argparse.Namespace) -> Path:
         )
         if copied_check.returncode != 0:
             raise ScalafmtEvidenceError("FORMATTED_COPY_CHECK_FAILED")
-        if process_evidence(copied_check_command, copied_check)["downloadLineCount"] != 0:
+        if evidence(copied_check_command, copied_check)["downloadLineCount"] != 0:
             raise ScalafmtEvidenceError("COPIED_CHECK_NETWORK_ACCESS_DETECTED")
 
         real_check_command = format_command(
@@ -422,7 +478,7 @@ def run(arguments: argparse.Namespace) -> Path:
         )
         if real_check.returncode != 0:
             raise ScalafmtEvidenceError("REAL_SOURCE_NOT_FORMATTED")
-        if process_evidence(real_check_command, real_check)["downloadLineCount"] != 0:
+        if evidence(real_check_command, real_check)["downloadLineCount"] != 0:
             raise ScalafmtEvidenceError("REAL_CHECK_NETWORK_ACCESS_DETECTED")
         if source_tree_sha256(scala_root, sources) != source_before:
             raise ScalafmtEvidenceError("REAL_SOURCE_MUTATED_BY_CHECK")
@@ -449,7 +505,7 @@ def run(arguments: argparse.Namespace) -> Path:
         )
         if negative_result.returncode == 0:
             raise ScalafmtEvidenceError("MISFORMATTED_NEGATIVE_UNEXPECTEDLY_PASSED")
-        if process_evidence(negative_command, negative_result)["downloadLineCount"] != 0:
+        if evidence(negative_command, negative_result)["downloadLineCount"] != 0:
             raise ScalafmtEvidenceError("NEGATIVE_CHECK_NETWORK_ACCESS_DETECTED")
 
         result = {
@@ -474,14 +530,14 @@ def run(arguments: argparse.Namespace) -> Path:
             "firstPassSourceSha256": first_hash,
             "secondPassSourceSha256": second_hash,
             "formattedSourcePatchSha256": formatted_patch_sha256,
-            "firstApply": process_evidence(first_command, first),
-            "secondApply": process_evidence(second_command, second),
-            "copiedNonMutatingCheck": process_evidence(
+            "firstApply": evidence(first_command, first),
+            "secondApply": evidence(second_command, second),
+            "copiedNonMutatingCheck": evidence(
                 copied_check_command,
                 copied_check,
             ),
-            "nonMutatingCheck": process_evidence(real_check_command, real_check),
-            "misformattedNegative": process_evidence(
+            "nonMutatingCheck": evidence(real_check_command, real_check),
+            "misformattedNegative": evidence(
                 negative_command,
                 negative_result,
             ),

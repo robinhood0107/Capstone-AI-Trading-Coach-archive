@@ -29,7 +29,8 @@ object PropertyEvidenceMain:
       s1Root: Path,
       profile: String,
       commandArgvSha256: String,
-      runnerPath: Path
+      runnerPath: Path,
+      scalaCliSha256: String
   )
 
   private final case class SeedExecution(
@@ -55,10 +56,17 @@ object PropertyEvidenceMain:
 
   private def parseCli(arguments: Vector[String]): Either[String, Cli] =
     val pairs =
-      if arguments.size == 10 then arguments.grouped(2).toVector else Vector.empty
+      if arguments.size == 12 then arguments.grouped(2).toVector else Vector.empty
     val options = pairs.collect { case Vector(name, value) => name -> value }.toMap
     val expected =
-      Set("--output-dir", "--s1-root", "--profile", "--command-argv-sha256", "--runner-path")
+      Set(
+        "--output-dir",
+        "--s1-root",
+        "--profile",
+        "--command-argv-sha256",
+        "--runner-path",
+        "--scala-cli-sha256"
+      )
     if options.keySet != expected then Left("property evidence CLI mismatch")
     else
       val outputDir = Path.of(options.getOrElse("--output-dir", "")).toAbsolutePath.normalize()
@@ -67,13 +75,15 @@ object PropertyEvidenceMain:
       val commandSha = options.getOrElse("--command-argv-sha256", "")
       val runnerPath =
         Path.of(options.getOrElse("--runner-path", "")).toAbsolutePath.normalize()
+      val scalaCliSha = options.getOrElse("--scala-cli-sha256", "")
       if !Set("A", "B", "C").contains(profile) then Left("unknown Scala profile")
       else if !Sha256Pattern.matches(commandSha) then Left("command argv SHA mismatch")
+      else if !Sha256Pattern.matches(scalaCliSha) then Left("Scala CLI SHA mismatch")
       else if !Files.isDirectory(s1Root) ||
         !Files.isRegularFile(runnerPath) ||
         Files.isSymbolicLink(runnerPath)
       then Left("property evidence input path mismatch")
-      else Right(Cli(outputDir, s1Root, profile, commandSha, runnerPath))
+      else Right(Cli(outputDir, s1Root, profile, commandSha, runnerPath, scalaCliSha))
 
   private def sha256(path: Path): String =
     sha256Bytes(Files.readAllBytes(path))
@@ -92,8 +102,7 @@ object PropertyEvidenceMain:
         scalaRoot.resolve("project.scala"),
         scalaRoot.resolve("selected-profile.scala"),
         scalaRoot.resolve("src/main/scala"),
-        scalaRoot.resolve("src/test/scala"),
-        scalaRoot.resolve("benchmarks")
+        scalaRoot.resolve("src/test/scala")
       )
     val files = roots
       .flatMap { root =>
@@ -341,8 +350,13 @@ object PropertyEvidenceMain:
     executionReport.put("seedCorpusSha256", sha256(seedCorpus))
     executionReport.put("seedCount", seeds.size)
     executionReport.put("minimumSuccessfulPerSeed", minimumSuccessfulPerSeed)
+    executionReport.put(
+      "maximumDiscardRatio",
+      propertyPlanRoot.path("maximumDiscardRatio").doubleValue()
+    )
     executionReport.put("framework", "scala-check-1.19.0")
     executionReport.put("toolchainProfile", cli.profile)
+    executionReport.put("scalaCliBinarySha256", cli.scalaCliSha256)
     executionReport.put("commandArgvSha256", cli.commandArgvSha256)
     executionReport.put("runnerSha256", sha256(cli.runnerPath))
     executionReport.put("sourceClosureSha256", sourceClosure(scalaRoot))

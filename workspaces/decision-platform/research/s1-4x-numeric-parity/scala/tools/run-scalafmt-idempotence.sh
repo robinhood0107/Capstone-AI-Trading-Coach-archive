@@ -3,7 +3,7 @@ set -euo pipefail
 
 SCALA_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 S1_ROOT="$(cd -- "$SCALA_ROOT/.." && pwd -P)"
-SCALA_CLI="${S1_4X_SCALA_CLI_BIN:-/home/pjjpj/.local/bin/scala-cli}"
+SCALA_CLI="${S1_4X_SCALA_CLI_BIN:?set exact Scala CLI 1.15.0 binary path from readiness packet}"
 OUTPUT_DIR=""
 
 usage() {
@@ -27,10 +27,8 @@ done
 [[ "$OUTPUT_DIR" == /* && ! -e "$OUTPUT_DIR" && ! -L "$OUTPUT_DIR" ]] || usage
 
 CACHE_ROOT="${S1_4X_CACHE_ROOT:-$HOME/.cache/s1-4x}"
-COURSIER_ARCHIVE_CACHE="${S1_4X_COURSIER_ARCHIVE_CACHE:-$HOME/.cache/coursier/arc}"
-SCALAFMT_RELATIVE="https/github.com/scalameta/scalafmt/releases/download/v3.11.4/scalafmt-x86_64-pc-linux.zip"
-SCALAFMT_ARCHIVE="${S1_4X_SCALAFMT_ARCHIVE:-$CACHE_ROOT/coursier/$SCALAFMT_RELATIVE}"
-SCALAFMT_EXECUTABLE="${S1_4X_SCALAFMT_BIN:-$COURSIER_ARCHIVE_CACHE/$SCALAFMT_RELATIVE/scalafmt}"
+SCALAFMT_ARCHIVE="${S1_4X_SCALAFMT_ARCHIVE:?set exact pinned Scalafmt 3.11.4 archive path}"
+SCALAFMT_EXECUTABLE="${S1_4X_SCALAFMT_BIN:?set exact resolved Scalafmt 3.11.4 executable path}"
 mkdir -p "$CACHE_ROOT/tmp" "$CACHE_ROOT/coursier"
 export TMPDIR="$CACHE_ROOT/tmp"
 export TEMP="$TMPDIR"

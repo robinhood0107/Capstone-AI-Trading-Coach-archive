@@ -203,7 +203,10 @@ final class BenchmarkInvocation private (
     // JMH setup의 강제 평가도 timing 밖 실패 경계다. numeric kernel이 예외를 내면
     // 유효한 score를 만들지 않고 fork 자체를 exit 70으로 닫는다.
     val valid =
-      try prepared.exists(value => runPrepared(value).isFinite)
+      try
+        prepared.exists(value => runPrepared(value).isFinite) &&
+        JvmForkEvidence.record() &&
+        JvmForkEvidence.markMeasurementReady()
       catch case NonFatal(_) => false
     if !valid then System.exit(70)
 
