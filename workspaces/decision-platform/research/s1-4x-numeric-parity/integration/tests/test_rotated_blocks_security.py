@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import signal
@@ -548,6 +549,44 @@ def test_host_validity_verifies_bytes_pass_state_and_frozen_policy(
             plan=plan,
             root_pid=os.getpid(),
         )
+
+
+def test_host_validity_hash_and_parse_share_one_snapshot(
+    tmp_path: Path,
+    plan: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report_path = tmp_path / "host-validity.json"
+    report_a = _host_report(plan)
+    report_b = _host_report(plan)
+    report_a["portableHostIdSha256"] = "a" * 64
+    report_b["portableHostIdSha256"] = "b" * 64
+    report_a_bytes = json.dumps(report_a, allow_nan=False).encode("utf-8")
+    report_b_bytes = json.dumps(report_b, allow_nan=False).encode("utf-8")
+    report_path.write_bytes(report_a_bytes)
+    original_strict_json_load = runner.strict_json_load
+    swap_attempted = False
+
+    def aba_parse(candidate: Path) -> Any:
+        nonlocal swap_attempted
+        if candidate == report_path:
+            swap_attempted = True
+            report_path.write_bytes(report_b_bytes)
+            parsed = original_strict_json_load(candidate)
+            report_path.write_bytes(report_a_bytes)
+            return parsed
+        return original_strict_json_load(candidate)
+
+    monkeypatch.setattr(runner, "strict_json_load", aba_parse)
+    binding = runner._verify_host_validity_report(
+        report_path,
+        plan=plan,
+        root_pid=os.getpid(),
+    )
+
+    assert swap_attempted is False
+    assert binding["sha256"] == hashlib.sha256(report_a_bytes).hexdigest()
+    assert binding["portableHostIdSha256"] == "a" * 64
 
 
 def test_measurement_transition_is_exact_and_tamper_evident(
