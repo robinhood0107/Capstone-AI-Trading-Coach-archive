@@ -6,12 +6,15 @@ import           Criterion.Main (Benchmark, bench, bgroup, defaultMain, env, nf)
 import           Data.Aeson (FromJSON (parseJSON), Value, eitherDecodeFileStrict', object,
                              withObject, (.:), (.=))
 import           Data.Binary.Get (getDoublele, runGet)
+import           Data.List (find)
 import           Data.Maybe (fromMaybe)
 import           Data.Text (Text)
 import           System.Directory (canonicalizePath, doesDirectoryExist, doesFileExist,
                                    pathIsSymbolicLink)
 import           System.Environment (lookupEnv)
-import           System.FilePath (takeDirectory, takeFileName, (</>))
+import           System.Exit (ExitCode (ExitSuccess))
+import           System.FilePath (isAbsolute, takeDirectory, takeFileName, (</>))
+import           System.Process (readProcessWithExitCode)
 
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
@@ -204,16 +207,103 @@ main :: IO ()
 main = do
   planPath <- configuredPath "S1_4X_BENCHMARK_PLAN" "../benchmarks/benchmark-plan.v1.json"
   fixtureRoot <- configuredPath "S1_4X_BENCHMARK_FIXTURE_ROOT" "../contract/fixtures"
+  qualificationPath <- requiredConfiguredPath "S1_4X_BENCHMARK_QUALIFICATION"
   verifyPlanLock planPath
   plan <- decodeFile planPath
   either fail pure (validatePlan plan)
+  selectedCases <- selectedBenchmarkCases plan
   defaultMain
     [ env
-        (loadFrozenInputs fixtureRoot)
-        (\inputs -> bgroup "" (fmap (benchmark inputs) (planCases plan)))
+        (setupBenchmarkEnvironment fixtureRoot qualificationPath selectedCases)
+        (bgroup "" . zipWith benchmark selectedCases)
     ]
-  where
-    planCases (BenchmarkPlan _ cases) = cases
+
+selectedBenchmarkCases :: BenchmarkPlan -> IO [BenchmarkCase]
+selectedBenchmarkCases (BenchmarkPlan selectors cases) = do
+  configured <- lookupEnv "S1_4X_BENCHMARK_SELECTOR_ID"
+  case configured of
+    Nothing -> pure cases
+    Just selectorIdText ->
+      case find ((== Text.pack selectorIdText) . selectorId) selectors of
+        Nothing -> fail "configured Haskell benchmark selector is unknown"
+        Just selector -> do
+          unless
+            (selectorBoundaryId selector == "haskell")
+            (fail "configured benchmark selector is not Haskell")
+          let selected =
+                filter
+                  ((`elem` selectorExpectedCaseIds selector) . benchmarkCaseId)
+                  cases
+          unless
+            (fmap benchmarkCaseId selected == selectorExpectedCaseIds selector)
+            (fail "configured benchmark selector case closure mismatch")
+          pure selected
+
+setupBenchmarkEnvironment ::
+  FilePath ->
+  FilePath ->
+  [BenchmarkCase] ->
+  IO [PreparedCase]
+setupBenchmarkEnvironment fixtureRoot qualificationPath benchmarkCases = do
+  inputs <- loadFrozenInputs fixtureRoot
+  preparedCases <- traverse (setupPreparedCase inputs) benchmarkCases
+  -- Criterion이 env 값을 다시 force하기 전에 전체 setup closure를 닫아 PRE_RUN 경계를 보존한다.
+  rnf preparedCases `seq` markMeasurementEntered qualificationPath
+  pure preparedCases
+
+markMeasurementEntered :: FilePath -> IO ()
+markMeasurementEntered path = do
+  pythonPath <-
+    verifiedMarkerInput
+      "S1_4X_BENCHMARK_MARKER_PYTHON"
+      "S1_4X_BENCHMARK_MARKER_PYTHON_SHA256"
+  markerPath <-
+    verifiedMarkerInput
+      "S1_4X_BENCHMARK_MARKER_SCRIPT"
+      "S1_4X_BENCHMARK_MARKER_SCRIPT_SHA256"
+  (exitCode, standardOutput, standardError) <-
+    readProcessWithExitCode
+      pythonPath
+      [ markerPath,
+        "mark-measurement-entered",
+        "--qualification",
+        path
+      ]
+      ""
+  unless
+    ( exitCode == ExitSuccess
+        && standardOutput == "{\"status\": \"MEASUREMENT_ENTERED\"}\n"
+        && null standardError
+    )
+    (fail "INVALID_PRE_RUN_QUALIFICATION_STATE")
+
+verifiedMarkerInput :: String -> String -> IO FilePath
+verifiedMarkerInput pathVariable shaVariable = do
+  path <- requiredConfiguredPath pathVariable
+  expectedSha256 <- requiredConfiguredValue shaVariable
+  payload <- BS.readFile path
+  unless
+    (TextEncoding.decodeUtf8 (sha256Hex payload) == Text.pack expectedSha256)
+    (fail "benchmark marker input SHA-256 mismatch")
+  pure path
+
+requiredConfiguredPath :: String -> IO FilePath
+requiredConfiguredPath variable = do
+  configured <- requiredConfiguredValue variable
+  unless (isAbsolute configured) (fail (variable <> " must be absolute"))
+  symbolic <- pathIsSymbolicLink configured
+  exists <- doesFileExist configured
+  unless (exists && not symbolic) (fail (variable <> " must be a regular non-symlink"))
+  canonical <- canonicalizePath configured
+  unless (canonical == configured) (fail (variable <> " must already be canonical"))
+  pure canonical
+
+requiredConfiguredValue :: String -> IO String
+requiredConfiguredValue variable = do
+  configured <- lookupEnv variable
+  case configured of
+    Just value | not (null value) -> pure value
+    _ -> fail (variable <> " is required")
 
 configuredPath :: String -> FilePath -> IO FilePath
 configuredPath variable fallback = do
@@ -307,11 +397,9 @@ require :: Bool -> String -> Either String ()
 require condition message =
   if condition then Right () else Left message
 
-benchmark :: FrozenInputs -> BenchmarkCase -> Benchmark
-benchmark inputs benchmarkCase =
-  env
-    (setupPreparedCase inputs benchmarkCase)
-    (bench (Text.unpack (benchmarkCaseId benchmarkCase)) . nf runPrepared)
+benchmark :: BenchmarkCase -> PreparedCase -> Benchmark
+benchmark benchmarkCase prepared =
+  bench (Text.unpack (benchmarkCaseId benchmarkCase)) (nf runPrepared prepared)
 
 setupPreparedCase :: FrozenInputs -> BenchmarkCase -> IO PreparedCase
 setupPreparedCase inputs benchmarkCase = do

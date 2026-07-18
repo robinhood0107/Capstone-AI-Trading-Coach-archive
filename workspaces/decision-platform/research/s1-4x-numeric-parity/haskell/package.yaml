@@ -124,6 +124,7 @@ benchmarks:
       - base
       - criterion == 1.6.4.0
       - deepseq
+      - process
       - s1-4x-haskell
       - s1-4x-core
       - text
