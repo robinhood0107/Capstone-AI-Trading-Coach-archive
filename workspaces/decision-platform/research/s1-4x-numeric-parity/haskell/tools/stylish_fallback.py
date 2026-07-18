@@ -592,6 +592,7 @@ def _probe_command(arguments: argparse.Namespace) -> None:
     output = arguments.output.resolve(strict=False)
     receipt: dict[str, object] = {
         "schemaVersion": "s1.4x-stylish-ghc2024-capability-result-v1",
+        "formatterPathId": "STYLISH_HASKELL_0_15_1_0",
         "formatterPath": str(formatter),
         "formatterSha256": FORMATTER_SHA256,
         "formatterVersion": "0.15.1.0",
