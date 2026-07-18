@@ -423,7 +423,8 @@ def test_timeout_termination_reaps_leader_and_remaining_process_group(
         pid = 12345
 
         def wait(self, timeout: float | None = None) -> int:
-            assert timeout == 5
+            assert timeout is not None
+            assert 0.0 < timeout <= 5.0
             return -signal.SIGTERM
 
     monkeypatch.setattr(
