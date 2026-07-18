@@ -10,6 +10,7 @@ import json
 import math
 import os
 import re
+import shutil
 import stat
 import subprocess
 import sys
@@ -678,6 +679,93 @@ def validate_current_compatibility_status(
         label="current-compatibility-evidence",
     )
     return result
+
+
+def build_oci_build_command(
+    *,
+    docker: Path,
+    containerfile: Path,
+    context: Path,
+    image_tag: str,
+    binary_sha256: str,
+) -> list[str]:
+    """Digest-pinned context를 network-disabled BuildKit command로 조립한다."""
+
+    _require_sha256(binary_sha256, label="oci-binary")
+    if (
+        re.fullmatch(r"local/s1-4x-haskell:[a-z0-9._-]+", image_tag) is None
+        or not containerfile.is_absolute()
+        or not context.is_absolute()
+    ):
+        raise WorkflowError("OCI_BUILD_INPUT_INVALID")
+    return [
+        str(docker),
+        "build",
+        "--network",
+        "none",
+        "--pull=false",
+        "--file",
+        str(containerfile),
+        "--build-arg",
+        f"S1_4X_BINARY_SHA256={binary_sha256}",
+        "--tag",
+        image_tag,
+        str(context),
+    ]
+
+
+def build_oci_run_command(
+    *,
+    docker: Path,
+    image_tag: str,
+    output_directory: Path,
+    output_name: str,
+    request_path: str,
+    uid: int,
+    gid: int,
+) -> list[str]:
+    """Source/home/credential mount 없이 offline process replay command를 만든다."""
+
+    if (
+        re.fullmatch(r"local/s1-4x-haskell:[a-z0-9._-]+", image_tag) is None
+        or not output_directory.is_absolute()
+        or re.fullmatch(r"[a-z0-9._-]+\.json", output_name) is None
+        or not request_path.startswith("/opt/s1-4x/fixtures/")
+        or type(uid) is not int
+        or type(gid) is not int
+        or uid <= 0
+        or gid <= 0
+    ):
+        raise WorkflowError("OCI_RUN_INPUT_INVALID")
+    return [
+        str(docker),
+        "run",
+        "--rm",
+        "--network",
+        "none",
+        "--read-only",
+        "--cap-drop=ALL",
+        "--security-opt=no-new-privileges",
+        "--pids-limit",
+        "64",
+        "--memory",
+        "1g",
+        "--cpus",
+        "1",
+        "--user",
+        f"{uid}:{gid}",
+        "--tmpfs",
+        "/tmp:rw,noexec,nosuid,nodev,size=16m",
+        "--mount",
+        f"type=bind,src={output_directory},dst=/out",
+        image_tag,
+        "--request",
+        request_path,
+        "--fixture-root",
+        "/opt/s1-4x/fixtures",
+        "--output",
+        f"/out/{output_name}",
+    ]
 
 
 def _iso_now() -> str:
@@ -1990,6 +2078,297 @@ def _validate_compatibility(arguments: argparse.Namespace) -> None:
     )
 
 
+def _copy_oci_context(
+    *,
+    context: Path,
+    containerfile: Path,
+    binary: Path,
+    fixture_root: Path,
+) -> None:
+    if context.exists() or context.is_symlink():
+        raise WorkflowError("OCI_CONTEXT_ALREADY_EXISTS")
+    for path in fixture_root.rglob("*"):
+        if path.is_symlink():
+            raise WorkflowError(f"OCI_FIXTURE_SYMLINK_FORBIDDEN:{path}")
+    context.mkdir(mode=0o700)
+    shutil.copy2(containerfile, context / "Containerfile")
+    staged_binary = context / "s1-4x-haskell"
+    shutil.copy2(binary, staged_binary)
+    staged_binary.chmod(0o555)
+    shutil.copytree(
+        fixture_root,
+        context / "fixtures",
+        copy_function=shutil.copy2,
+    )
+
+
+def _oci_correctness(arguments: argparse.Namespace) -> None:
+    output = _reserve_directory(arguments.output_dir)
+    haskell_root = Path(__file__).resolve(strict=True).parent.parent
+    numeric_root = haskell_root.parent
+    repo_root = numeric_root.parents[3]
+    candidate_commit = _repo_commit(repo_root)
+    evidence = _load_haskell_evidence(haskell_root)
+    source_tree_sha256 = evidence.benchmark_source_tree_sha256(haskell_root)
+    plan_path = _absolute_regular(
+        numeric_root / "benchmarks/benchmark-plan.v1.json",
+        label="QUALIFICATION_PLAN",
+    )
+    plan = strict_json_load(plan_path)
+    configuration, _ = _qualification_contract(plan)
+    profile_path = _absolute_regular(
+        haskell_root / "selected-profile.v1.json",
+        label="SELECTED_PROFILE",
+    )
+    profile = strict_json_load(profile_path)
+    evidence.validate_selected_profile_document(
+        profile,
+        expected_compiler_sha256=evidence.AUTHORITATIVE_GHC_SHA256,
+        expected_source_tree_sha256=source_tree_sha256,
+        expected_qualification_plan_sha256=sha256_file(plan_path),
+        expected_selector_config_sha256=canonical_sha256(configuration),
+    )
+    if profile.get("schemaVersion") != FINAL_PROFILE_SCHEMA_VERSION:
+        raise WorkflowError("OCI_SELECTED_PROFILE_NOT_FINAL")
+    evidence.validate_source_manifest(
+        haskell_root,
+        haskell_root / "source-inputs.v1.json",
+    )
+    profile_id = profile["profileId"]
+    options = profile_options(profile_id)
+    docker = _required_environment_path("S1_4X_DOCKER_BIN")
+    docker_sha256 = _require_sha256(
+        os.environ.get("S1_4X_DOCKER_SHA256"),
+        label="docker-bin",
+    )
+    if sha256_file(docker) != docker_sha256:
+        raise WorkflowError("DOCKER_SHA256_MISMATCH")
+    ghcup = _required_environment_path("S1_4X_GHCUP_BIN")
+    stack = _required_environment_path("S1_4X_STACK_BIN")
+    ghc = _required_environment_path("S1_4X_AUTHORITATIVE_GHC_BIN")
+    cache_value = os.environ.get("S1_4X_CACHE_ROOT")
+    if cache_value is None:
+        raise WorkflowError("REQUIRED_ENVIRONMENT_MISSING:S1_4X_CACHE_ROOT")
+    cache_root = _absolute_existing_directory(Path(cache_value), label="CACHE_ROOT")
+    suffix = f"{candidate_commit[:12]}-{profile_id}"
+    stack_root = cache_root / f"stack-root-oci-{suffix}"
+    context = cache_root / f"oci-context-{suffix}"
+    docker_config = cache_root / f"docker-config-{suffix}"
+    for path in (stack_root, context, docker_config):
+        if path.exists() or path.is_symlink():
+            raise WorkflowError(f"OCI_CACHE_PATH_ALREADY_EXISTS:{path.name}")
+    stack_root.mkdir(mode=0o700)
+    docker_config.mkdir(mode=0o700)
+    environment = _sealed_child_environment(ghc_bin=ghc, stack_bin=stack)
+    environment["DOCKER_CONFIG"] = str(docker_config)
+    stack_yaml = _absolute_regular(
+        haskell_root / "stack.yaml",
+        label="AUTHORITATIVE_STACK_YAML",
+    )
+    build_candidate = build_stack_command(
+        ghcup=ghcup,
+        stack=stack,
+        stack_yaml=stack_yaml,
+        stack_root=stack_root,
+        ghc_version="9.10.3",
+        operation=[
+            "build",
+            "--no-run-tests",
+            "--pedantic",
+            f"--ghc-options={' '.join(options)}",
+        ],
+    )
+    commands = [
+        _run_logged(
+            build_candidate,
+            cwd=haskell_root,
+            environment=environment,
+            phase="oci-stack-build",
+            output_directory=output,
+        )
+    ]
+    binary = _find_candidate_binary(haskell_root, ghc_version="9.10.3")
+    fixture_root = _absolute_existing_directory(
+        numeric_root / "contract/fixtures",
+        label="FIXTURE_ROOT",
+    )
+    containerfile = _absolute_regular(
+        haskell_root / "Containerfile",
+        label="CONTAINERFILE",
+    )
+    _copy_oci_context(
+        context=context,
+        containerfile=containerfile,
+        binary=binary,
+        fixture_root=fixture_root,
+    )
+    binary_sha256 = sha256_file(binary)
+    image_tag = f"local/s1-4x-haskell:{suffix}"
+    image_build = build_oci_build_command(
+        docker=docker,
+        containerfile=context / "Containerfile",
+        context=context,
+        image_tag=image_tag,
+        binary_sha256=binary_sha256,
+    )
+    commands.append(
+        _run_logged(
+            image_build,
+            cwd=cache_root,
+            environment=environment,
+            phase="oci-image-build",
+            output_directory=output,
+        )
+    )
+    inspect_command = [
+        str(docker),
+        "image",
+        "inspect",
+        "--format",
+        "{{json .}}",
+        image_tag,
+    ]
+    commands.append(
+        _run_logged(
+            inspect_command,
+            cwd=cache_root,
+            environment=environment,
+            phase="oci-image-inspect",
+            output_directory=output,
+        )
+    )
+    inspect_path = output / "oci-image-inspect.stdout"
+    image = strict_json_load(inspect_path)
+    image_id = image.get("Id") if isinstance(image, dict) else None
+    if (
+        type(image_id) is not str
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", image_id) is None
+    ):
+        raise WorkflowError("OCI_IMAGE_ID_INVALID")
+    runtime_output = output / "runtime"
+    runtime_output.mkdir(mode=0o700)
+    compare_script = _absolute_regular(
+        numeric_root / "oracle/compare_results.py",
+        label="COMPARE_RESULTS",
+    )
+    python_bin = _absolute_regular(
+        Path("/usr/bin/python3").resolve(strict=True),
+        label="PYTHON",
+        executable=True,
+    )
+    matrices = (
+        (
+            "canonical",
+            "/opt/s1-4x/fixtures/small/canonical-inputs.v1.json",
+            fixture_root / "small/canonical-inputs.v1.json",
+            fixture_root / "expected/canonical-results.v1.json",
+        ),
+        (
+            "semantic",
+            "/opt/s1-4x/fixtures/invalid/semantic-errors.v1.json",
+            fixture_root / "invalid/semantic-errors.v1.json",
+            fixture_root / "invalid/semantic-errors.expected.v1.json",
+        ),
+    )
+    comparisons: list[dict[str, Any]] = []
+    for label, container_request, host_request, expected in matrices:
+        actual = runtime_output / f"{label}.actual.json"
+        comparison = output / f"{label}.oci-comparison.json"
+        run_command = build_oci_run_command(
+            docker=docker,
+            image_tag=image_tag,
+            output_directory=runtime_output,
+            output_name=actual.name,
+            request_path=container_request,
+            uid=os.getuid(),
+            gid=os.getgid(),
+        )
+        commands.append(
+            _run_logged(
+                run_command,
+                cwd=cache_root,
+                environment=environment,
+                phase=f"oci-{label}-run",
+                output_directory=output,
+            )
+        )
+        _absolute_regular(actual, label=f"OCI_{label.upper()}_ACTUAL")
+        compare_command = [
+            str(python_bin),
+            str(compare_script),
+            "--expected",
+            str(expected),
+            "--actual",
+            str(actual),
+            "--request",
+            str(host_request),
+            "--output",
+            str(comparison),
+        ]
+        commands.append(
+            _run_logged(
+                compare_command,
+                cwd=repo_root,
+                environment=environment,
+                phase=f"oci-{label}-compare",
+                output_directory=output,
+            )
+        )
+        _comparison_status(comparison)
+        comparisons.append(
+            {
+                "matrixId": label,
+                "actualSha256": sha256_file(actual),
+                "comparisonSha256": sha256_file(comparison),
+                "mismatchCount": 0,
+                "status": "PASS",
+            }
+        )
+    if evidence.benchmark_source_tree_sha256(haskell_root) != source_tree_sha256:
+        raise WorkflowError("SOURCE_TREE_CHANGED_DURING_OCI")
+    if _repo_commit(repo_root) != candidate_commit:
+        raise WorkflowError("CANDIDATE_COMMIT_CHANGED_DURING_OCI")
+    receipt = {
+        "schemaVersion": "s1.4x-haskell-oci-correctness-v1",
+        "status": "PASS",
+        "candidateSourceCommit": candidate_commit,
+        "sourceTreeSha256": source_tree_sha256,
+        "selectedProfileSha256": sha256_file(profile_path),
+        "profileId": profile_id,
+        "ghcOptions": list(options),
+        "optionsSha256": canonical_sha256(list(options)),
+        "containerfileSha256": sha256_file(containerfile),
+        "baseImage": (
+            "docker.io/library/haskell@sha256:"
+            "417d4bc30ac7d8d5ff04ec97937f86eb508b0c76bfd1a39b5ec225688531aa9d"
+        ),
+        "candidateBinarySha256": binary_sha256,
+        "dockerPath": str(docker),
+        "dockerSha256": docker_sha256,
+        "imageTag": image_tag,
+        "imageId": image_id,
+        "buildNetwork": "none",
+        "runtimeNetwork": "none",
+        "runtimeMounts": ["output-only"],
+        "commands": commands,
+        "comparisons": comparisons,
+        "mismatchCount": 0,
+    }
+    receipt_path = output / "oci-correctness-receipt.v1.json"
+    atomic_write_json_exclusive(receipt_path, receipt)
+    print(
+        json.dumps(
+            {
+                "imageId": image_id,
+                "receiptPath": str(receipt_path),
+                "receiptSha256": sha256_file(receipt_path),
+                "status": "PASS",
+            },
+            sort_keys=True,
+        )
+    )
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -2026,6 +2405,9 @@ def _parser() -> argparse.ArgumentParser:
     validate_compatibility = commands.add_parser("validate-compatibility")
     validate_compatibility.add_argument("--result", type=Path, required=True)
     validate_compatibility.set_defaults(handler=_validate_compatibility)
+    oci_correctness = commands.add_parser("oci-correctness")
+    oci_correctness.add_argument("--output-dir", type=Path, required=True)
+    oci_correctness.set_defaults(handler=_oci_correctness)
     return parser
 
 
