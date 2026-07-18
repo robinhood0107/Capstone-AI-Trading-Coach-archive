@@ -469,6 +469,30 @@ def test_process_group_probe_treats_esrch_as_absent(
     assert runner._process_group_exists(12345) is False
 
 
+def test_completed_native_process_rejects_and_cleans_surviving_descendants(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    terminated: list[int] = []
+
+    class FinishedLeader:
+        pid = 12345
+
+    monkeypatch.setattr(runner, "_process_group_exists", lambda process_group_id: True)
+    monkeypatch.setattr(
+        runner,
+        "_terminate_process_group",
+        lambda process: terminated.append(process.pid),
+    )
+
+    with pytest.raises(
+        ContractError,
+        match="NATIVE_PROCESS_GROUP_SURVIVED_EXIT",
+    ):
+        runner._reject_surviving_process_group(FinishedLeader())
+
+    assert terminated == [12345]
+
+
 def test_command_renderer_rejects_unbound_or_formatted_placeholders() -> None:
     with pytest.raises(ContractError, match="UNKNOWN_COMMAND_PLACEHOLDER"):
         runner._render_command(["tool", "{unbound}"], {"bound": "value"})
