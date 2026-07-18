@@ -35,7 +35,11 @@ class HLintInventoryTests(unittest.TestCase):
         )
 
         self.assertEqual(summary.allowance_count, 6)
-        self.assertEqual(summary.imported_symbol_count, 11)
+        self.assertEqual(summary.imported_symbol_count, 12)
+        self.assertIn(
+            "System.Environment(getExecutablePath,lookupEnv)",
+            {entry["symbol"] for entry in manifest["entries"]},
+        )
 
     def test_throw_io_is_a_global_restriction_not_a_whitelist(self) -> None:
         configuration = (HASKELL_ROOT / ".hlint.yaml").read_text(encoding="utf-8")
