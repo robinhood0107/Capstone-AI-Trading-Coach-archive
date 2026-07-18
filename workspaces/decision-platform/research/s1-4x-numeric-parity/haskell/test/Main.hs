@@ -6,6 +6,7 @@ import System.Environment (getArgs)
 
 import qualified S14X.AtomicOutputSpec as AtomicOutputSpec
 import qualified S14X.BenchmarkStaticSpec as BenchmarkStaticSpec
+import qualified S14X.BenchmarkValidationSpec as BenchmarkValidationSpec
 import qualified S14X.ContractSpec as ContractSpec
 import qualified S14X.CoreSpec as CoreSpec
 import qualified S14X.PropertyEvidence as PropertyEvidence
@@ -29,6 +30,7 @@ tests =
       localOption (QuickCheckTests 1000) PropertySpec.tests,
       AtomicOutputSpec.tests,
       BenchmarkStaticSpec.tests,
+      BenchmarkValidationSpec.tests,
       ContractSpec.tests,
       PropertyEvidenceSpec.tests,
       StaticPolicySpec.tests
