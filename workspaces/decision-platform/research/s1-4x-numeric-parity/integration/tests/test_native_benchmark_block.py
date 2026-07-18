@@ -12,6 +12,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 from unittest import TestCase
+from unittest.mock import patch
 
 INTEGRATION = Path(__file__).resolve().parents[1]
 BENCHMARKS = INTEGRATION.parent / "benchmarks"
@@ -19,6 +20,7 @@ FIXTURES = INTEGRATION.parent / "contract/fixtures"
 sys.path.insert(0, str(INTEGRATION))
 sys.path.insert(0, str(BENCHMARKS))
 
+import native_benchmark_block as native_block_module  # noqa: E402
 from gate import GateError, strict_json_load  # noqa: E402
 from mark_benchmark_measurement import main as mark_measurement_main  # noqa: E402
 from native_benchmark_block import (  # noqa: E402
@@ -142,6 +144,14 @@ class NativeBenchmarkBlockTests(TestCase):
         temporary = Path(self.enterContext(tempfile.TemporaryDirectory()))
         (temporary / "raw").mkdir()
         (temporary / "receipts").mkdir()
+        haskell_root = temporary / "haskell"
+        haskell_root.mkdir()
+        contract_root = temporary / "contract"
+        contract_root.mkdir()
+        merged_provenance = contract_root / "toolchain-provenance.v1.json"
+        merged_provenance.write_bytes(
+            (PLAN.parent.parent / "contract/toolchain-provenance.v1.json").read_bytes()
+        )
         input_ledger = temporary / "input-ledger.json"
         input_ledger.write_text('{"status":"fixture"}', encoding="utf-8")
         benchmark_executable = temporary / "criterion-benchmark"
@@ -150,11 +160,11 @@ class NativeBenchmarkBlockTests(TestCase):
         ghcup.write_bytes(b"ghcup fixture")
         stack = temporary / "stack"
         stack.write_bytes(b"stack fixture")
-        stack_yaml = temporary / "stack.yaml"
+        stack_yaml = haskell_root / "stack.yaml"
         stack_yaml.write_text("resolver: ghc-9.10.3\n", encoding="utf-8")
         selected_options = ["-O0", "-fasm"]
         effective_options_sha256 = _canonical_sha256(selected_options)
-        selected_profile = temporary / "haskell-selected-profile.json"
+        selected_profile = haskell_root / "selected-profile.v1.json"
         selected_profile.write_text(
             json.dumps(
                 {
@@ -168,6 +178,69 @@ class NativeBenchmarkBlockTests(TestCase):
             encoding="utf-8",
         )
         plan = strict_json_load(PLAN)
+        plan_path = temporary / "benchmarks/benchmark-plan.v1.json"
+        plan_path.parent.mkdir()
+        plan_path.write_text(json.dumps(plan, sort_keys=True), encoding="utf-8")
+        ghcup_sha256 = hashlib.sha256(ghcup.read_bytes()).hexdigest()
+        stack_sha256 = hashlib.sha256(stack.read_bytes()).hexdigest()
+        self.enterContext(
+            patch.object(
+                native_block_module,
+                "FROZEN_GHCUP_SHA256",
+                ghcup_sha256,
+            )
+        )
+        self.enterContext(
+            patch.object(
+                native_block_module,
+                "FROZEN_STACK_SHA256",
+                stack_sha256,
+            )
+        )
+        toolchain_lock = haskell_root / "toolchain-lock.v1.json"
+        toolchain_lock.write_text(
+            json.dumps(
+                {
+                    "schemaVersion": "s1.4x-haskell-toolchain-lock-v1",
+                    "snapshot": "lts-24.50",
+                    "ghcup": {
+                        "pathId": "GHCUP_0_2_6_2_LINUX_X86_64",
+                        "version": "0.2.6.2",
+                        "sha256": ghcup_sha256,
+                    },
+                    "authoritativeGhc": {
+                        "pathId": "GHCUP_GHC_9_10_3",
+                        "version": "9.10.3",
+                        "sha256": "1" * 64,
+                    },
+                    "compatibilityGhc": {
+                        "pathId": "GHCUP_GHC_9_14_1",
+                        "version": "9.14.1",
+                        "sha256": "2" * 64,
+                    },
+                    "stack": {
+                        "pathId": "GHCUP_STACK_3_11_1",
+                        "version": "3.11.1",
+                        "sha256": stack_sha256,
+                    },
+                    "hlint": {
+                        "pathId": "HLINT_3_10",
+                        "version": "3.10",
+                        "sha256": "3" * 64,
+                    },
+                    "stylishHaskell": {
+                        "pathId": "STYLISH_HASKELL_0_15_1_0",
+                        "version": "0.15.1.0",
+                        "sha256": "4" * 64,
+                    },
+                    "toolchainProvenanceSha256": hashlib.sha256(
+                        merged_provenance.read_bytes()
+                    ).hexdigest(),
+                },
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
         selector = next(
             item
             for item in plan["familySelectors"]
@@ -176,8 +249,8 @@ class NativeBenchmarkBlockTests(TestCase):
         selector_id = selector["selectorId"]
         expected_case_ids = selector["expectedCaseIds"]
         receipt_provenance = {
-            "planPath": str(PLAN.resolve()),
-            "planSha256": hashlib.sha256(PLAN.read_bytes()).hexdigest(),
+            "planPath": str(plan_path.resolve()),
+            "planSha256": hashlib.sha256(plan_path.read_bytes()).hexdigest(),
             "fixtureRootPath": str(FIXTURES.resolve()),
             "fixtureFreezeIdentitySha256": _canonical_sha256(plan["fixtureFreezeIdentity"]),
             "inputLedgerPath": str(input_ledger.resolve()),
@@ -202,6 +275,12 @@ class NativeBenchmarkBlockTests(TestCase):
                 "stackYamlPath": str(stack_yaml.resolve()),
                 "stackYamlSha256": hashlib.sha256(stack_yaml.read_bytes()).hexdigest(),
                 "selectedGhcOptions": selected_options,
+                "toolchainLockPath": str(toolchain_lock.resolve()),
+                "toolchainLockSha256": hashlib.sha256(toolchain_lock.read_bytes()).hexdigest(),
+                "mergedToolchainProvenancePath": str(merged_provenance.resolve()),
+                "mergedToolchainProvenanceSha256": hashlib.sha256(
+                    merged_provenance.read_bytes()
+                ).hexdigest(),
             },
         }
         cases: list[dict[str, Any]] = [
@@ -487,7 +566,7 @@ class NativeBenchmarkBlockTests(TestCase):
             block_directory=temporary,
             native_cases=cases,
             native_statistics_cases=statistics_cases,
-            plan_path=PLAN,
+            plan_path=plan_path,
             fixture_root_path=FIXTURES,
             input_ledger_path=input_ledger,
             effective_runtime_arguments_sha256=effective_options_sha256,
@@ -504,7 +583,7 @@ class NativeBenchmarkBlockTests(TestCase):
                 block_directory=temporary,
                 native_cases=cases,
                 native_statistics_cases=statistics_cases,
-                plan_path=PLAN,
+                plan_path=plan_path,
                 fixture_root_path=FIXTURES,
                 input_ledger_path=input_ledger,
                 effective_runtime_arguments_sha256=effective_options_sha256,
@@ -525,7 +604,7 @@ class NativeBenchmarkBlockTests(TestCase):
                 block_directory=temporary,
                 native_cases=cases,
                 native_statistics_cases=statistics_cases,
-                plan_path=PLAN,
+                plan_path=plan_path,
                 fixture_root_path=FIXTURES,
                 input_ledger_path=input_ledger,
                 effective_runtime_arguments_sha256=effective_options_sha256,
@@ -543,7 +622,7 @@ class NativeBenchmarkBlockTests(TestCase):
                 block_directory=temporary,
                 native_cases=cases,
                 native_statistics_cases=statistics_cases,
-                plan_path=PLAN,
+                plan_path=plan_path,
                 fixture_root_path=FIXTURES,
                 input_ledger_path=input_ledger,
                 effective_runtime_arguments_sha256=effective_options_sha256,
@@ -570,7 +649,7 @@ class NativeBenchmarkBlockTests(TestCase):
                 block_directory=temporary,
                 native_cases=cases,
                 native_statistics_cases=forged_statistics,
-                plan_path=PLAN,
+                plan_path=plan_path,
                 fixture_root_path=FIXTURES,
                 input_ledger_path=input_ledger,
                 effective_runtime_arguments_sha256=effective_options_sha256,
@@ -601,7 +680,7 @@ class NativeBenchmarkBlockTests(TestCase):
                 block_directory=temporary,
                 native_cases=cases,
                 native_statistics_cases=statistics_cases,
-                plan_path=PLAN,
+                plan_path=plan_path,
                 fixture_root_path=FIXTURES,
                 input_ledger_path=input_ledger,
                 effective_runtime_arguments_sha256=effective_options_sha256,
@@ -622,7 +701,7 @@ class NativeBenchmarkBlockTests(TestCase):
                 block_directory=temporary,
                 native_cases=cases,
                 native_statistics_cases=statistics_cases,
-                plan_path=PLAN,
+                plan_path=plan_path,
                 fixture_root_path=FIXTURES,
                 input_ledger_path=input_ledger,
                 effective_runtime_arguments_sha256=effective_options_sha256,
@@ -661,7 +740,64 @@ class NativeBenchmarkBlockTests(TestCase):
                 block_directory=temporary,
                 native_cases=cases,
                 native_statistics_cases=statistics_cases,
-                plan_path=PLAN,
+                plan_path=plan_path,
+                fixture_root_path=FIXTURES,
+                input_ledger_path=input_ledger,
+                effective_runtime_arguments_sha256=effective_options_sha256,
+                profile="baseline-o0-fasm",
+            )
+
+        substitute_ghcup = temporary / "substitute-ghcup"
+        substitute_ghcup.write_bytes(b"substitute ghcup")
+        substitute_receipt = copy.deepcopy(receipt_document)
+        substitute_candidate = substitute_receipt["provenance"]["candidateProvenance"]
+        substitute_candidate["ghcupPath"] = str(substitute_ghcup.resolve())
+        substitute_candidate["ghcupSha256"] = hashlib.sha256(
+            substitute_ghcup.read_bytes()
+        ).hexdigest()
+        substitute_receipt["commandArgv"][0] = str(substitute_ghcup.resolve())
+        install_receipt(substitute_receipt)
+        with self.assertRaisesRegex(
+            GateError,
+            "NATIVE_EXECUTION_PROVENANCE_INVALID",
+        ):
+            validate_native_contract_evidence(
+                evidence,
+                boundary_id="haskell",
+                selector_id=selector_id,
+                block_directory=temporary,
+                native_cases=cases,
+                native_statistics_cases=statistics_cases,
+                plan_path=plan_path,
+                fixture_root_path=FIXTURES,
+                input_ledger_path=input_ledger,
+                effective_runtime_arguments_sha256=effective_options_sha256,
+                profile="baseline-o0-fasm",
+            )
+
+        tampered_lock = json.loads(toolchain_lock.read_text(encoding="utf-8"))
+        tampered_lock["stack"]["sha256"] = "0" * 64
+        toolchain_lock.write_text(
+            json.dumps(tampered_lock, sort_keys=True),
+            encoding="utf-8",
+        )
+        tampered_lock_receipt = copy.deepcopy(receipt_document)
+        tampered_lock_receipt["provenance"]["candidateProvenance"]["toolchainLockSha256"] = (
+            hashlib.sha256(toolchain_lock.read_bytes()).hexdigest()
+        )
+        install_receipt(tampered_lock_receipt)
+        with self.assertRaisesRegex(
+            GateError,
+            "NATIVE_EXECUTION_PROVENANCE_INVALID",
+        ):
+            validate_native_contract_evidence(
+                evidence,
+                boundary_id="haskell",
+                selector_id=selector_id,
+                block_directory=temporary,
+                native_cases=cases,
+                native_statistics_cases=statistics_cases,
+                plan_path=plan_path,
                 fixture_root_path=FIXTURES,
                 input_ledger_path=input_ledger,
                 effective_runtime_arguments_sha256=effective_options_sha256,
@@ -677,8 +813,16 @@ class NativeBenchmarkBlockTests(TestCase):
         scala_root = temporary / "scala"
         (scala_root / "src/main/scala").mkdir(parents=True)
         (scala_root / "benchmarks").mkdir()
+        contract_root = temporary / "contract"
+        contract_root.mkdir()
+        merged_provenance = contract_root / "toolchain-provenance.v1.json"
+        merged_provenance.write_bytes(
+            (PLAN.parent.parent / "contract/toolchain-provenance.v1.json").read_bytes()
+        )
         project_scala = scala_root / "project.scala"
         project_scala.write_text("//> using scala 3.8.4\n", encoding="utf-8")
+        scalafmt_config = scala_root / ".scalafmt.conf"
+        scalafmt_config.write_text("version = 3.11.4\n", encoding="utf-8")
         selected_profile = scala_root / "selected-profile.scala"
         selected_profile.write_text(
             "// selected profile: profile-a\n",
@@ -693,6 +837,71 @@ class NativeBenchmarkBlockTests(TestCase):
         input_ledger.write_text('{"status":"fixture"}', encoding="utf-8")
         benchmark_executable = temporary / "scala-cli"
         benchmark_executable.write_bytes(b"Scala CLI fixture")
+        scala_cli_sha256 = hashlib.sha256(benchmark_executable.read_bytes()).hexdigest()
+        self.enterContext(
+            patch.object(
+                native_block_module,
+                "FROZEN_SCALA_CLI_SHA256",
+                scala_cli_sha256,
+            )
+        )
+        toolchain_lock = scala_root / "toolchain-lock.v1.json"
+        toolchain_lock.write_text(
+            json.dumps(
+                {
+                    "schemaVersion": "s1.4x-scala-toolchain-lock-v1",
+                    "language": "scala",
+                    "mergedToolchainProvenancePath": (
+                        "workspaces/decision-platform/research/"
+                        "s1-4x-numeric-parity/contract/"
+                        "toolchain-provenance.v1.json"
+                    ),
+                    "mergedToolchainProvenanceSha256": hashlib.sha256(
+                        merged_provenance.read_bytes()
+                    ).hexdigest(),
+                    "jdk": {
+                        "javaHomePathId": "TEMURIN_25_0_3_9_LTS",
+                        "implementor": "Eclipse Adoptium",
+                        "runtimeVersion": "25.0.3+9-LTS",
+                        "vmName": "OpenJDK 64-Bit Server VM",
+                        "javaExecutableSha256": "5" * 64,
+                    },
+                    "scalaCli": {
+                        "pathId": "SCALA_CLI_1_15_0",
+                        "version": "1.15.0",
+                        "binarySha256": scala_cli_sha256,
+                        "defaultScalaVersion": "3.8.4",
+                    },
+                    "scala": {
+                        "version": "3.8.4",
+                        "projectPath": (
+                            "workspaces/decision-platform/research/"
+                            "s1-4x-numeric-parity/scala/project.scala"
+                        ),
+                        "projectSha256": hashlib.sha256(project_scala.read_bytes()).hexdigest(),
+                    },
+                    "scalafmt": {
+                        "version": "3.11.4",
+                        "configPath": (
+                            "workspaces/decision-platform/research/"
+                            "s1-4x-numeric-parity/scala/.scalafmt.conf"
+                        ),
+                        "configSha256": hashlib.sha256(scalafmt_config.read_bytes()).hexdigest(),
+                        "runnerPathId": "SCALA_CLI_1_15_0",
+                    },
+                    "scalafix": {
+                        "pathId": "SCALAFIX_0_14_7",
+                        "version": "0.14.7",
+                        "binarySha256": (
+                            "9db6db7359e580de8f4b72cd7c104d70023cf32a278db0c30aefb79c939eb0f3"
+                        ),
+                    },
+                    "sharedDistributionProvenance": {},
+                },
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
         jvm_capability = temporary / "effective-jvm-arguments.json"
         jvm_capability.write_text(
             '{"schemaVersion":"test-effective-jvm-arguments-v1"}',
@@ -816,9 +1025,7 @@ class NativeBenchmarkBlockTests(TestCase):
                         "rawEvidenceSha256": raw_sha,
                         "provenance": {
                             "planPath": str(plan_path.resolve()),
-                            "planSha256": hashlib.sha256(
-                                plan_path.read_bytes()
-                            ).hexdigest(),
+                            "planSha256": hashlib.sha256(plan_path.read_bytes()).hexdigest(),
                             "fixtureRootPath": str(FIXTURES.resolve()),
                             "fixtureFreezeIdentitySha256": _canonical_sha256(
                                 plan["fixtureFreezeIdentity"]
@@ -836,18 +1043,22 @@ class NativeBenchmarkBlockTests(TestCase):
                             "effectiveRuntimeArgumentsSha256": (EFFECTIVE_RUNTIME_ARGUMENTS_SHA256),
                             "candidateProvenance": {
                                 "kind": "scala",
-                                "selectedProfilePath": str(
-                                    selected_profile.resolve()
-                                ),
+                                "selectedProfilePath": str(selected_profile.resolve()),
                                 "selectedProfileSha256": hashlib.sha256(
                                     selected_profile.read_bytes()
                                 ).hexdigest(),
                                 "selectedProfileId": "profile-a",
-                                "sourceInputManifestPath": str(
-                                    source_input_manifest.resolve()
-                                ),
+                                "sourceInputManifestPath": str(source_input_manifest.resolve()),
                                 "sourceInputManifestSha256": hashlib.sha256(
                                     source_input_manifest.read_bytes()
+                                ).hexdigest(),
+                                "toolchainLockPath": str(toolchain_lock.resolve()),
+                                "toolchainLockSha256": hashlib.sha256(
+                                    toolchain_lock.read_bytes()
+                                ).hexdigest(),
+                                "mergedToolchainProvenancePath": str(merged_provenance.resolve()),
+                                "mergedToolchainProvenanceSha256": hashlib.sha256(
+                                    merged_provenance.read_bytes()
                                 ).hexdigest(),
                                 "effectiveJvmArgumentsCapabilityPath": str(
                                     jvm_capability.resolve()
@@ -963,17 +1174,13 @@ class NativeBenchmarkBlockTests(TestCase):
                 plan_path=plan_path,
                 fixture_root_path=FIXTURES,
                 input_ledger_path=input_ledger,
-                effective_runtime_arguments_sha256=(
-                    EFFECTIVE_RUNTIME_ARGUMENTS_SHA256
-                ),
+                effective_runtime_arguments_sha256=(EFFECTIVE_RUNTIME_ARGUMENTS_SHA256),
                 profile="profile-a",
             )
 
         forged_profile = evidence_for(raw_document)
         receipt_document = json.loads(receipt.read_text(encoding="utf-8"))
-        receipt_document["provenance"]["candidateProvenance"][
-            "selectedProfileSha256"
-        ] = "0" * 64
+        receipt_document["provenance"]["candidateProvenance"]["selectedProfileSha256"] = "0" * 64
         receipt.write_text(
             json.dumps(receipt_document, sort_keys=True),
             encoding="utf-8",
@@ -995,9 +1202,42 @@ class NativeBenchmarkBlockTests(TestCase):
                 plan_path=plan_path,
                 fixture_root_path=FIXTURES,
                 input_ledger_path=input_ledger,
-                effective_runtime_arguments_sha256=(
-                    EFFECTIVE_RUNTIME_ARGUMENTS_SHA256
-                ),
+                effective_runtime_arguments_sha256=(EFFECTIVE_RUNTIME_ARGUMENTS_SHA256),
+                profile="profile-a",
+            )
+
+        substitute_scala_cli = temporary / "substitute-scala-cli"
+        substitute_scala_cli.write_bytes(b"substitute Scala CLI")
+        substitute_executable = evidence_for(raw_document)
+        receipt_document = json.loads(receipt.read_text(encoding="utf-8"))
+        substitute_sha256 = hashlib.sha256(substitute_scala_cli.read_bytes()).hexdigest()
+        receipt_document["commandArgv"][0] = str(substitute_scala_cli.resolve())
+        receipt_document["provenance"]["benchmarkExecutablePath"] = str(
+            substitute_scala_cli.resolve()
+        )
+        receipt_document["provenance"]["benchmarkExecutableSha256"] = substitute_sha256
+        receipt.write_text(
+            json.dumps(receipt_document, sort_keys=True),
+            encoding="utf-8",
+        )
+        substitute_executable["cases"][0]["executionReceiptSha256"] = hashlib.sha256(
+            receipt.read_bytes()
+        ).hexdigest()
+        with self.assertRaisesRegex(
+            GateError,
+            "NATIVE_EXECUTION_PROVENANCE_INVALID",
+        ):
+            validate_native_contract_evidence(
+                substitute_executable,
+                boundary_id="scala",
+                selector_id=selector_id,
+                block_directory=temporary,
+                native_cases=native_cases,
+                native_statistics_cases=statistics_cases,
+                plan_path=plan_path,
+                fixture_root_path=FIXTURES,
+                input_ledger_path=input_ledger,
+                effective_runtime_arguments_sha256=(EFFECTIVE_RUNTIME_ARGUMENTS_SHA256),
                 profile="profile-a",
             )
 
@@ -1048,9 +1288,7 @@ class NativeBenchmarkBlockTests(TestCase):
                 plan_path=plan_path,
                 fixture_root_path=FIXTURES,
                 input_ledger_path=input_ledger,
-                effective_runtime_arguments_sha256=(
-                    EFFECTIVE_RUNTIME_ARGUMENTS_SHA256
-                ),
+                effective_runtime_arguments_sha256=(EFFECTIVE_RUNTIME_ARGUMENTS_SHA256),
                 profile="profile-a",
             )
 
@@ -1067,9 +1305,7 @@ class NativeBenchmarkBlockTests(TestCase):
                 plan_path=plan_path,
                 fixture_root_path=FIXTURES,
                 input_ledger_path=input_ledger,
-                effective_runtime_arguments_sha256=(
-                    EFFECTIVE_RUNTIME_ARGUMENTS_SHA256
-                ),
+                effective_runtime_arguments_sha256=(EFFECTIVE_RUNTIME_ARGUMENTS_SHA256),
                 profile="profile-a",
             )
 
@@ -1101,6 +1337,42 @@ class NativeBenchmarkBlockTests(TestCase):
         ):
             validate_native_contract_evidence(
                 tampered_receipt_evidence,
+                boundary_id="scala",
+                selector_id=selector_id,
+                block_directory=temporary,
+                native_cases=native_cases,
+                native_statistics_cases=statistics_cases,
+                plan_path=plan_path,
+                fixture_root_path=FIXTURES,
+                input_ledger_path=input_ledger,
+                effective_runtime_arguments_sha256=(EFFECTIVE_RUNTIME_ARGUMENTS_SHA256),
+                profile="profile-a",
+            )
+
+        lock_tamper_evidence = evidence_for(raw_document)
+        tampered_lock = json.loads(toolchain_lock.read_text(encoding="utf-8"))
+        tampered_lock["scalaCli"]["binarySha256"] = "0" * 64
+        toolchain_lock.write_text(
+            json.dumps(tampered_lock, sort_keys=True),
+            encoding="utf-8",
+        )
+        receipt_document = json.loads(receipt.read_text(encoding="utf-8"))
+        receipt_document["provenance"]["candidateProvenance"]["toolchainLockSha256"] = (
+            hashlib.sha256(toolchain_lock.read_bytes()).hexdigest()
+        )
+        receipt.write_text(
+            json.dumps(receipt_document, sort_keys=True),
+            encoding="utf-8",
+        )
+        lock_tamper_evidence["cases"][0]["executionReceiptSha256"] = hashlib.sha256(
+            receipt.read_bytes()
+        ).hexdigest()
+        with self.assertRaisesRegex(
+            GateError,
+            "NATIVE_EXECUTION_PROVENANCE_INVALID",
+        ):
+            validate_native_contract_evidence(
+                lock_tamper_evidence,
                 boundary_id="scala",
                 selector_id=selector_id,
                 block_directory=temporary,
