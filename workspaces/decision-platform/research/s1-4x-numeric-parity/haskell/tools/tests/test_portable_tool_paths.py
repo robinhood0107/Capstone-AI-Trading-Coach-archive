@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 import unittest
 from pathlib import Path
 
@@ -10,10 +11,15 @@ TOOLS_ROOT = Path(__file__).resolve().parents[1]
 HASKELL_ROOT = TOOLS_ROOT.parent
 REQUIRED_TOOL_VARIABLES = (
     "S1_4X_GHCUP_BIN",
-    "S1_4X_GHC_BIN",
-    "S1_4X_GHC_914_BIN",
+    "S1_4X_AUTHORITATIVE_GHC_BIN",
+    "S1_4X_LATEST_GHC_BIN",
     "S1_4X_STACK_BIN",
     "S1_4X_HLINT_BIN",
+    "S1_4X_STYLISH_BIN",
+)
+LEGACY_TOOL_VARIABLES = (
+    "S1_4X_GHC_BIN",
+    "S1_4X_GHC_914_BIN",
     "S1_4X_STYLISH_HASKELL_BIN",
 )
 TEXT_SUFFIXES = {
@@ -57,14 +63,37 @@ class PortableToolPathTests(unittest.TestCase):
             with self.subTest(variable=variable):
                 self.assertIn(f'${{{variable}:?', script)
                 self.assertNotIn(f'${{{variable}:-', script)
+        for variable in LEGACY_TOOL_VARIABLES:
+            with self.subTest(legacy_variable=variable):
+                self.assertNotIn(variable, script)
 
     def test_format_and_lint_gates_reuse_canonical_readiness_variables(self) -> None:
         formatter = (TOOLS_ROOT / "check-format.sh").read_text(encoding="utf-8")
         lint = (TOOLS_ROOT / "check-hlint.sh").read_text(encoding="utf-8")
 
-        self.assertIn('${S1_4X_STYLISH_HASKELL_BIN:?', formatter)
-        self.assertNotIn("S1_4X_STYLISH_BIN", formatter)
+        self.assertIn('${S1_4X_STYLISH_BIN:?', formatter)
+        self.assertNotIn("S1_4X_STYLISH_HASKELL_BIN", formatter)
         self.assertIn('${S1_4X_HLINT_BIN:?', lint)
+
+    def test_legacy_aliases_do_not_satisfy_the_readiness_contract(self) -> None:
+        result = subprocess.run(
+            ["bash", str(TOOLS_ROOT / "assert-toolchain.sh")],
+            check=False,
+            capture_output=True,
+            text=True,
+            env={
+                "PATH": "/usr/bin:/bin",
+                "S1_4X_GHCUP_BIN": "/legacy-must-not-run/ghcup",
+                "S1_4X_GHC_BIN": "/legacy-must-not-run/ghc",
+                "S1_4X_GHC_914_BIN": "/legacy-must-not-run/ghc-9.14.1",
+                "S1_4X_STACK_BIN": "/legacy-must-not-run/stack",
+                "S1_4X_HLINT_BIN": "/legacy-must-not-run/hlint",
+                "S1_4X_STYLISH_HASKELL_BIN": "/legacy-must-not-run/stylish-haskell",
+            },
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("S1_4X_AUTHORITATIVE_GHC_BIN", result.stderr)
 
     def test_format_gate_scopes_python_module_discovery_to_haskell_root(self) -> None:
         formatter = (TOOLS_ROOT / "check-format.sh").read_text(encoding="utf-8")
