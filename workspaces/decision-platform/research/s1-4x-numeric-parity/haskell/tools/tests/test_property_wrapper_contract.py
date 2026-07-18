@@ -12,6 +12,7 @@ from pathlib import Path
 
 TOOLS_ROOT = Path(__file__).resolve().parents[1]
 HASKELL_ROOT = TOOLS_ROOT.parent
+PLAN_PATH = HASKELL_ROOT.parent / "benchmarks/benchmark-plan.v1.json"
 EVIDENCE_MODULE = TOOLS_ROOT / "haskell_evidence.py"
 SPEC = importlib.util.spec_from_file_location("haskell_evidence", EVIDENCE_MODULE)
 if SPEC is None or SPEC.loader is None:
@@ -89,6 +90,91 @@ class PropertyWrapperContractTests(unittest.TestCase):
                         expected_qualification_plan_sha256="3" * 64,
                         expected_selector_config_sha256="4" * 64,
                     )
+
+    def test_tracked_pending_profile_is_current_canonical_baseline(self) -> None:
+        profile_path = HASKELL_ROOT / "selected-profile.v1.json"
+        completed = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(HASKELL_ROOT),
+                "ls-files",
+                "--error-unmatch",
+                "--",
+                profile_path.name,
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+
+        plan = haskell_evidence.strict_json_load(PLAN_PATH)
+        profile = haskell_evidence.strict_json_load(profile_path)
+        validated = haskell_evidence.validate_selected_profile_document(
+            profile,
+            expected_compiler_sha256=haskell_evidence.AUTHORITATIVE_GHC_SHA256,
+            expected_source_tree_sha256=(
+                haskell_evidence.benchmark_source_tree_sha256(HASKELL_ROOT)
+            ),
+            expected_qualification_plan_sha256=haskell_evidence.sha256_file(
+                PLAN_PATH
+            ),
+            expected_selector_config_sha256=haskell_evidence.canonical_sha256(
+                plan["haskellProfileQualification"]
+            ),
+        )
+
+        self.assertEqual(
+            validated["schemaVersion"],
+            "s1.4x-haskell-selected-profile-pending-v1",
+        )
+        self.assertEqual(validated["selectionStatus"], "PENDING_BASELINE")
+        self.assertEqual(
+            profile_path.read_bytes(),
+            haskell_evidence.canonical_json_bytes(
+                validated,
+                trailing_newline=True,
+            ),
+        )
+
+    def test_tracked_source_manifest_is_the_exact_current_candidate_set(self) -> None:
+        manifest_path = HASKELL_ROOT / "source-inputs.v1.json"
+        completed = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(HASKELL_ROOT),
+                "ls-files",
+                "--error-unmatch",
+                "--",
+                manifest_path.name,
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+
+        manifest = haskell_evidence.validate_source_manifest(
+            HASKELL_ROOT,
+            manifest_path,
+        )
+        expected_paths = {
+            path.relative_to(HASKELL_ROOT).as_posix()
+            for root_name in haskell_evidence.CANDIDATE_ROOTS
+            for path in (HASKELL_ROOT / root_name).rglob("*.hs")
+        }
+        expected_paths.update({"package.yaml", "selected-profile.v1.json"})
+
+        self.assertEqual(set(manifest["files"]), expected_paths)
+        self.assertEqual(
+            manifest_path.read_bytes(),
+            haskell_evidence.canonical_json_bytes(
+                manifest,
+                trailing_newline=True,
+            ),
+        )
 
     def test_profile_unknown_field_is_rejected(self) -> None:
         altered = {**pending_profile(), "unknown": True}
