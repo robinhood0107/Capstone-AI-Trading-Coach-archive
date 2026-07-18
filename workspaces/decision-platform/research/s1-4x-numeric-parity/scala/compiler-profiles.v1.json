@@ -124,7 +124,7 @@
         "-Werror"
       ],
       "expectedExitCode": 1,
-      "expectedDiagnosticPattern": "(?i)unused (?:non-Unit )?value",
+      "expectedDiagnosticPattern": "(?i)pure expression does nothing in statement position",
       "forbiddenDiagnosticPattern": "(?i)(syntax error|not found:|internal compiler error|exception|out ?of ?memory|killed|fatal error|stack overflow)"
     },
     {
