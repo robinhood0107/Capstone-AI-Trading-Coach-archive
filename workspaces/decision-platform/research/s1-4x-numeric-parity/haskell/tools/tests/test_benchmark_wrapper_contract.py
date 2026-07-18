@@ -11,6 +11,7 @@ from pathlib import Path
 HASKELL_ROOT = Path(__file__).resolve().parents[2]
 WRAPPER = HASKELL_ROOT / "tools" / "run-benchmark-block.sh"
 HELPER = HASKELL_ROOT / "tools" / "haskell_benchmark_block.py"
+BENCHMARK_MAIN = HASKELL_ROOT / "benchmark" / "Main.hs"
 EXPECTED_OPTIONS = (
     "--plan",
     "--block-dir",
@@ -62,10 +63,28 @@ class BenchmarkWrapperContractTests(unittest.TestCase):
         self.assertNotIn("eval ", source)
         self.assertNotIn("bash -c", source)
         self.assertNotIn("sh -c", source)
+        self.assertNotIn("mark-measurement-entered", source)
 
     def test_wrapper_mode_is_regular_not_symlink(self) -> None:
         self.assertFalse(WRAPPER.is_symlink())
         self.assertTrue(os.path.isfile(WRAPPER))
+
+    def test_criterion_env_owns_the_single_measurement_transition(self) -> None:
+        source = BENCHMARK_MAIN.read_text(encoding="utf-8")
+        required_in_order = (
+            "inputs <- loadFrozenInputs fixtureRoot",
+            "traverse (setupPreparedCase inputs)",
+            "markMeasurementEntered qualificationPath",
+            "pure preparedCases",
+        )
+        offsets = [source.index(fragment) for fragment in required_in_order]
+        self.assertEqual(offsets, sorted(offsets))
+        self.assertEqual(
+            source.count("markMeasurementEntered qualificationPath"),
+            1,
+        )
+        self.assertIn('"S1_4X_BENCHMARK_QUALIFICATION"', source)
+        self.assertIn("INVALID_PRE_RUN_QUALIFICATION_STATE", source)
 
 
 if __name__ == "__main__":
