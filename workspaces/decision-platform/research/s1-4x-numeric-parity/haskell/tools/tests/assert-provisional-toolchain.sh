@@ -19,7 +19,7 @@ trap 'rm -rf -- "$temporary"' EXIT
   >"$temporary/default.stdout" \
   2>"$temporary/default.stderr"
 grep -F \
-  'compatibilityStatus=FAIL_FROZEN_DEPENDENCY acceptedMode=true' \
+  'compatibilityStatus=CURRENT_REPLAY_REQUIRED acceptedMode=false' \
   "$temporary/default.stdout" >/dev/null
 [[ ! -s "$temporary/default.stderr" ]] || {
   echo "accepted frozen-dependency assertion wrote unexpected stderr" >&2

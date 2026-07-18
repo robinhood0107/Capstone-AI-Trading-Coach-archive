@@ -36,6 +36,7 @@ EXPECTED_WORKFLOW_INPUTS = (
     "tools/hlint_inventory.py",
     "tools/profile_workflow.py",
     "tools/run-benchmark-block.sh",
+    "tools/run-candidate.sh",
     "tools/run-correctness-profile.sh",
     "tools/run-ghc-9.14.1-compatibility.sh",
     "tools/run-oci-correctness.sh",

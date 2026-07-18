@@ -125,18 +125,18 @@ class PortableToolPathTests(unittest.TestCase):
                 self.assertIn(f'${{{variable}:?', script)
                 self.assertNotIn(f'${{{variable}:-', script)
 
-    def test_toolchain_accepts_only_the_hash_bound_frozen_dependency_result(
+    def test_toolchain_requires_live_replay_without_a_tracked_result(
         self,
     ) -> None:
         script = (TOOLS_ROOT / "assert-toolchain.sh").read_text(encoding="utf-8")
         for token in (
-            "FAIL_FROZEN_DEPENDENCY",
+            "CURRENT_REPLAY_REQUIRED",
             "ghc-compatibility-solve-failure.v1.json",
-            "ghc-compatibility-result.v1.json",
         ):
             with self.subTest(token=token):
                 self.assertIn(token, script)
-        self.assertNotIn("PENDING_SOLVE", script)
+        self.assertNotIn("ghc-compatibility-result.v1.json", script)
+        self.assertNotIn("failureResultPath", script)
         self.assertNotIn("ALLOW_PENDING_COMPATIBILITY", script)
 
 
