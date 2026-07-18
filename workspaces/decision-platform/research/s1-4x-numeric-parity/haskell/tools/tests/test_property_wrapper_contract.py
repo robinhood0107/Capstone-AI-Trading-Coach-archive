@@ -124,6 +124,20 @@ class PropertyWrapperContractTests(unittest.TestCase):
             with self.subTest(variable=variable):
                 self.assertIn(f"${{{variable}+x}}", wrapper)
 
+    def test_wrapper_binds_stack_root_to_the_explicit_cache_root(self) -> None:
+        wrapper = (TOOLS_ROOT / "run-property-evidence.sh").read_text(
+            encoding="utf-8"
+        )
+        for token in (
+            "S1_4X_CACHE_ROOT",
+            'STACK_ROOT_PATH="${CACHE_ROOT}/stack-root"',
+            "--stack-root",
+            "STACK_ROOT_PATH",
+        ):
+            with self.subTest(token=token):
+                self.assertIn(token, wrapper)
+        self.assertNotIn('OUTPUT_PARENT/.s1-4x-stack-root', wrapper)
+
     def test_wrapper_forces_and_hashes_selected_profile_options(self) -> None:
         wrapper = (TOOLS_ROOT / "run-property-evidence.sh").read_text(
             encoding="utf-8"
@@ -138,6 +152,23 @@ class PropertyWrapperContractTests(unittest.TestCase):
             with self.subTest(token=token):
                 self.assertIn(token, wrapper)
 
+    def test_wrapper_revalidates_the_pre_build_closure_after_every_execution_phase(
+        self,
+    ) -> None:
+        wrapper = (TOOLS_ROOT / "run-property-evidence.sh").read_text(
+            encoding="utf-8"
+        )
+        for phase in ("pre-build", "post-build", "post-run"):
+            with self.subTest(phase=phase):
+                self.assertIn(f'validate_execution_closure "{phase}"', wrapper)
+        for token in (
+            "EXPECTED_SOURCE_MANIFEST_SHA256",
+            "EXPECTED_SOURCE_TREE_SHA256",
+            "EXPECTED_PROPERTY_CLOSURE_SHA256",
+        ):
+            with self.subTest(token=token):
+                self.assertIn(token, wrapper)
+
     def test_haskell_closure_requires_manifest_and_selected_profile(self) -> None:
         source = (
             HASKELL_ROOT / "test/S14X/PropertyEvidence.hs"
@@ -145,6 +176,21 @@ class PropertyWrapperContractTests(unittest.TestCase):
         self.assertIn('root </> "source-inputs.v1.json"', source)
         self.assertIn('root </> "selected-profile.v1.json"', source)
         self.assertNotIn("filterMFile", source)
+
+    def test_haskell_rechecks_expected_manifest_profile_and_source_tree_hashes(
+        self,
+    ) -> None:
+        source = (
+            HASKELL_ROOT / "test/S14X/PropertyEvidence.hs"
+        ).read_text(encoding="utf-8")
+        for token in (
+            "expectedSourceManifestHash",
+            "expectedSourceTreeHash",
+            "expectedPropertyClosureHash",
+            "validateExecutionClosure",
+        ):
+            with self.subTest(token=token):
+                self.assertIn(token, source)
 
     def test_missing_selected_profile_fails_the_source_closure(self) -> None:
         temporary, root = self._candidate_checkout()
