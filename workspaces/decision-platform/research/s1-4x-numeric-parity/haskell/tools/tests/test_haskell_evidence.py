@@ -225,6 +225,125 @@ test-suite s1-4x-haskell-test
 """
         haskell_evidence.validate_cabal_projection(generated)
 
+    def test_show_iface_parser_uses_direct_home_dependency_section_only(self) -> None:
+        output = """
+interface S14X.Core.AdvancedRisk 9103
+direct module dependencies: pkg:S14X.Core.Error
+                            pkg:S14X.Core.Models
+boot module dependencies:
+direct package dependencies: base-4.20.2.0
+import  -/  Data.Vector.Unboxed deadbeef
+"""
+        self.assertEqual(
+            haskell_evidence.parse_show_iface_home_imports(
+                output,
+                candidate_modules={
+                    "S14X.Core.AdvancedRisk",
+                    "S14X.Core.Error",
+                    "S14X.Core.Models",
+                },
+            ),
+            ("S14X.Core.Error", "S14X.Core.Models"),
+        )
+
+    def test_vector_edges_are_derived_from_actual_source_graph(self) -> None:
+        source_sha256 = "1" * 64
+        provenance = "verified archive provenance"
+        sources = {
+            "Data.Vector.Unboxed": b"""
+module Data.Vector.Unboxed (value) where
+import Data.Vector.Unboxed.Base
+import Data.Vector.Generic
+value = 1
+""",
+            "Data.Vector.Unboxed.Base": b"""
+module Data.Vector.Unboxed.Base (value) where
+import Data.Vector.Primitive
+value = 1
+""",
+            "Data.Vector.Primitive": b"""
+module Data.Vector.Primitive (value) where
+import Data.Vector.Primitive.Mutable
+import Unsafe.Coerce
+value = 1
+""",
+            "Data.Vector.Primitive.Mutable": b"""
+module Data.Vector.Primitive.Mutable (value) where
+import Unsafe.Coerce
+value = 1
+""",
+            "Data.Vector.Generic": b"""
+module Data.Vector.Generic (value) where
+import Data.Vector.Internal.Check
+value = 1
+""",
+            "Data.Vector.Internal.Check": b"""
+{-# LANGUAGE MagicHash #-}
+module Data.Vector.Internal.Check (value) where
+import GHC.Exts (Int#)
+value = 1
+""",
+        }
+        expected = [
+            {
+                "package": "vector",
+                "version": "0.13.2.0",
+                "sourceSha256": source_sha256,
+                "importPath": (
+                    "Data.Vector.Unboxed -> Data.Vector.Unboxed.Base -> "
+                    "Data.Vector.Primitive -> Unsafe.Coerce"
+                ),
+                "provenance": provenance,
+                "edgeKind": "unsafe-import",
+            },
+            {
+                "package": "vector",
+                "version": "0.13.2.0",
+                "sourceSha256": source_sha256,
+                "importPath": (
+                    "Data.Vector.Unboxed -> Data.Vector.Unboxed.Base -> "
+                    "Data.Vector.Primitive -> Data.Vector.Primitive.Mutable -> "
+                    "Unsafe.Coerce"
+                ),
+                "provenance": provenance,
+                "edgeKind": "unsafe-import",
+            },
+            {
+                "package": "vector",
+                "version": "0.13.2.0",
+                "sourceSha256": source_sha256,
+                "importPath": (
+                    "Data.Vector.Unboxed -> Data.Vector.Generic -> "
+                    "Data.Vector.Internal.Check -> GHC.Exts(Int#)"
+                ),
+                "provenance": provenance,
+                "edgeKind": "compiler-primop",
+            },
+        ]
+        self.assertEqual(
+            haskell_evidence.derive_vector_transitive_edges(
+                sources,
+                source_sha256=source_sha256,
+                provenance=provenance,
+            ),
+            expected,
+        )
+
+        drifted = dict(sources)
+        drifted["Data.Vector.Primitive"] = drifted["Data.Vector.Primitive"].replace(
+            b"import Unsafe.Coerce\n",
+            b"",
+        )
+        with self.assertRaisesRegex(
+            haskell_evidence.EvidenceError,
+            "unsafe target set drift",
+        ):
+            haskell_evidence.derive_vector_transitive_edges(
+                drifted,
+                source_sha256=source_sha256,
+                provenance=provenance,
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
