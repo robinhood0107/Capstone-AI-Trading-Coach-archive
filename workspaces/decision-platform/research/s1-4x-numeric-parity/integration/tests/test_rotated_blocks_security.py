@@ -18,7 +18,7 @@ BENCHMARKS = INTEGRATION.parent / "benchmarks"
 sys.path.insert(0, str(BENCHMARKS))
 sys.path.insert(0, str(INTEGRATION))
 
-import run_rotated_blocks as runner
+import rotated_block_runtime as runner
 from benchmark_contract import ContractError, sha256_file, strict_json_load
 from validate_benchmark_report import DEFAULT_PLAN, validate_plan
 
