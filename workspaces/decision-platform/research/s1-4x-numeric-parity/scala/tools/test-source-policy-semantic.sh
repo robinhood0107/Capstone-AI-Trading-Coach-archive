@@ -3,23 +3,32 @@ set -euo pipefail
 
 SCALA_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 S1_ROOT="$(cd -- "$SCALA_ROOT/.." && pwd -P)"
-temporary="$(mktemp -d -t s1-4x-scala-semantic.XXXXXXXX)"
+evidence_root="${S1_4X_SEMANTIC_EVIDENCE_DIR:-}"
 
-cleanup() {
-  [[ "$temporary" == /tmp/s1-4x-scala-semantic.* ]] || {
-    printf 'refusing unsafe temporary cleanup: %s\n' "$temporary" >&2
-    exit 1
+if [[ -n "$evidence_root" ]]; then
+  [[ "$evidence_root" == /* && ! -e "$evidence_root" ]] || {
+    printf 'persistent semantic evidence directory must be a new absolute path\n' >&2
+    exit 64
   }
-  rm -rf -- "$temporary"
-}
-trap cleanup EXIT
+else
+  temporary="$(mktemp -d -t s1-4x-scala-semantic.XXXXXXXX)"
+  evidence_root="$temporary/evidence"
+  cleanup() {
+    [[ "$temporary" == /tmp/s1-4x-scala-semantic.* ]] || {
+      printf 'refusing unsafe temporary cleanup: %s\n' "$temporary" >&2
+      exit 1
+    }
+    rm -rf -- "$temporary"
+  }
+  trap cleanup EXIT
+fi
 
 "$SCALA_ROOT/tools/run-scalafix.sh" \
   --policy "$S1_ROOT/contract/scala-source-policy.v1.json" \
   --fixture-matrix "$SCALA_ROOT/tools/fixtures/source-policy-negative.v1.json" \
-  --output-dir "$temporary/evidence"
+  --output-dir "$evidence_root"
 
-receipt="$temporary/evidence/scala-semantic-policy-receipt.v1.json"
+receipt="$evidence_root/scala-semantic-policy-receipt.v1.json"
 jq -e \
   --slurpfile matrix "$SCALA_ROOT/tools/fixtures/source-policy-negative.v1.json" '
     .schemaVersion == "s1.4x-scala-semantic-policy-receipt-v1" and
