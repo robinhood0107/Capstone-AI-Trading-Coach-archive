@@ -399,14 +399,41 @@ def _validate_profile_marker(document: object, *, state: str) -> dict[str, Any]:
 def _same_fd_json_snapshot(path: Path) -> tuple[bytes, dict[str, Any], os.stat_result]:
     """O_NOFOLLOW FD 하나에서 bytes/hash/parse에 쓰는 동일 snapshot을 읽는다."""
 
-    if not path.is_absolute():
-        raise WorkflowError("PROFILE_MARKER_PATH_NOT_ABSOLUTE")
+    payload, document, snapshot = _same_fd_json_value(
+        path,
+        label="PROFILE_MARKER",
+        max_bytes=1024 * 1024,
+    )
+    if not isinstance(document, dict):
+        raise WorkflowError("PROFILE_MARKER_JSON_INVALID")
+    return payload, document, snapshot
+
+
+def _same_fd_bytes_snapshot(
+    path: Path,
+    *,
+    label: str,
+    max_bytes: int,
+) -> tuple[bytes, os.stat_result]:
+    """Regular file 하나의 bytes와 identity를 같은 O_NOFOLLOW FD에서 읽는다."""
+
+    if (
+        type(label) is not str
+        or re.fullmatch(r"[A-Z][A-Z0-9_]*", label) is None
+        or type(max_bytes) is not int
+        or max_bytes <= 0
+        or not path.is_absolute()
+    ):
+        raise WorkflowError(f"{label}_PATH_NOT_ABSOLUTE")
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-    descriptor = os.open(path, flags)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise WorkflowError(f"{label}_FILE_INVALID") from exc
     try:
         before = os.fstat(descriptor)
-        if not stat.S_ISREG(before.st_mode) or before.st_size > 1024 * 1024:
-            raise WorkflowError("PROFILE_MARKER_FILE_INVALID")
+        if not stat.S_ISREG(before.st_mode) or before.st_size > max_bytes:
+            raise WorkflowError(f"{label}_FILE_INVALID")
         chunks: list[bytes] = []
         while chunk := os.read(descriptor, 64 * 1024):
             chunks.append(chunk)
@@ -417,16 +444,29 @@ def _same_fd_json_snapshot(path: Path) -> tuple[bytes, dict[str, Any], os.stat_r
             or before.st_size != after.st_size
             or before.st_mtime_ns != after.st_mtime_ns
         ):
-            raise WorkflowError("PROFILE_MARKER_CHANGED_DURING_READ")
+            raise WorkflowError(f"{label}_CHANGED_DURING_READ")
     finally:
         os.close(descriptor)
-    payload = b"".join(chunks)
+    return b"".join(chunks), before
+
+
+def _same_fd_json_value(
+    path: Path,
+    *,
+    label: str,
+    max_bytes: int = 64 * 1024 * 1024,
+) -> tuple[bytes, Any, os.stat_result]:
+    payload, snapshot = _same_fd_bytes_snapshot(
+        path,
+        label=label,
+        max_bytes=max_bytes,
+    )
 
     def object_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
         result: dict[str, Any] = {}
         for key, value in pairs:
             if key in result:
-                raise WorkflowError(f"PROFILE_MARKER_DUPLICATE_KEY:{key}")
+                raise WorkflowError(f"{label}_DUPLICATE_KEY:{key}")
             result[key] = value
         return result
 
@@ -435,14 +475,53 @@ def _same_fd_json_snapshot(path: Path) -> tuple[bytes, dict[str, Any], os.stat_r
             payload.decode("utf-8"),
             object_pairs_hook=object_pairs,
             parse_constant=lambda token: (_ for _ in ()).throw(
-                WorkflowError(f"PROFILE_MARKER_NONFINITE:{token}")
+                WorkflowError(f"{label}_NONFINITE:{token}")
             ),
         )
     except (UnicodeError, json.JSONDecodeError) as exc:
-        raise WorkflowError("PROFILE_MARKER_JSON_INVALID") from exc
-    if not isinstance(document, dict):
-        raise WorkflowError("PROFILE_MARKER_JSON_INVALID")
-    return payload, document, before
+        raise WorkflowError(f"{label}_JSON_INVALID") from exc
+    return payload, document, snapshot
+
+
+def read_same_fd_json_evidence(
+    path: Path,
+    *,
+    expected_sha256: str,
+    label: str,
+    max_bytes: int = 64 * 1024 * 1024,
+) -> Any:
+    """Raw JSON을 한 FD에서 읽고 그 동일 bytes의 expected SHA를 검증한다."""
+
+    expected = _require_sha256(expected_sha256, label=f"{label}-expected")
+    payload, document, _ = _same_fd_json_value(
+        path,
+        label=label,
+        max_bytes=max_bytes,
+    )
+    if hashlib.sha256(payload).hexdigest() != expected:
+        raise WorkflowError(f"{label}_SHA256_DRIFT")
+    return document
+
+
+def profile_marker_pre_run_sha256(measurement: object) -> str:
+    """MEASUREMENT marker가 전이되기 전 canonical PRE_RUN bytes hash를 복원한다."""
+
+    document = _validate_profile_marker(measurement, state="MEASUREMENT")
+    pre_run = dict(document)
+    expected = _require_sha256(
+        pre_run["preRunSha256"],
+        label="marker-pre-run",
+    )
+    pre_run["state"] = "PRE_RUN"
+    pre_run["measurementEnteredAt"] = None
+    pre_run["preRunSha256"] = None
+    _validate_profile_marker(pre_run, state="PRE_RUN")
+    recomputed = hashlib.sha256(
+        canonical_json_bytes(pre_run, trailing_newline=True)
+    ).hexdigest()
+    if recomputed != expected:
+        raise WorkflowError("PROFILE_MARKER_PRE_RUN_SHA256_DRIFT")
+    return recomputed
 
 
 def mark_profile_measurement_entered(path: Path) -> dict[str, str]:
@@ -525,6 +604,34 @@ def parse_criterion_qualification_reports(
     if tuple(parsed) != tuple(expected_case_order):
         raise WorkflowError("CRITERION_QUALIFICATION_CASE_ORDER_INVALID")
     return parsed
+
+
+def recompute_qualification_ratios(
+    raw_reports_by_profile: Mapping[str, object],
+    *,
+    expected_case_order: Sequence[str],
+) -> tuple[dict[str, float], dict[str, dict[str, float]]]:
+    """두 raw Criterion report의 exact 7-case mean에서 비율을 다시 계산한다."""
+
+    if set(raw_reports_by_profile) != set(PROFILE_OPTIONS):
+        raise WorkflowError("QUALIFICATION_RAW_PROFILE_SET_INVALID")
+    estimates = {
+        profile_id: parse_criterion_qualification_reports(
+            raw_reports_by_profile[profile_id],
+            expected_case_order=expected_case_order,
+        )
+        for profile_id in PROFILE_OPTIONS
+    }
+    ratios = {
+        case_id: (
+            estimates["optimized-o2-fasm"][case_id]
+            / estimates["baseline-o0-fasm"][case_id]
+        )
+        for case_id in expected_case_order
+    }
+    if any(not math.isfinite(value) or value <= 0.0 for value in ratios.values()):
+        raise WorkflowError("QUALIFICATION_RAW_RATIO_INVALID")
+    return ratios, estimates
 
 
 def _geometric_mean(values: Sequence[float]) -> float:
@@ -1420,14 +1527,79 @@ def _run_logged(
         "phase": phase,
         "argv": list(command),
         "argvSha256": canonical_sha256(list(command)),
+        "cwdPath": str(cwd),
         "startedAt": started_at,
         "finishedAt": finished_at,
         "exitCode": completed.returncode,
+        "stdoutPath": str(stdout_path),
         "stdoutSha256": sha256_file(stdout_path),
+        "stderrPath": str(stderr_path),
         "stderrSha256": sha256_file(stderr_path),
     }
     if completed.returncode not in expected_exit_codes:
         raise WorkflowError(f"COMMAND_FAILED:{phase}:{completed.returncode}")
+    return record
+
+
+def validate_logged_command_record(
+    record: object,
+    *,
+    expected_phase: str,
+    expected_argv: Sequence[str],
+    expected_cwd: Path,
+    evidence_directory: Path,
+) -> dict[str, Any]:
+    """Command record의 exact argv/cwd/timestamps와 raw logs를 다시 결속한다."""
+
+    expected_fields = {
+        "phase",
+        "argv",
+        "argvSha256",
+        "cwdPath",
+        "startedAt",
+        "finishedAt",
+        "exitCode",
+        "stdoutPath",
+        "stdoutSha256",
+        "stderrPath",
+        "stderrSha256",
+    }
+    expected_command = list(expected_argv)
+    if (
+        not isinstance(record, dict)
+        or set(record) != expected_fields
+        or record.get("phase") != expected_phase
+        or record.get("argv") != expected_command
+        or record.get("argvSha256") != canonical_sha256(expected_command)
+    ):
+        raise WorkflowError("COMMAND_ARGV_DRIFT")
+    cwd = _absolute_existing_directory(expected_cwd, label="COMMAND_CWD")
+    output = _absolute_existing_directory(
+        evidence_directory,
+        label="COMMAND_EVIDENCE_DIRECTORY",
+    )
+    if record.get("cwdPath") != str(cwd):
+        raise WorkflowError("COMMAND_CWD_DRIFT")
+    _require_iso_utc(record.get("startedAt"), label=f"{expected_phase}-started")
+    _require_iso_utc(record.get("finishedAt"), label=f"{expected_phase}-finished")
+    if record.get("exitCode") != 0:
+        raise WorkflowError("COMMAND_EXIT_CODE_DRIFT")
+    for stream in ("stdout", "stderr"):
+        path = Path(str(record.get(f"{stream}Path", "")))
+        expected_path = output / f"{expected_phase}.{stream}"
+        if path != expected_path:
+            raise WorkflowError("COMMAND_LOG_PATH_DRIFT")
+        digest = _require_sha256(
+            record.get(f"{stream}Sha256"),
+            label=f"{expected_phase}-{stream}",
+        )
+        payload, _ = _same_fd_bytes_snapshot(
+            path,
+            label=f"COMMAND_{stream.upper()}",
+            max_bytes=128 * 1024 * 1024,
+        )
+        if hashlib.sha256(payload).hexdigest() != digest:
+            raise WorkflowError("COMMAND_LOG_SHA256_DRIFT")
     return record
 
 
@@ -1496,8 +1668,7 @@ def _find_candidate_binary(haskell_root: Path, *, ghc_version: str) -> Path:
     return candidates[0]
 
 
-def _comparison_status(path: Path) -> dict[str, Any]:
-    report = strict_json_load(path)
+def _comparison_status_document(report: object) -> dict[str, Any]:
     if (
         not isinstance(report, dict)
         or report.get("schemaVersion") != "s1.4x-comparison-report-v1"
@@ -1505,8 +1676,17 @@ def _comparison_status(path: Path) -> dict[str, Any]:
         or report.get("mismatchCount") != 0
         or report.get("mismatches") != []
     ):
-        raise WorkflowError(f"COMPARISON_NOT_PASS:{path}")
+        raise WorkflowError("COMPARISON_NOT_PASS")
     return report
+
+
+def _comparison_status(path: Path) -> dict[str, Any]:
+    _, report, _ = _same_fd_json_value(
+        path,
+        label="COMPARISON",
+        max_bytes=64 * 1024 * 1024,
+    )
+    return _comparison_status_document(report)
 
 
 def _correctness(arguments: argparse.Namespace) -> None:
@@ -1651,9 +1831,13 @@ def _correctness(arguments: argparse.Namespace) -> None:
         comparison_artifacts.append(
             {
                 "matrixId": label,
+                "requestPath": str(request),
                 "requestSha256": sha256_file(request),
+                "expectedPath": str(expected),
                 "expectedSha256": sha256_file(expected),
+                "actualPath": str(actual),
                 "actualSha256": sha256_file(actual),
+                "comparisonPath": str(comparison),
                 "comparisonSha256": sha256_file(comparison),
                 "mismatchCount": 0,
                 "status": "PASS",
@@ -1672,10 +1856,14 @@ def _correctness(arguments: argparse.Namespace) -> None:
         "ghcOptions": list(options),
         "optionsSha256": canonical_sha256(list(options)),
         "compilerVersion": "9.10.3",
+        "compilerPath": str(ghc),
         "compilerSha256": sha256_file(ghc),
         "candidateSourceCommit": candidate_commit,
         "sourceTreeSha256": source_tree_sha256,
+        "candidateBinaryPath": str(candidate_binary),
         "candidateBinarySha256": sha256_file(candidate_binary),
+        "stackRootPath": str(stack_root),
+        "stackYamlPath": str(stack_yaml),
         "stackYamlSha256": sha256_file(stack_yaml),
         "commands": records,
         "comparisonArtifacts": comparison_artifacts,
@@ -1802,8 +1990,12 @@ def _host_validator_command(
     ]
 
 
-def _validate_host_report(path: Path, *, plan: Mapping[str, Any], root_pid: int) -> None:
-    report = strict_json_load(path)
+def _validate_host_report_document(
+    report: object,
+    *,
+    plan: Mapping[str, Any],
+    root_pid: int,
+) -> dict[str, Any]:
     execution = plan["execution"]
     frozen = plan["environmentValidity"]
     expected_policy = {
@@ -1821,17 +2013,59 @@ def _validate_host_report(path: Path, *, plan: Mapping[str, Any], root_pid: int)
         ],
         "allowed_process_root_pid": root_pid,
     }
+    host_check_ids = {
+        "disk.home-free-bytes",
+        "memory.available-bytes",
+        "cpu.logical-count",
+        "cpu.affinity-round-trip",
+        "docker.running-containers",
+        "load.normalized-load1-window",
+        "process.external-cpu",
+    }
+    checks = report.get("checks") if isinstance(report, dict) else None
     if (
         not isinstance(report, dict)
+        or set(report)
+        != {
+            "schemaVersion",
+            "policy",
+            "portableHostIdSha256",
+            "metadata",
+            "checks",
+            "failureCount",
+            "status",
+        }
         or report.get("schemaVersion") != "s1.4x-host-validity-v1"
         or report.get("status") != "PASS"
         or report.get("failureCount") != 0
         or report.get("policy") != expected_policy
-        or not isinstance(report.get("checks"), list)
-        or not report["checks"]
-        or any(check.get("status") != "PASS" for check in report["checks"])
+        or not isinstance(report.get("metadata"), dict)
+        or not isinstance(checks, list)
+        or len(checks) != len(host_check_ids)
+        or any(
+            not isinstance(check, dict)
+            or set(check)
+            != {"id", "expected", "actual", "status", "evidence"}
+            or check.get("status") != "PASS"
+            for check in checks
+        )
+        or {check["id"] for check in checks} != host_check_ids
     ):
         raise WorkflowError("HOST_VALIDITY_NOT_PASS")
+    _require_sha256(
+        report.get("portableHostIdSha256"),
+        label="host-portable-id",
+    )
+    return report
+
+
+def _validate_host_report(path: Path, *, plan: Mapping[str, Any], root_pid: int) -> None:
+    _, report, _ = _same_fd_json_value(
+        path,
+        label="HOST_VALIDITY",
+        max_bytes=8 * 1024 * 1024,
+    )
+    _validate_host_report_document(report, plan=plan, root_pid=root_pid)
 
 
 def _criterion_qualification_command(
@@ -2120,10 +2354,38 @@ def _validate_correctness_receipt(
     expected_source_tree_sha256: str,
     expected_commit: str,
 ) -> dict[str, Any]:
-    receipt = strict_json_load(_absolute_regular(path, label="CORRECTNESS_RECEIPT"))
+    receipt_path = _absolute_regular(path, label="CORRECTNESS_RECEIPT")
+    receipt_payload, receipt, _ = _same_fd_json_value(
+        receipt_path,
+        label="CORRECTNESS_RECEIPT",
+        max_bytes=4 * 1024 * 1024,
+    )
     options = profile_options(expected_profile_id)
+    expected_fields = {
+        "schemaVersion",
+        "status",
+        "profileId",
+        "ghcOptions",
+        "optionsSha256",
+        "compilerVersion",
+        "compilerPath",
+        "compilerSha256",
+        "candidateSourceCommit",
+        "sourceTreeSha256",
+        "candidateBinaryPath",
+        "candidateBinarySha256",
+        "stackRootPath",
+        "stackYamlPath",
+        "stackYamlSha256",
+        "commands",
+        "comparisonArtifacts",
+        "mismatchCount",
+    }
     if (
         not isinstance(receipt, dict)
+        or set(receipt) != expected_fields
+        or receipt_payload
+        != canonical_json_bytes(receipt, trailing_newline=True)
         or receipt.get("schemaVersion") != CORRECTNESS_SCHEMA_VERSION
         or receipt.get("status") != "PASS"
         or receipt.get("profileId") != expected_profile_id
@@ -2134,12 +2396,255 @@ def _validate_correctness_receipt(
         or receipt.get("compilerVersion") != "9.10.3"
         or receipt.get("mismatchCount") != 0
         or not isinstance(receipt.get("commands"), list)
-        or tuple(command.get("phase") for command in receipt["commands"])
-        != CORRECTNESS_PHASES
-        or any(command.get("exitCode") != 0 for command in receipt["commands"])
+        or not isinstance(receipt.get("comparisonArtifacts"), list)
+        or len(receipt["comparisonArtifacts"]) != 2
     ):
         raise WorkflowError(f"CORRECTNESS_RECEIPT_INVALID:{expected_profile_id}")
-    _require_sha256(receipt.get("compilerSha256"), label="correctness-compiler")
+    output = receipt_path.parent
+    haskell_root = Path(__file__).resolve(strict=True).parent.parent
+    numeric_root = haskell_root.parent
+    repo_root = numeric_root.parents[3]
+    ghcup = _required_environment_path("S1_4X_GHCUP_BIN")
+    stack = _required_environment_path("S1_4X_STACK_BIN")
+    compiler = _required_environment_path("S1_4X_AUTHORITATIVE_GHC_BIN")
+    cache_value = os.environ.get("S1_4X_CACHE_ROOT")
+    if cache_value is None:
+        raise WorkflowError("REQUIRED_ENVIRONMENT_MISSING:S1_4X_CACHE_ROOT")
+    cache_root = _absolute_existing_directory(
+        Path(cache_value),
+        label="CACHE_ROOT",
+    )
+    stack_root = _absolute_existing_directory(
+        Path(str(receipt.get("stackRootPath", ""))),
+        label="CORRECTNESS_STACK_ROOT",
+    )
+    if (
+        stack_root
+        != cache_root / f"stack-root-correctness-{expected_profile_id}"
+    ):
+        raise WorkflowError("CORRECTNESS_STACK_ROOT_DRIFT")
+    stack_yaml = _absolute_regular(
+        Path(str(receipt.get("stackYamlPath", ""))),
+        label="CORRECTNESS_STACK_YAML",
+    )
+    if (
+        stack_yaml != haskell_root / "stack.yaml"
+        or receipt["stackYamlSha256"] != sha256_file(stack_yaml)
+    ):
+        raise WorkflowError("CORRECTNESS_STACK_YAML_DRIFT")
+    if (
+        receipt.get("compilerPath") != str(compiler)
+        or receipt.get("compilerSha256") != sha256_file(compiler)
+    ):
+        raise WorkflowError("CORRECTNESS_COMPILER_DRIFT")
+    candidate_binary = _absolute_regular(
+        Path(str(receipt.get("candidateBinaryPath", ""))),
+        label="CORRECTNESS_CANDIDATE_BINARY",
+        executable=True,
+    )
+    if (
+        candidate_binary
+        != _find_candidate_binary(haskell_root, ghc_version="9.10.3")
+        or receipt.get("candidateBinarySha256")
+        != sha256_file(candidate_binary)
+    ):
+        raise WorkflowError("CORRECTNESS_CANDIDATE_BINARY_DRIFT")
+    build_command = build_stack_command(
+        ghcup=ghcup,
+        stack=stack,
+        stack_yaml=stack_yaml,
+        stack_root=stack_root,
+        ghc_version="9.10.3",
+        operation=[
+            "build",
+            "--test",
+            "--bench",
+            "--no-run-tests",
+            "--no-run-benchmarks",
+            "--pedantic",
+            f"--ghc-options={' '.join(options)}",
+        ],
+    )
+    test_command = build_stack_command(
+        ghcup=ghcup,
+        stack=stack,
+        stack_yaml=stack_yaml,
+        stack_root=stack_root,
+        ghc_version="9.10.3",
+        operation=[
+            "test",
+            "--pedantic",
+            f"--ghc-options={' '.join(options)}",
+        ],
+    )
+    fixture_root = _absolute_existing_directory(
+        numeric_root / "contract/fixtures",
+        label="FIXTURE_ROOT",
+    )
+    compare_script = _absolute_regular(
+        numeric_root / "oracle/compare_results.py",
+        label="COMPARE_RESULTS",
+    )
+    python_bin = _absolute_regular(
+        Path("/usr/bin/python3").resolve(strict=True),
+        label="PYTHON",
+        executable=True,
+    )
+    matrices = (
+        (
+            "canonical",
+            fixture_root / "small/canonical-inputs.v1.json",
+            fixture_root / "expected/canonical-results.v1.json",
+        ),
+        (
+            "semantic",
+            fixture_root / "invalid/semantic-errors.v1.json",
+            fixture_root / "invalid/semantic-errors.expected.v1.json",
+        ),
+    )
+    expected_commands: list[tuple[str, list[str], Path]] = [
+        ("build", build_command, haskell_root),
+        ("test", test_command, haskell_root),
+    ]
+    expected_artifact_fields = {
+        "matrixId",
+        "requestPath",
+        "requestSha256",
+        "expectedPath",
+        "expectedSha256",
+        "actualPath",
+        "actualSha256",
+        "comparisonPath",
+        "comparisonSha256",
+        "mismatchCount",
+        "status",
+    }
+    environment = _sealed_child_environment(
+        ghc_bin=compiler,
+        stack_bin=stack,
+    )
+    for artifact, (label, request, expected) in zip(
+        receipt["comparisonArtifacts"],
+        matrices,
+        strict=True,
+    ):
+        actual = output / f"{label}.actual.json"
+        comparison = output / f"{label}.comparison.json"
+        if (
+            not isinstance(artifact, dict)
+            or set(artifact) != expected_artifact_fields
+            or artifact.get("matrixId") != label
+            or artifact.get("requestPath") != str(request)
+            or artifact.get("expectedPath") != str(expected)
+            or artifact.get("actualPath") != str(actual)
+            or artifact.get("comparisonPath") != str(comparison)
+            or artifact.get("mismatchCount") != 0
+            or artifact.get("status") != "PASS"
+        ):
+            raise WorkflowError("CORRECTNESS_COMPARISON_ARTIFACT_INVALID")
+        for evidence_path, digest_field, evidence_label in (
+            (request, "requestSha256", f"CORRECTNESS_{label.upper()}_REQUEST"),
+            (expected, "expectedSha256", f"CORRECTNESS_{label.upper()}_EXPECTED"),
+            (actual, "actualSha256", f"CORRECTNESS_{label.upper()}_ACTUAL"),
+            (
+                comparison,
+                "comparisonSha256",
+                f"CORRECTNESS_{label.upper()}_COMPARISON",
+            ),
+        ):
+            read_same_fd_json_evidence(
+                evidence_path,
+                expected_sha256=artifact[digest_field],
+                label=evidence_label,
+            )
+        comparison_payload, comparison_document, _ = _same_fd_json_value(
+            comparison,
+            label=f"CORRECTNESS_{label.upper()}_COMPARISON",
+        )
+        if (
+            hashlib.sha256(comparison_payload).hexdigest()
+            != artifact["comparisonSha256"]
+        ):
+            raise WorkflowError("CORRECTNESS_COMPARISON_SHA256_DRIFT")
+        _comparison_status_document(comparison_document)
+        with tempfile.TemporaryDirectory(
+            dir=output,
+            prefix=f".validate-{label}-",
+        ) as temporary:
+            recomputed = Path(temporary) / "comparison.json"
+            completed = subprocess.run(
+                [
+                    str(python_bin),
+                    str(compare_script),
+                    "--expected",
+                    str(expected),
+                    "--actual",
+                    str(actual),
+                    "--request",
+                    str(request),
+                    "--output",
+                    str(recomputed),
+                ],
+                cwd=repo_root,
+                env=environment,
+                check=False,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+            )
+            if (
+                completed.returncode != 0
+                or recomputed.read_bytes() != comparison_payload
+            ):
+                raise WorkflowError("CORRECTNESS_COMPARISON_REPLAY_DRIFT")
+        expected_commands.extend(
+            [
+                (
+                    f"{label}-process",
+                    [
+                        str(candidate_binary),
+                        "--request",
+                        str(request),
+                        "--fixture-root",
+                        str(fixture_root),
+                        "--output",
+                        str(actual),
+                    ],
+                    haskell_root,
+                ),
+                (
+                    f"{label}-compare",
+                    [
+                        str(python_bin),
+                        str(compare_script),
+                        "--expected",
+                        str(expected),
+                        "--actual",
+                        str(actual),
+                        "--request",
+                        str(request),
+                        "--output",
+                        str(comparison),
+                    ],
+                    repo_root,
+                ),
+            ]
+        )
+    if tuple(phase for phase, _, _ in expected_commands) != CORRECTNESS_PHASES:
+        raise WorkflowError("CORRECTNESS_PHASE_SEQUENCE_DRIFT")
+    if len(receipt["commands"]) != len(expected_commands):
+        raise WorkflowError("CORRECTNESS_COMMAND_COUNT_DRIFT")
+    for record, (phase, argv, cwd) in zip(
+        receipt["commands"],
+        expected_commands,
+        strict=True,
+    ):
+        validate_logged_command_record(
+            record,
+            expected_phase=phase,
+            expected_argv=argv,
+            expected_cwd=cwd,
+            evidence_directory=output,
+        )
     return receipt
 
 
@@ -2150,13 +2655,43 @@ def _validate_qualification_artifact(
     expected_source_tree_sha256: str,
     expected_commit: str,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    artifact = strict_json_load(_absolute_regular(path, label="QUALIFICATION_ARTIFACT"))
+    artifact_path = _absolute_regular(path, label="QUALIFICATION_ARTIFACT")
+    artifact_payload, artifact, _ = _same_fd_json_value(
+        artifact_path,
+        label="QUALIFICATION_ARTIFACT",
+        max_bytes=64 * 1024 * 1024,
+    )
     configuration, case_order = _qualification_contract(plan)
+    expected_fields = {
+        "schemaVersion",
+        "status",
+        "candidateSourceCommit",
+        "planPathId",
+        "planSha256",
+        "selectorConfigSha256",
+        "sourceTreeSha256",
+        "qualificationCaseOrder",
+        "plannedProfileOrderBlocks",
+        "blocks",
+        "selection",
+    }
+    numeric_root = Path(__file__).resolve(strict=True).parent.parent.parent
+    haskell_root = numeric_root / "haskell"
+    repo_root = numeric_root.parents[3]
+    plan_path = _absolute_regular(
+        numeric_root / "benchmarks/benchmark-plan.v1.json",
+        label="QUALIFICATION_PLAN",
+    )
     if (
         not isinstance(artifact, dict)
+        or set(artifact) != expected_fields
+        or artifact_payload
+        != canonical_json_bytes(artifact, trailing_newline=True)
         or artifact.get("schemaVersion") != QUALIFICATION_SCHEMA_VERSION
         or artifact.get("status") != "PASS"
         or artifact.get("candidateSourceCommit") != expected_commit
+        or artifact.get("planPathId") != "S1_4X_BENCHMARK_PLAN"
+        or artifact.get("planSha256") != sha256_file(plan_path)
         or artifact.get("sourceTreeSha256") != expected_source_tree_sha256
         or artifact.get("qualificationCaseOrder") != list(case_order)
         or artifact.get("plannedProfileOrderBlocks")
@@ -2164,10 +2699,69 @@ def _validate_qualification_artifact(
         or artifact.get("selectorConfigSha256")
         != canonical_sha256(configuration)
         or not isinstance(artifact.get("blocks"), list)
+        or len(artifact["blocks"]) != len(PROFILE_ORDER_BLOCKS)
     ):
         raise WorkflowError("QUALIFICATION_ARTIFACT_INVALID")
+    output = artifact_path.parent
+    ghcup = _required_environment_path("S1_4X_GHCUP_BIN")
+    stack = _required_environment_path("S1_4X_STACK_BIN")
+    _required_environment_path("S1_4X_AUTHORITATIVE_GHC_BIN")
+    marker_python = _required_environment_path("S1_4X_BENCHMARK_PYTHON_BIN")
+    marker_python_sha256 = _require_sha256(
+        os.environ.get("S1_4X_BENCHMARK_PYTHON_SHA256"),
+        label="benchmark-python",
+    )
+    if sha256_file(marker_python) != marker_python_sha256:
+        raise WorkflowError("BENCHMARK_PYTHON_SHA256_MISMATCH")
+    marker_script = _absolute_regular(
+        Path(__file__).resolve(strict=True),
+        label="PROFILE_MARKER_SCRIPT",
+    )
+    marker_script_sha256 = sha256_file(marker_script)
+    cache_value = os.environ.get("S1_4X_CACHE_ROOT")
+    if cache_value is None:
+        raise WorkflowError("REQUIRED_ENVIRONMENT_MISSING:S1_4X_CACHE_ROOT")
+    cache_root = _absolute_existing_directory(
+        Path(cache_value),
+        label="CACHE_ROOT",
+    )
+    stack_root = _absolute_existing_directory(
+        cache_root / "stack-root-profile-qualification",
+        label="QUALIFICATION_STACK_ROOT",
+    )
+    stack_yaml = _absolute_regular(
+        haskell_root / "stack.yaml",
+        label="AUTHORITATIVE_STACK_YAML",
+    )
+    expected_profile_fields = {
+        "profileId",
+        "ghcOptions",
+        "optionsSha256",
+        "startedAt",
+        "finishedAt",
+        "hostValidityPath",
+        "hostValiditySha256",
+        "hostCommand",
+        "rawCriterionPath",
+        "rawCriterionSha256",
+        "criterionCommand",
+        "caseSecondsPerBatch",
+        "marker",
+    }
+    expected_marker_fields = {
+        "path",
+        "preRunSha256",
+        "measurementSha256",
+        "pythonPath",
+        "pythonSha256",
+        "scriptPath",
+        "scriptSha256",
+        "argv",
+        "argvSha256",
+    }
     selector_blocks: list[dict[str, Any]] = []
     for index, block in enumerate(artifact["blocks"]):
+        planned_order = PROFILE_ORDER_BLOCKS[index]
         if (
             not isinstance(block, dict)
             or set(block)
@@ -2180,28 +2774,172 @@ def _validate_qualification_artifact(
             }
             or not isinstance(block.get("profiles"), list)
             or len(block["profiles"]) != 2
+            or block.get("orderBlock") != index
+            or block.get("plannedProfileOrder") != list(planned_order)
+            or block.get("actualProfileOrder") != list(planned_order)
         ):
             raise WorkflowError("QUALIFICATION_ARTIFACT_BLOCK_INVALID")
-        for profile in block["profiles"]:
+        raw_reports: dict[str, object] = {}
+        for profile_index, profile in enumerate(block["profiles"]):
+            expected_profile_id = planned_order[profile_index]
             marker = profile.get("marker") if isinstance(profile, dict) else None
             if (
-                not isinstance(marker, dict)
-                or set(marker)
-                != {
-                    "path",
-                    "preRunSha256",
-                    "measurementSha256",
-                    "pythonPath",
-                    "pythonSha256",
-                    "scriptPath",
-                    "scriptSha256",
-                    "argv",
-                    "argvSha256",
-                }
+                not isinstance(profile, dict)
+                or set(profile) != expected_profile_fields
+                or profile.get("profileId") != expected_profile_id
+                or profile.get("ghcOptions")
+                != list(profile_options(expected_profile_id))
+                or profile.get("optionsSha256")
+                != canonical_sha256(
+                    list(profile_options(expected_profile_id))
+                )
+                or not isinstance(marker, dict)
+                or set(marker) != expected_marker_fields
                 or marker.get("argvSha256")
                 != canonical_sha256(marker.get("argv"))
             ):
+                raise WorkflowError("QUALIFICATION_PROFILE_EVIDENCE_INVALID")
+            _require_iso_utc(
+                profile.get("startedAt"),
+                label=f"qualification-{index}-{expected_profile_id}-started",
+            )
+            _require_iso_utc(
+                profile.get("finishedAt"),
+                label=f"qualification-{index}-{expected_profile_id}-finished",
+            )
+            prefix = f"block-{index + 1}-{expected_profile_id}"
+            host_report_path = Path(str(profile.get("hostValidityPath", "")))
+            raw_report_path = Path(str(profile.get("rawCriterionPath", "")))
+            marker_path = Path(str(marker.get("path", "")))
+            if (
+                host_report_path
+                != output / f"{prefix}-host-validity.json"
+                or raw_report_path
+                != output / f"{prefix}-criterion.json"
+                or marker_path
+                != output / f"{prefix}-measurement-state.json"
+            ):
+                raise WorkflowError("QUALIFICATION_RAW_PATH_DRIFT")
+            host_sha256 = _require_sha256(
+                profile.get("hostValiditySha256"),
+                label=f"qualification-{prefix}-host",
+            )
+            host_report = read_same_fd_json_evidence(
+                host_report_path,
+                expected_sha256=host_sha256,
+                label="QUALIFICATION_HOST",
+                max_bytes=8 * 1024 * 1024,
+            )
+            host_record = profile.get("hostCommand")
+            if not isinstance(host_record, dict):
+                raise WorkflowError("QUALIFICATION_HOST_COMMAND_INVALID")
+            host_argv = host_record.get("argv")
+            try:
+                root_pid_index = host_argv.index("--allowed-process-root-pid")
+                root_pid = int(host_argv[root_pid_index + 1])
+            except (AttributeError, ValueError, IndexError, TypeError) as exc:
+                raise WorkflowError("QUALIFICATION_HOST_ROOT_PID_INVALID") from exc
+            if root_pid <= 0:
+                raise WorkflowError("QUALIFICATION_HOST_ROOT_PID_INVALID")
+            _validate_host_report_document(
+                host_report,
+                plan=plan,
+                root_pid=root_pid,
+            )
+            host_command = _host_validator_command(
+                numeric_root=numeric_root,
+                plan=plan,
+                output=host_report_path,
+                root_pid=root_pid,
+                python_bin=marker_python,
+            )
+            validate_logged_command_record(
+                host_record,
+                expected_phase=f"qualification-{prefix}-host",
+                expected_argv=host_command,
+                expected_cwd=repo_root,
+                evidence_directory=output,
+            )
+            marker_sha256 = _require_sha256(
+                marker.get("measurementSha256"),
+                label=f"qualification-{prefix}-marker",
+            )
+            measurement = read_same_fd_json_evidence(
+                marker_path,
+                expected_sha256=marker_sha256,
+                label="QUALIFICATION_MARKER",
+                max_bytes=1024 * 1024,
+            )
+            measurement = _validate_profile_marker(
+                measurement,
+                state="MEASUREMENT",
+            )
+            if (
+                measurement.get("planSha256") != artifact["planSha256"]
+                or measurement.get("selectorConfigSha256")
+                != artifact["selectorConfigSha256"]
+                or measurement.get("sourceTreeSha256")
+                != expected_source_tree_sha256
+                or measurement.get("orderBlock") != index
+                or measurement.get("profileId") != expected_profile_id
+                or measurement.get("qualificationCaseOrder")
+                != list(case_order)
+                or measurement.get("hostValiditySha256") != host_sha256
+                or measurement.get("markerPythonPath") != str(marker_python)
+                or measurement.get("markerPythonSha256")
+                != marker_python_sha256
+                or measurement.get("markerScriptPath") != str(marker_script)
+                or measurement.get("markerScriptSha256")
+                != marker_script_sha256
+                or marker.get("preRunSha256")
+                != profile_marker_pre_run_sha256(measurement)
+                or marker.get("preRunSha256")
+                != measurement.get("preRunSha256")
+                or marker.get("pythonPath") != str(marker_python)
+                or marker.get("pythonSha256") != marker_python_sha256
+                or marker.get("scriptPath") != str(marker_script)
+                or marker.get("scriptSha256") != marker_script_sha256
+                or marker.get("argv") != measurement.get("markerArgv")
+                or marker.get("argvSha256")
+                != measurement.get("markerArgvSha256")
+                or measurement.get("markerArgv")
+                != [
+                    str(marker_python),
+                    str(marker_script),
+                    "mark-measurement-entered",
+                    "--qualification",
+                    str(marker_path),
+                ]
+            ):
                 raise WorkflowError("QUALIFICATION_MARKER_EVIDENCE_INVALID")
+            raw_sha256 = _require_sha256(
+                profile.get("rawCriterionSha256"),
+                label=f"qualification-{prefix}-criterion",
+            )
+            raw_reports[expected_profile_id] = read_same_fd_json_evidence(
+                raw_report_path,
+                expected_sha256=raw_sha256,
+                label="QUALIFICATION_CRITERION",
+            )
+            criterion_command = _criterion_qualification_command(
+                ghcup=ghcup,
+                stack=stack,
+                stack_yaml=stack_yaml,
+                stack_root=stack_root,
+                profile_id=expected_profile_id,
+                time_limit_seconds=configuration[
+                    "criterionTimeLimitSeconds"
+                ],
+                raw_report=raw_report_path,
+                case_order=case_order,
+            )
+            validate_logged_command_record(
+                profile.get("criterionCommand"),
+                expected_phase=f"qualification-{prefix}-criterion",
+                expected_argv=criterion_command,
+                expected_cwd=haskell_root,
+                evidence_directory=output,
+            )
             for field in (
                 "preRunSha256",
                 "measurementSha256",
@@ -2210,12 +2948,24 @@ def _validate_qualification_artifact(
                 "argvSha256",
             ):
                 _require_sha256(marker.get(field), label=f"qualification-marker-{field}")
+        ratios, estimates = recompute_qualification_ratios(
+            raw_reports,
+            expected_case_order=case_order,
+        )
+        for profile in block["profiles"]:
+            if (
+                profile.get("caseSecondsPerBatch")
+                != estimates[profile["profileId"]]
+            ):
+                raise WorkflowError("QUALIFICATION_CASE_ESTIMATE_DRIFT")
+        if block.get("ratios") != ratios:
+            raise WorkflowError("QUALIFICATION_RATIO_DRIFT")
         selector_blocks.append(
             {
                 "orderBlock": block["orderBlock"],
                 "plannedProfileOrder": block["plannedProfileOrder"],
                 "actualProfileOrder": block["actualProfileOrder"],
-                "ratios": block["ratios"],
+                "ratios": ratios,
             }
         )
     selection = select_profile_from_blocks(
@@ -2250,10 +3000,8 @@ def _select_profile(arguments: argparse.Namespace) -> None:
         if value is None:
             raise WorkflowError(f"REQUIRED_ENVIRONMENT_MISSING:{name}")
         environment_paths[name] = Path(value)
-    subject_commits = {
-        document.get("candidateSourceCommit")
-        for document in (
-            strict_json_load(
+    subject_documents = (
+        strict_json_load(
                 _absolute_regular(
                     environment_paths[
                         "S1_4X_HASKELL_BASELINE_CORRECTNESS"
@@ -2261,7 +3009,7 @@ def _select_profile(arguments: argparse.Namespace) -> None:
                     label="BASELINE_CORRECTNESS_RECEIPT",
                 )
             ),
-            strict_json_load(
+        strict_json_load(
                 _absolute_regular(
                     environment_paths[
                         "S1_4X_HASKELL_OPTIMIZED_CORRECTNESS"
@@ -2269,7 +3017,7 @@ def _select_profile(arguments: argparse.Namespace) -> None:
                     label="OPTIMIZED_CORRECTNESS_RECEIPT",
                 )
             ),
-            strict_json_load(
+        strict_json_load(
                 _absolute_regular(
                     environment_paths[
                         "S1_4X_HASKELL_QUALIFICATION_ARTIFACT"
@@ -2277,12 +3025,16 @@ def _select_profile(arguments: argparse.Namespace) -> None:
                     label="QUALIFICATION_ARTIFACT",
                 )
             ),
-        )
+    )
+    subject_commits = [
+        document.get("candidateSourceCommit")
         if isinstance(document, dict)
-    }
-    subject_commit = next(iter(subject_commits), None)
+        else None
+        for document in subject_documents
+    ]
+    subject_commit = subject_commits[0]
     if (
-        len(subject_commits) != 1
+        any(value != subject_commit for value in subject_commits[1:])
         or not isinstance(subject_commit, str)
         or COMMIT_PATTERN.fullmatch(subject_commit) is None
     ):
