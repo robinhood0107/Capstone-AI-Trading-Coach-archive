@@ -85,11 +85,11 @@
       "language": "haskell",
       "file": "benchmark/Main.hs",
       "rule": "Avoid restricted module",
-      "symbol": "System.Environment(lookupEnv)",
-      "reason": "The benchmark shell reads only the three frozen absolute-path environment overrides before setup and keeps them outside every timed kernel.",
+      "symbol": "System.Environment(getExecutablePath,lookupEnv)",
+      "reason": "The benchmark shell reads only frozen launcher inputs and uses getExecutablePath solely to self-report the actual Criterion process before every timed kernel.",
       "focusedTest": "tools/tests/test_hlint_inventory.py: test_exact_module_allowances_bind_every_import",
       "owner": "S1.4X",
-      "expiresWhen": "Criterion setup receives the frozen plan and fixture paths through typed arguments instead of environment variables."
+      "expiresWhen": "Criterion exposes a typed runtime identity and all frozen launcher inputs without System.Environment."
     },
     {
       "language": "haskell",

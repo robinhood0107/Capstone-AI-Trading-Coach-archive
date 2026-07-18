@@ -52,8 +52,8 @@ MODULE_ALLOWANCES = (
         "System.Environment",
         "S14X.BenchmarkMain",
         "benchmark/Main.hs",
-        ("lookupEnv",),
-        "System.Environment(lookupEnv)",
+        ("getExecutablePath", "lookupEnv"),
+        "System.Environment(getExecutablePath,lookupEnv)",
     ),
     (
         "System.Environment",

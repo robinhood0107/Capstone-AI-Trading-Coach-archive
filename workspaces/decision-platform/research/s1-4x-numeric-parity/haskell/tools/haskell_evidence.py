@@ -47,8 +47,12 @@ class ProfileSelection:
 CANDIDATE_ROOTS = ("src", "app", "test", "benchmark")
 CONFIGURATION_PATHS = ("package.yaml", "selected-profile.v1.json")
 WORKFLOW_INPUT_PATHS = (
+    ".hlint.yaml",
     "Containerfile",
+    "ghc-compatibility-solve-failure.v1.json",
+    "lint-exceptions.v1.json",
     "stack-ghc-9.14.1.yaml",
+    "stylish-ghc2024-fallback.v1.json",
     "toolchain-lock.v1.json",
     "tools/assert-toolchain.sh",
     "tools/check-format.sh",
