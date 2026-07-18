@@ -6,6 +6,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
+import tempfile
 from pathlib import Path
 
 
@@ -255,6 +256,61 @@ def main() -> int:
     assert "assemble_input_set_result" in capability_runner
     assert "scala-input-set-equality-result.v1.json" in capability_runner
     assert "SCALA_CAPABILITY_EVIDENCE" not in capability_runner
+    capability_tool = load_tool("assemble_capability_results")
+    with tempfile.TemporaryDirectory() as temporary:
+        temporary_root = Path(temporary)
+        stdout = temporary_root / "process.stdout"
+        stderr = temporary_root / "process.stderr"
+        stdout.write_bytes(b"verified stdout\n")
+        stderr.write_bytes(b"")
+        portable = ["PINNED_TOOL", "--check", "SCALA_ROOT/source.scala"]
+        runtime = ["/opt/pinned/tool", "--check", str(SCALA_ROOT / "source.scala")]
+        process = {
+            "portableArgv": portable,
+            "portableArgvSha256": capability_tool.canonical_sha256(portable),
+            "runtimeArgvSha256": capability_tool.canonical_sha256(runtime),
+            "exitCode": 0,
+            "stdoutSha256": capability_tool.sha256_file(stdout),
+            "stderrSha256": capability_tool.sha256_file(stderr),
+            "status": "PASS",
+        }
+        capability_tool.require_process(
+            process,
+            "contract",
+            expected_portable_argv=portable,
+            expected_runtime_argv=runtime,
+            stdout_path=stdout,
+            stderr_path=stderr,
+        )
+        forged_argv = dict(process)
+        forged_argv["portableArgv"] = [*portable, "--forged"]
+        try:
+            capability_tool.require_process(
+                forged_argv,
+                "contract",
+                expected_portable_argv=portable,
+                expected_runtime_argv=runtime,
+                stdout_path=stdout,
+                stderr_path=stderr,
+            )
+        except capability_tool.CapabilityAssemblyError:
+            pass
+        else:
+            raise AssertionError("forged capability argv passed")
+        stdout.write_bytes(b"tampered stdout\n")
+        try:
+            capability_tool.require_process(
+                process,
+                "contract",
+                expected_portable_argv=portable,
+                expected_runtime_argv=runtime,
+                stdout_path=stdout,
+                stderr_path=stderr,
+            )
+        except capability_tool.CapabilityAssemblyError:
+            pass
+        else:
+            raise AssertionError("tampered capability log passed")
     toolchain_receipt = script("run-toolchain-identity.sh")
     assert "scala-toolchain-identity-result.v1.json" in toolchain_receipt
     profile_contract = script("test-profile-correctness.sh")

@@ -1233,8 +1233,11 @@ def main() -> int:
     benchmark_environment = {
         "S1_4X_BENCHMARK_CASE_ID": "SET",
         "S1_4X_BENCHMARK_PLAN": "SET",
+        "S1_4X_BENCHMARK_PROFILE": "SET",
+        "S1_4X_BENCHMARK_RUN_MODE": "SET",
         "S1_4X_EFFECTIVE_JVM_EVIDENCE_DIR": "SET",
         "S1_4X_FIXTURE_ROOT": "SET",
+        "S1_4X_MEASUREMENT_READY_MARKER": "SET",
     }
     observed_jmh_arguments = ["-Djmh.separateClasspathJAR=true"]
     fork_evidence = [
