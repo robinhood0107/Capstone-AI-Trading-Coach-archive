@@ -3,7 +3,19 @@
 
 from __future__ import annotations
 
-from rotated_block_runtime import main
+from rotated_block_runtime import (
+    ScheduledBlock,
+    build_schedule,
+    main,
+    mark_measurement_entered,
+)
+
+__all__ = (
+    "ScheduledBlock",
+    "build_schedule",
+    "main",
+    "mark_measurement_entered",
+)
 
 
 if __name__ == "__main__":
