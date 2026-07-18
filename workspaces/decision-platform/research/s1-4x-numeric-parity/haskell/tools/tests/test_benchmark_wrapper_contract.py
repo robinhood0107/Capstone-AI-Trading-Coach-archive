@@ -148,7 +148,7 @@ class BenchmarkWrapperContractTests(unittest.TestCase):
                 self.assertIn(token, source)
         self.assertLess(
             source.index("publishRuntimeIdentity"),
-            source.index("defaultMain"),
+            source.index("  defaultMain"),
         )
 
     def test_outer_wrapper_exports_verified_authoritative_ghc_sha(self) -> None:
