@@ -19,14 +19,17 @@ from python_benchmark_block import _consume, _source_closure_sha256  # noqa: E40
 @dataclass(frozen=True, slots=True)
 class NestedResult:
     statistic: float
-    values: tuple[np.ndarray, float]
+    values: tuple[np.ndarray, object]
 
 
 class PythonBenchmarkEvidenceTests(TestCase):
     def test_slotted_dataclass_and_arrays_are_fully_consumed(self) -> None:
         result = NestedResult(
             statistic=2.0,
-            values=(np.asarray([1.0, 3.0], dtype=np.float64), 4.0),
+            values=(
+                np.asarray([1.0, 3.0], dtype=np.float64),
+                {"nested": 4.0},
+            ),
         )
         self.assertEqual(_consume(result), 10.0)
 
