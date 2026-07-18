@@ -1,0 +1,20 @@
+{
+  "schemaVersion": "s1.4x-integration-baseline-v1",
+  "issue": 26,
+  "originMainBaseSha": "49921c4dbf5ef66407211b7f0f56218ab563043d",
+  "originMainBaseTreeSha": "ae761f866de22a8b1a837420c65c840afeadb762",
+  "gate0MergeSha": "f2784ffb66272cf73ed1085d1719713fc7165113",
+  "fixtureFreezeMergeSha": "49921c4dbf5ef66407211b7f0f56218ab563043d",
+  "fixtureFreezeReviewedHeadSha": "41114ca2ce4a0c8274c830942cb01d0899d76d36",
+  "immutableInputs": {
+    "benchmarkPlanSha256": "caf00112f58723e277293f59ccedb48bbd9ec82d096d3118ee3a9ed72658d1d1",
+    "canonicalInputsSha256": "367ca5b8589f9c5b16e8c2e5dd2cfe7cc560a7de19559551c487beeefcf62e63",
+    "canonicalResultsSha256": "59619337c415757a612bc923b32e2a174018b15dc67b2357b10ccb602fca1b6a",
+    "contractCanonicalRootSha256": "b6d994f5344be32d3f917297bef2329966b6ecffe9e9c274398a26d5ea0f712d",
+    "contractManifestSha256": "4dd4d688339805a1432f9da973dbda73621dd7ff5f1b423819292f8a29a72b2e",
+    "oracleCanonicalRootSha256": "7bf9653a7abe87807c44c44a1ca5eeeb985665167a7dc3b4476e2593157eeab2",
+    "referenceLockSha256": "b55b81b933ad4749c77e3baa313f900dab18d808bc34285232f7b603993a6cb7",
+    "toolchainProvenanceSha256": "cd9e29a22473fba6203daa4f3a0cbaa57b8b6e5c5fc22de05ca0801c404ffa98"
+  },
+  "freezeSemantics": "identity-record-only"
+}
