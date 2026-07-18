@@ -1,0 +1,744 @@
+name: S1.4X Numeric Parity Correctness
+
+on:
+  pull_request:
+    paths:
+      - "workspaces/decision-platform/research/s1-4x-numeric-parity/**"
+      - "workspaces/decision-platform/python-services/pyproject.toml"
+      - "workspaces/decision-platform/python-services/uv.lock"
+      - "workspaces/decision-platform/python-services/app/financial_engineering/**"
+      - "workspaces/decision-platform/python-services/tests/financial_engineering/**"
+      - "workspaces/decision-platform/research/s1-4r-jax-risk/README.md"
+      - "workspaces/decision-platform/research/s1-4r-jax-risk/pyproject.toml"
+      - "workspaces/decision-platform/research/s1-4r-jax-risk/uv.lock"
+      - "workspaces/decision-platform/research/s1-4r-jax-risk/src/s1_4r_risk_research/**"
+      - "workspaces/decision-platform/research/s1-4r-jax-risk/tests/**"
+      - "workspaces/decision-platform/research/s1-4r-jax-risk/benchmarks/**"
+      - "shared-docs/metrics_definitions.md"
+      - ".gitignore"
+      - ".github/workflows/s1-4x-*.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "workspaces/decision-platform/research/s1-4x-numeric-parity/**"
+      - "workspaces/decision-platform/python-services/pyproject.toml"
+      - "workspaces/decision-platform/python-services/uv.lock"
+      - "workspaces/decision-platform/python-services/app/financial_engineering/**"
+      - "workspaces/decision-platform/python-services/tests/financial_engineering/**"
+      - "workspaces/decision-platform/research/s1-4r-jax-risk/README.md"
+      - "workspaces/decision-platform/research/s1-4r-jax-risk/pyproject.toml"
+      - "workspaces/decision-platform/research/s1-4r-jax-risk/uv.lock"
+      - "workspaces/decision-platform/research/s1-4r-jax-risk/src/s1_4r_risk_research/**"
+      - "workspaces/decision-platform/research/s1-4r-jax-risk/tests/**"
+      - "workspaces/decision-platform/research/s1-4r-jax-risk/benchmarks/**"
+      - "shared-docs/metrics_definitions.md"
+      - ".gitignore"
+      - ".github/workflows/s1-4x-*.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: s1-4x-numeric-parity-correctness-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  UV_PYTHON: "3.12.13"
+  JAX_PLATFORMS: cpu
+  JAX_ENABLE_X64: "1"
+  OMP_NUM_THREADS: "1"
+  OPENBLAS_NUM_THREADS: "1"
+  MKL_NUM_THREADS: "1"
+  NUMEXPR_NUM_THREADS: "1"
+  VECLIB_MAXIMUM_THREADS: "1"
+  S1_4X_ARTIFACT_MAX_BYTES: "536870912"
+
+jobs:
+  contract-reference-lock:
+    name: Contract and complete reference lock
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - &setup_uv
+        name: Set up exact uv and Python
+        uses: astral-sh/setup-uv@d31148d669074a8d0a63714ba94f3201e7020bc3 # v8.3.0
+        with:
+          version: "0.11.26"
+          python-version: "3.12.13"
+
+      - &expose_uv
+        name: Expose exact uv path and bounded roots
+        shell: bash
+        run: |
+          set -euo pipefail
+          CACHE_ROOT="${RUNNER_TEMP}/s1-4x-cache"
+          mkdir -p "$CACHE_ROOT/tmp" "$CACHE_ROOT/uv" "$CACHE_ROOT/coursier"
+          {
+            echo "S1_4X_UV_BIN=$(readlink -f "$(command -v uv)")"
+            echo "S1_4X_CACHE_ROOT=$CACHE_ROOT"
+            echo "TMPDIR=$CACHE_ROOT/tmp"
+            echo "TEMP=$CACHE_ROOT/tmp"
+            echo "TMP=$CACHE_ROOT/tmp"
+            echo "UV_CACHE_DIR=$CACHE_ROOT/uv"
+            echo "COURSIER_CACHE=$CACHE_ROOT/coursier"
+          } >> "$GITHUB_ENV"
+
+      - name: Validate every frozen source and contract input
+        shell: bash
+        run: |
+          set -euo pipefail
+          S1_4X="$GITHUB_WORKSPACE/workspaces/decision-platform/research/s1-4x-numeric-parity"
+          ORACLE="$S1_4X/oracle"
+          uv lock --project "$ORACLE" --check
+          uv sync --frozen --all-groups --project "$ORACLE"
+          uv run --frozen --project "$ORACLE" \
+            python "$ORACLE/generate_large_fixtures.py" --check
+          uv run --frozen --project "$ORACLE" \
+            python "$ORACLE/validate_contract.py" --check-all \
+            --output "$RUNNER_TEMP/contract-validation.json"
+          jq -e '
+            .status == "PASS" and
+            .functionCount == 20 and
+            .errorCodeCount == 32 and
+            .referenceSourceCount > 0 and
+            .referenceSourceTreeCount == 4
+          ' "$RUNNER_TEMP/contract-validation.json" >/dev/null
+          uv run --frozen --project "$ORACLE" pytest -q \
+            "$S1_4X/integration/tests/test_workflow_contract.py"
+
+  scala-compiler-lint-tests:
+    name: Scala hard compiler, format, lint, MUnit, and ScalaCheck
+    needs: contract-reference-lock
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - *setup_uv
+      - *expose_uv
+
+      - &setup_java
+        name: Set up exact Temurin JDK
+        uses: actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654 # v5.2.0
+        with:
+          distribution: temurin
+          java-version: "25.0.3+9"
+          check-latest: false
+
+      - &setup_coursier
+        name: Set up exact Coursier and Scalafix
+        uses: coursier/setup-action@039f736548afa5411c1382f40a5bd9c2d30e0383 # v1.3.9
+        with:
+          version: "2.1.24"
+          apps: scalafix:0.14.7
+
+      - &bootstrap_scala
+        name: Verify exact Scala CLI, Scalafmt, Scalafix, and JDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          BOOT="${RUNNER_TEMP}/s1-4x-scala-tools"
+          mkdir -p "$BOOT/bin" "$BOOT/scalafmt"
+
+          curl -fL \
+            https://github.com/VirtusLab/scala-cli/releases/download/v1.15.0/scala-cli-x86_64-pc-linux.gz \
+            -o "$BOOT/scala-cli.gz"
+          printf '%s  %s\n' \
+            '37b33939ff82a8730263b6c72d81e23db4987b4b399c8a403c8ece76604a30f6' \
+            "$BOOT/scala-cli.gz" | sha256sum --check
+          gzip -dc "$BOOT/scala-cli.gz" > "$BOOT/bin/scala-cli"
+          chmod 0555 "$BOOT/bin/scala-cli"
+          test "$(sha256sum "$BOOT/bin/scala-cli" | awk '{print $1}')" = \
+            "54b93b8401e333095526da5e4853780d5bf37494baa1ba5486e9e643084253d0"
+
+          curl -fL \
+            https://github.com/scalameta/scalafmt/releases/download/v3.11.4/scalafmt-x86_64-pc-linux.zip \
+            -o "$BOOT/scalafmt.zip"
+          printf '%s  %s\n' \
+            'e7d43a5621074a63a46d5b287d0b0bb0650033deeb836af2b27515b2127476f2' \
+            "$BOOT/scalafmt.zip" | sha256sum --check
+          unzip -q "$BOOT/scalafmt.zip" -d "$BOOT/scalafmt"
+          chmod 0555 "$BOOT/scalafmt/scalafmt"
+          test "$(sha256sum "$BOOT/scalafmt/scalafmt" | awk '{print $1}')" = \
+            "88526f9f4d64c2fb023d54578812419f49e2ec09e30e4fb77443a05f1a59cac0"
+
+          SCALAFIX_BIN="$(readlink -f "$(command -v scalafix)")"
+          test -x "$SCALAFIX_BIN"
+          test "$(sha256sum "$SCALAFIX_BIN" | awk '{print $1}')" = \
+            "9db6db7359e580de8f4b72cd7c104d70023cf32a278db0c30aefb79c939eb0f3"
+          test "$(sha256sum "$JAVA_HOME/bin/java" | awk '{print $1}')" = \
+            "ac3505f0c58282f00a6585591324a86b038c89cd171105fe42a1a0cf2f13b517"
+
+          {
+            echo "S1_4X_SCALA_CLI_BIN=$BOOT/bin/scala-cli"
+            echo "S1_4X_SCALAFIX_BIN=$SCALAFIX_BIN"
+            echo "S1_4X_SCALAFMT_ARCHIVE=$BOOT/scalafmt.zip"
+            echo "S1_4X_SCALAFMT_BIN=$BOOT/scalafmt/scalafmt"
+          } >> "$GITHUB_ENV"
+
+      - name: Run Scala static, format, semantic, compiler, and baseline tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          S1_4X="$GITHUB_WORKSPACE/workspaces/decision-platform/research/s1-4x-numeric-parity"
+          SCALA="$S1_4X/scala"
+          RESULT_DIR="$RUNNER_TEMP/s1-4x-results"
+          PLAN="$S1_4X/benchmarks/benchmark-plan.v1.json"
+          POLICY="$S1_4X/contract/scala-source-policy.v1.json"
+          mkdir -p "$RESULT_DIR/scala"
+          export RESULT_DIR
+
+          "$SCALA/tools/assert-toolchain.sh"
+          "$SCALA/tools/test-source-input-manifest.sh"
+          "$SCALA/tools/test-source-and-jmh-policy.sh"
+          "$SCALA/tools/run-scalafmt-idempotence.sh" \
+            --output-dir "$RESULT_DIR/scala/scalafmt"
+          "$SCALA/tools/run-scalafix.sh" \
+            --policy "$POLICY" \
+            --fixture-matrix "$SCALA/tools/fixtures/source-policy-negative.v1.json" \
+            --output-dir "$RESULT_DIR/scala/scalafix"
+          "$SCALA/tools/check-source-policy.sh" \
+            --policy "$POLICY" \
+            --semantic-receipt \
+              "$RESULT_DIR/scala/scalafix/scala-semantic-policy-receipt.v1.json" \
+            --all-production-and-benchmark-inputs \
+            --output "$RESULT_DIR/scala/scala-source-policy-result.v1.json"
+          "$SCALA/tools/run-hard-compiler-profile.sh" \
+            --profile A \
+            --output-dir "$RESULT_DIR/scala/hard-compiler-A"
+          "$SCALA/tools/run-jmh-native-smoke.sh" \
+            --plan "$PLAN" \
+            --profile A \
+            --case-id path-transform/log_returns/n100000/b1 \
+            --mode smoke \
+            --output-dir "$RESULT_DIR/scala/jmh-smoke"
+          export S1_4X_SCALA_JVM_ALLOWLIST_RESULT=\
+            "$RESULT_DIR/scala/jmh-smoke/scala-jvm-argument-allowlist.v1.json"
+          "$SCALA/tools/run-correctness-profile.sh" baseline
+
+      - name: Enforce Scala evidence artifact size cap
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifact_bytes="$(du -sb "$RUNNER_TEMP/s1-4x-results" | cut -f1)"
+          test "$artifact_bytes" -le "$S1_4X_ARTIFACT_MAX_BYTES"
+
+      - name: Upload Scala baseline and JVM closure
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: s1-4x-scala-baseline-${{ github.run_id }}
+          path: ${{ runner.temp }}/s1-4x-results
+          if-no-files-found: error
+          retention-days: 14
+
+  scala-profile-selection:
+    name: Scala A/B/C correctness and quantitative selector
+    needs: scala-compiler-lint-tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - *setup_uv
+      - *expose_uv
+      - *setup_java
+      - *setup_coursier
+      - *bootstrap_scala
+
+      - name: Download Scala baseline evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: s1-4x-scala-baseline-${{ github.run_id }}
+          path: ${{ runner.temp }}/s1-4x-results
+
+      - name: Run B/C correctness and freeze the selected profile
+        shell: bash
+        run: |
+          set -euo pipefail
+          S1_4X="$GITHUB_WORKSPACE/workspaces/decision-platform/research/s1-4x-numeric-parity"
+          SCALA="$S1_4X/scala"
+          PLAN="$S1_4X/benchmarks/benchmark-plan.v1.json"
+          RESULT_DIR="$RUNNER_TEMP/s1-4x-results"
+          export RESULT_DIR
+          export S1_4X_SCALA_JVM_ALLOWLIST_RESULT=\
+            "$RESULT_DIR/scala/jmh-smoke/scala-jvm-argument-allowlist.v1.json"
+
+          "$SCALA/tools/run-correctness-profile.sh" opt
+          "$SCALA/tools/run-correctness-profile.sh" opt-own-source-inline
+          "$SCALA/tools/run-profile-qualification.sh" \
+            --plan "$PLAN" \
+            --profiles A,B,C \
+            --enforce-order-plan \
+            --output-dir "$RESULT_DIR/scala/qualification"
+
+          export S1_4X_SCALA_QUALIFICATION_RESULT=\
+            "$RESULT_DIR/scala/qualification/scala-profile-qualification.v1.json"
+          export S1_4X_SCALA_CORRECTNESS_ROOT="$RESULT_DIR/scala/profiles"
+          export S1_4X_SCALA_SELECTED_PROFILE_RESULT=\
+            "$RESULT_DIR/scala/scala-selected-profile-result.v1.json"
+          "$SCALA/tools/select-proven-profile.sh" \
+            --plan "$PLAN" \
+            --qualification "$S1_4X_SCALA_QUALIFICATION_RESULT" \
+            --correctness-root "$S1_4X_SCALA_CORRECTNESS_ROOT" \
+            --output "$S1_4X_SCALA_SELECTED_PROFILE_RESULT"
+          "$SCALA/tools/select-proven-profile.sh" \
+            --check \
+            --plan "$PLAN" \
+            --qualification "$S1_4X_SCALA_QUALIFICATION_RESULT" \
+            --correctness-root "$S1_4X_SCALA_CORRECTNESS_ROOT" \
+            --output "$S1_4X_SCALA_SELECTED_PROFILE_RESULT"
+
+      - name: Enforce selected Scala artifact size cap
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifact_bytes="$(du -sb "$RUNNER_TEMP/s1-4x-results" | cut -f1)"
+          test "$artifact_bytes" -le "$S1_4X_ARTIFACT_MAX_BYTES"
+
+      - name: Upload selected Scala profile artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: s1-4x-scala-selected-${{ github.run_id }}
+          path: ${{ runner.temp }}/s1-4x-results
+          if-no-files-found: error
+          retention-days: 14
+
+  haskell-authoritative-selection:
+    name: Haskell format, lint, O0/O2 correctness, and selector
+    needs: contract-reference-lock
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - *setup_uv
+      - *expose_uv
+
+      - &bootstrap_haskell
+        name: Bootstrap and verify the frozen GHCup toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes \
+            build-essential curl pkg-config \
+            libffi-dev libgmp-dev libncurses-dev zlib1g-dev \
+            bzip2 gzip unzip xz-utils python3-jsonschema
+
+          BOOT="${RUNNER_TEMP}/s1-4x-haskell-bootstrap"
+          PREFIX="${RUNNER_TEMP}/s1-4x-ghcup-prefix"
+          TOOLS="${RUNNER_TEMP}/s1-4x-haskell-tools"
+          mkdir -p "$BOOT" "$PREFIX" "$TOOLS/bin" "$TOOLS/stack-root"
+
+          curl -fL \
+            https://github.com/haskell/ghcup-hs/releases/download/v0.2.6.2/x86_64-linux-ghcup-0.2.6.2 \
+            -o "$BOOT/ghcup"
+          printf '%s  %s\n' \
+            '9ed5da5449b48043a0d17e767c05d2ef585e25a639bb934329496c6d2fad9cf8' \
+            "$BOOT/ghcup" | sha256sum --check
+          chmod 0555 "$BOOT/ghcup"
+
+          curl -fL \
+            https://raw.githubusercontent.com/haskell/ghcup-metadata/0341867f2d419567cf42ea6931e031b00ab3a922/ghcup-0.1.0.yaml \
+            -o "$BOOT/ghcup-0.1.0.yaml"
+          printf '%s  %s\n' \
+            '49c8a036ce399587205a11ac24e73465cadc5f3232e9418a9d87f4b7f746c4ec' \
+            "$BOOT/ghcup-0.1.0.yaml" | sha256sum --check
+
+          export GHCUP_INSTALL_BASE_PREFIX="$PREFIX"
+          GHCUP="$BOOT/ghcup"
+          METADATA="file://$BOOT/ghcup-0.1.0.yaml"
+          "$GHCUP" --metadata-fetching-mode Strict --url-source "$METADATA" \
+            install ghc 9.10.3
+          "$GHCUP" --metadata-fetching-mode Strict --url-source "$METADATA" \
+            install ghc 9.14.1
+          "$GHCUP" --metadata-fetching-mode Strict --url-source "$METADATA" \
+            install stack 3.11.1
+
+          AUTHORITATIVE_GHC="$("$GHCUP" --offline whereis ghc 9.10.3)"
+          LATEST_GHC="$("$GHCUP" --offline whereis ghc 9.14.1)"
+          STACK="$("$GHCUP" --offline whereis stack 3.11.1)"
+          test "$(sha256sum "$AUTHORITATIVE_GHC" | awk '{print $1}')" = \
+            "d0c0dd79a1bcc5dce3c9e73613c1be51f61b78d5ef7c0970ffe9f142a90a5e2c"
+          test "$(sha256sum "$LATEST_GHC" | awk '{print $1}')" = \
+            "ecfd54b4161699f574d2b163bdc817c54df08a08a310323e43b41ab5fc413ef1"
+          test "$(sha256sum "$STACK" | awk '{print $1}')" = \
+            "923dbd137756652c67b376e2447c655b87fcc373f4d104b5073bca913471ecbe"
+
+          STACK_ROOT="$TOOLS/stack-root" \
+            "$GHCUP" --offline run --quick --ghc 9.10.3 --stack 3.11.1 -- \
+            "$STACK" --resolver lts-24.50 \
+            --system-ghc --no-install-ghc --jobs 1 \
+            install hlint-3.10 stylish-haskell-0.15.1.0 \
+            --local-bin-path "$TOOLS/bin"
+          test "$(sha256sum "$TOOLS/bin/hlint" | awk '{print $1}')" = \
+            "3ff3fb4b571876d668ddf4ad0245769c19a640283fabb0c2629038aa34197f62"
+          test "$(sha256sum "$TOOLS/bin/stylish-haskell" | awk '{print $1}')" = \
+            "385dc27bc2d0fb654e76ecadfb57bc0b7e1c58afe74f19923e20b696e6fe0d7b"
+
+          {
+            echo "GHCUP_INSTALL_BASE_PREFIX=$PREFIX"
+            echo "S1_4X_GHCUP_BIN=$GHCUP"
+            echo "S1_4X_AUTHORITATIVE_GHC_BIN=$AUTHORITATIVE_GHC"
+            echo "S1_4X_LATEST_GHC_BIN=$LATEST_GHC"
+            echo "S1_4X_STACK_BIN=$STACK"
+            echo "S1_4X_HLINT_BIN=$TOOLS/bin/hlint"
+            echo "S1_4X_STYLISH_BIN=$TOOLS/bin/stylish-haskell"
+          } >> "$GITHUB_ENV"
+
+      - name: Run authoritative Haskell gates and selected-profile check
+        shell: bash
+        run: |
+          set -euo pipefail
+          S1_4X="$GITHUB_WORKSPACE/workspaces/decision-platform/research/s1-4x-numeric-parity"
+          HASKELL="$S1_4X/haskell"
+          PLAN="$S1_4X/benchmarks/benchmark-plan.v1.json"
+          RESULT_DIR="$RUNNER_TEMP/s1-4x-results"
+          mkdir -p "$RESULT_DIR/haskell"
+
+          "$HASKELL/tools/assert-toolchain.sh"
+          "$HASKELL/tools/check-format.sh" \
+            --output-dir "$RESULT_DIR/haskell/format"
+          "$HASKELL/tools/check-hlint.sh" \
+            --output-dir "$RESULT_DIR/haskell/hlint"
+          python3 "$HASKELL/tools/tests/test_workflow_input_closure.py"
+          "$HASKELL/tools/run-correctness-profile.sh" \
+            baseline-o0-fasm \
+            --output-dir "$RESULT_DIR/haskell/profiles/baseline-o0-fasm"
+          "$HASKELL/tools/run-correctness-profile.sh" \
+            optimized-o2-fasm \
+            --output-dir "$RESULT_DIR/haskell/profiles/optimized-o2-fasm"
+          "$HASKELL/tools/run-profile-qualification.sh" \
+            --plan "$PLAN" \
+            --profiles baseline-o0-fasm,optimized-o2-fasm \
+            --enforce-order-plan \
+            --output-dir "$RESULT_DIR/haskell/qualification"
+
+          export S1_4X_HASKELL_BASELINE_CORRECTNESS=\
+            "$RESULT_DIR/haskell/profiles/baseline-o0-fasm/correctness-receipt.v1.json"
+          export S1_4X_HASKELL_OPTIMIZED_CORRECTNESS=\
+            "$RESULT_DIR/haskell/profiles/optimized-o2-fasm/correctness-receipt.v1.json"
+          export S1_4X_HASKELL_QUALIFICATION_ARTIFACT=\
+            "$RESULT_DIR/haskell/qualification/qualification-artifact.v1.json"
+          "$HASKELL/tools/select-proven-profile.sh" --check
+
+      - name: Enforce selected Haskell artifact size cap
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifact_bytes="$(du -sb "$RUNNER_TEMP/s1-4x-results" | cut -f1)"
+          test "$artifact_bytes" -le "$S1_4X_ARTIFACT_MAX_BYTES"
+
+      - name: Upload selected Haskell profile artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: s1-4x-haskell-selected-${{ github.run_id }}
+          path: ${{ runner.temp }}/s1-4x-results
+          if-no-files-found: error
+          retention-days: 14
+
+  haskell-ghc-9-14-compatibility:
+    name: GHC 9.14.1 non-scoring typed compatibility
+    needs: haskell-authoritative-selection
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - *setup_uv
+      - *expose_uv
+      - *bootstrap_haskell
+
+      - name: Replay and validate non-scoring GHC 9.14.1 result
+        shell: bash
+        run: |
+          set -euo pipefail
+          S1_4X="$GITHUB_WORKSPACE/workspaces/decision-platform/research/s1-4x-numeric-parity"
+          HASKELL="$S1_4X/haskell"
+          OUTPUT="$RUNNER_TEMP/s1-4x-ghc-9-14"
+          "$HASKELL/tools/run-ghc-9.14.1-compatibility.sh" \
+            --stack-yaml "$HASKELL/stack-ghc-9.14.1.yaml" \
+            --full-matrix \
+            --output-dir "$OUTPUT"
+          "$HASKELL/tools/validate-ghc-9.14.1-compatibility.sh" \
+            "$OUTPUT/ghc-9.14.1-compatibility.v1.json"
+          jq -e '
+            .nonScoring == true and
+            .performanceInput == false and
+            (.result == "PASS" or .result == "FAIL_FROZEN_DEPENDENCY")
+          ' "$OUTPUT/ghc-9.14.1-compatibility.v1.json" >/dev/null
+
+      - name: Upload typed compatibility evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: s1-4x-ghc-9-14-${{ github.run_id }}
+          path: ${{ runner.temp }}/s1-4x-ghc-9-14
+          if-no-files-found: error
+          retention-days: 14
+
+  cross-language-comparator:
+    name: Selected Scala and Haskell typed comparator
+    needs:
+      - scala-profile-selection
+      - haskell-authoritative-selection
+      - haskell-ghc-9-14-compatibility
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - *setup_uv
+      - *expose_uv
+      - *setup_java
+      - *setup_coursier
+      - *bootstrap_scala
+      - *bootstrap_haskell
+
+      - name: Download selected Scala evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: s1-4x-scala-selected-${{ github.run_id }}
+          path: ${{ runner.temp }}/s1-4x-results
+
+      - name: Download selected Haskell evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: s1-4x-haskell-selected-${{ github.run_id }}
+          path: ${{ runner.temp }}/s1-4x-results
+
+      - name: Run selected native cross-language comparator
+        shell: bash
+        run: |
+          set -euo pipefail
+          S1_4X="$GITHUB_WORKSPACE/workspaces/decision-platform/research/s1-4x-numeric-parity"
+          RESULT_DIR="$RUNNER_TEMP/s1-4x-results"
+          CROSS="$RUNNER_TEMP/s1-4x-cross-language"
+          SCALA_PROFILE="$(
+            jq -r '.selectedProfileId' \
+              "$RESULT_DIR/scala/scala-selected-profile-result.v1.json"
+          )"
+          export RESULT_DIR
+          export S1_4X_BENCHMARK_SUBJECT_COMMIT="$GITHUB_SHA"
+          export S1_4X_SCALA_CORRECTNESS_ROOT="$RESULT_DIR/scala/profiles"
+          export S1_4X_SCALA_QUALIFICATION_RESULT=\
+            "$RESULT_DIR/scala/qualification/scala-profile-qualification.v1.json"
+          export S1_4X_SCALA_SELECTED_PROFILE_RESULT=\
+            "$RESULT_DIR/scala/scala-selected-profile-result.v1.json"
+          export S1_4X_SCALA_JVM_ALLOWLIST_RESULT=\
+            "$RESULT_DIR/scala/jmh-smoke/scala-jvm-argument-allowlist.v1.json"
+          export S1_4X_SCALA_CANDIDATE_JAR=\
+            "$RESULT_DIR/scala/profiles/$SCALA_PROFILE/candidate.jar"
+          export S1_4X_SCALA_CANDIDATE_SHA256
+          S1_4X_SCALA_CANDIDATE_SHA256="$(
+            sha256sum "$S1_4X_SCALA_CANDIDATE_JAR" | awk '{print $1}'
+          )"
+          export S1_4X_HASKELL_BASELINE_CORRECTNESS=\
+            "$RESULT_DIR/haskell/profiles/baseline-o0-fasm/correctness-receipt.v1.json"
+          export S1_4X_HASKELL_OPTIMIZED_CORRECTNESS=\
+            "$RESULT_DIR/haskell/profiles/optimized-o2-fasm/correctness-receipt.v1.json"
+          export S1_4X_HASKELL_QUALIFICATION_ARTIFACT=\
+            "$RESULT_DIR/haskell/qualification/qualification-artifact.v1.json"
+
+          "$S1_4X/integration/tools/run-integration-correctness.sh" "$CROSS"
+          uv run --frozen --project "$S1_4X/oracle" \
+            python "$S1_4X/oracle/compare_results.py" \
+            --expected \
+              "$S1_4X/contract/fixtures/expected/canonical-results.v1.json" \
+            --actual "$CROSS/canonical/scala-results.json" \
+            --actual "$CROSS/canonical/haskell-results.json" \
+            --output "$CROSS/selected-comparison.json"
+          jq -e '.status == "PASS" and .mismatchCount == 0' \
+            "$CROSS/selected-comparison.json" >/dev/null
+
+      - name: Upload cross-language mismatch-zero evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: s1-4x-cross-language-${{ github.run_id }}
+          path: ${{ runner.temp }}/s1-4x-cross-language
+          if-no-files-found: error
+          retention-days: 14
+
+  scala-oci-correctness:
+    name: Scala digest-pinned OCI offline correctness
+    needs: scala-profile-selection
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      S1_4X_SCALA_BASE_IMAGE: docker.io/library/eclipse-temurin@sha256:5742cdb98ef117621ad75f57475ab127db04f344d9c523307cc60b9955bdd676
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - *setup_uv
+      - *expose_uv
+
+      - name: Download selected Scala evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: s1-4x-scala-selected-${{ github.run_id }}
+          path: ${{ runner.temp }}/s1-4x-results
+
+      - name: Build without network and replay with runtime network none
+        shell: bash
+        run: |
+          set -euo pipefail
+          S1_4X="$GITHUB_WORKSPACE/workspaces/decision-platform/research/s1-4x-numeric-parity"
+          SCALA="$S1_4X/scala"
+          RESULT_DIR="$RUNNER_TEMP/s1-4x-results"
+          OUTPUT="$RUNNER_TEMP/s1-4x-scala-oci"
+          mkdir -p "$OUTPUT"
+          PROFILE="$(
+            jq -r '.selectedProfileId' \
+              "$RESULT_DIR/scala/scala-selected-profile-result.v1.json"
+          )"
+          CANDIDATE="$RESULT_DIR/scala/profiles/$PROFILE/candidate.jar"
+          export S1_4X_DOCKER_BIN
+          S1_4X_DOCKER_BIN="$(readlink -f "$(command -v docker)")"
+          docker pull "$S1_4X_SCALA_BASE_IMAGE"
+          "$SCALA/tools/build-oci-image.sh" \
+            --candidate "$CANDIDATE" \
+            --base-image "$S1_4X_SCALA_BASE_IMAGE" \
+            --image-tag "s1-4x-scala:${GITHUB_SHA::12}" \
+            --output "$OUTPUT/scala-oci-build-result.v1.json"
+          export S1_4X_SCALA_IMAGE_REF
+          S1_4X_SCALA_IMAGE_REF="$(
+            jq -r '.imageId' "$OUTPUT/scala-oci-build-result.v1.json"
+          )"
+          "$SCALA/tools/run-oci-correctness.sh" \
+            --output-dir "$OUTPUT/runtime"
+          jq -e '.runtimeNetwork == "none" and .mismatchCount == 0' \
+            "$OUTPUT/runtime/scala-oci-correctness-result.v1.json" >/dev/null
+
+      - name: Upload Scala OCI evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: s1-4x-scala-oci-${{ github.run_id }}
+          path: ${{ runner.temp }}/s1-4x-scala-oci
+          if-no-files-found: error
+          retention-days: 14
+
+  haskell-oci-correctness:
+    name: Haskell digest-pinned OCI offline correctness
+    needs:
+      - haskell-authoritative-selection
+      - haskell-ghc-9-14-compatibility
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    env:
+      S1_4X_HASKELL_BASE_IMAGE: docker.io/library/haskell@sha256:417d4bc30ac7d8d5ff04ec97937f86eb508b0c76bfd1a39b5ec225688531aa9d
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - *setup_uv
+      - *expose_uv
+      - *bootstrap_haskell
+
+      - name: Download selected Haskell evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: s1-4x-haskell-selected-${{ github.run_id }}
+          path: ${{ runner.temp }}/s1-4x-results
+
+      - name: Build and replay authoritative OCI with network none
+        shell: bash
+        run: |
+          set -euo pipefail
+          S1_4X="$GITHUB_WORKSPACE/workspaces/decision-platform/research/s1-4x-numeric-parity"
+          HASKELL="$S1_4X/haskell"
+          RESULT_DIR="$RUNNER_TEMP/s1-4x-results"
+          OUTPUT="$RUNNER_TEMP/s1-4x-haskell-oci"
+          export S1_4X_HASKELL_BASELINE_CORRECTNESS=\
+            "$RESULT_DIR/haskell/profiles/baseline-o0-fasm/correctness-receipt.v1.json"
+          export S1_4X_HASKELL_OPTIMIZED_CORRECTNESS=\
+            "$RESULT_DIR/haskell/profiles/optimized-o2-fasm/correctness-receipt.v1.json"
+          export S1_4X_HASKELL_QUALIFICATION_ARTIFACT=\
+            "$RESULT_DIR/haskell/qualification/qualification-artifact.v1.json"
+          export S1_4X_DOCKER_BIN
+          export S1_4X_DOCKER_SHA256
+          S1_4X_DOCKER_BIN="$(readlink -f "$(command -v docker)")"
+          S1_4X_DOCKER_SHA256="$(
+            sha256sum "$S1_4X_DOCKER_BIN" | awk '{print $1}'
+          )"
+          docker pull "$S1_4X_HASKELL_BASE_IMAGE"
+          "$HASKELL/tools/run-oci-correctness.sh" --output-dir "$OUTPUT"
+          jq -e '.runtimeNetwork == "none" and .mismatchCount == 0' \
+            "$OUTPUT/oci-correctness-receipt.v1.json" >/dev/null
+
+      - name: Upload Haskell OCI evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: s1-4x-haskell-oci-${{ github.run_id }}
+          path: ${{ runner.temp }}/s1-4x-haskell-oci
+          if-no-files-found: error
+          retention-days: 14
+
+  frozen-python-regressions:
+    name: Existing S1.4 production and S1.4R regression
+    needs: contract-reference-lock
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - *setup_uv
+      - *expose_uv
+
+      - name: Run current S1.4 production regression
+        working-directory: workspaces/decision-platform/python-services
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv lock --check
+          uv sync --frozen
+          uv run --frozen ruff check .
+          uv run --frozen mypy app
+          uv run --frozen pytest -q
+
+      - name: Run frozen S1.4R CPU x64 regression
+        working-directory: workspaces/decision-platform/research/s1-4r-jax-risk
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv lock --check
+          uv sync --frozen --all-groups
+          uv run --frozen ruff check .
+          uv run --frozen mypy src benchmarks
+          uv run --frozen pytest -q

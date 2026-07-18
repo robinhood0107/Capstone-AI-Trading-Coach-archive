@@ -1,0 +1,455 @@
+name: S1.4X Numeric Parity Benchmark
+
+on:
+  workflow_dispatch:
+    inputs:
+      matrix:
+        description: "Non-scoring smoke or the frozen full rotated matrix"
+        required: true
+        default: smallest
+        type: choice
+        options:
+          - smallest
+          - full
+
+permissions:
+  contents: read
+
+concurrency:
+  group: s1-4x-numeric-parity-benchmark-${{ github.ref }}-${{ inputs.matrix }}
+  cancel-in-progress: false
+
+env:
+  UV_PYTHON: "3.12.13"
+  JAX_PLATFORMS: cpu
+  JAX_ENABLE_X64: "1"
+  OMP_NUM_THREADS: "1"
+  OPENBLAS_NUM_THREADS: "1"
+  MKL_NUM_THREADS: "1"
+  NUMEXPR_NUM_THREADS: "1"
+  VECLIB_MAXIMUM_THREADS: "1"
+
+jobs:
+  correctness-before-timing:
+    name: Selected-candidate correctness before any timing
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    env:
+      S1_4X_ARTIFACT_MAX_BYTES: "536870912"
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - &setup_uv
+        name: Set up exact uv and Python
+        uses: astral-sh/setup-uv@d31148d669074a8d0a63714ba94f3201e7020bc3 # v8.3.0
+        with:
+          version: "0.11.26"
+          python-version: "3.12.13"
+
+      - &expose_uv
+        name: Expose exact uv path and bounded roots
+        shell: bash
+        run: |
+          set -euo pipefail
+          CACHE_ROOT="${RUNNER_TEMP}/s1-4x-cache"
+          mkdir -p \
+            "$CACHE_ROOT/tmp" \
+            "$CACHE_ROOT/uv" \
+            "$CACHE_ROOT/coursier" \
+            "$CACHE_ROOT/stack-root"
+          {
+            echo "S1_4X_UV_BIN=$(readlink -f "$(command -v uv)")"
+            echo "S1_4X_CACHE_ROOT=$CACHE_ROOT"
+            echo "TMPDIR=$CACHE_ROOT/tmp"
+            echo "TEMP=$CACHE_ROOT/tmp"
+            echo "TMP=$CACHE_ROOT/tmp"
+            echo "UV_CACHE_DIR=$CACHE_ROOT/uv"
+            echo "COURSIER_CACHE=$CACHE_ROOT/coursier"
+          } >> "$GITHUB_ENV"
+
+      - &setup_java
+        name: Set up exact Temurin JDK
+        uses: actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654 # v5.2.0
+        with:
+          distribution: temurin
+          java-version: "25.0.3+9"
+          check-latest: false
+
+      - &setup_coursier
+        name: Set up exact Coursier and Scalafix
+        uses: coursier/setup-action@039f736548afa5411c1382f40a5bd9c2d30e0383 # v1.3.9
+        with:
+          version: "2.1.24"
+          apps: scalafix:0.14.7
+
+      - &bootstrap_scala
+        name: Verify exact Scala CLI, Scalafmt, Scalafix, and JDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          BOOT="${RUNNER_TEMP}/s1-4x-scala-tools"
+          mkdir -p "$BOOT/bin" "$BOOT/scalafmt"
+
+          curl -fL \
+            https://github.com/VirtusLab/scala-cli/releases/download/v1.15.0/scala-cli-x86_64-pc-linux.gz \
+            -o "$BOOT/scala-cli.gz"
+          printf '%s  %s\n' \
+            '37b33939ff82a8730263b6c72d81e23db4987b4b399c8a403c8ece76604a30f6' \
+            "$BOOT/scala-cli.gz" | sha256sum --check
+          gzip -dc "$BOOT/scala-cli.gz" > "$BOOT/bin/scala-cli"
+          chmod 0555 "$BOOT/bin/scala-cli"
+          test "$(sha256sum "$BOOT/bin/scala-cli" | awk '{print $1}')" = \
+            "54b93b8401e333095526da5e4853780d5bf37494baa1ba5486e9e643084253d0"
+
+          curl -fL \
+            https://github.com/scalameta/scalafmt/releases/download/v3.11.4/scalafmt-x86_64-pc-linux.zip \
+            -o "$BOOT/scalafmt.zip"
+          printf '%s  %s\n' \
+            'e7d43a5621074a63a46d5b287d0b0bb0650033deeb836af2b27515b2127476f2' \
+            "$BOOT/scalafmt.zip" | sha256sum --check
+          unzip -q "$BOOT/scalafmt.zip" -d "$BOOT/scalafmt"
+          chmod 0555 "$BOOT/scalafmt/scalafmt"
+          test "$(sha256sum "$BOOT/scalafmt/scalafmt" | awk '{print $1}')" = \
+            "88526f9f4d64c2fb023d54578812419f49e2ec09e30e4fb77443a05f1a59cac0"
+
+          SCALAFIX_BIN="$(readlink -f "$(command -v scalafix)")"
+          test -x "$SCALAFIX_BIN"
+          test "$(sha256sum "$SCALAFIX_BIN" | awk '{print $1}')" = \
+            "9db6db7359e580de8f4b72cd7c104d70023cf32a278db0c30aefb79c939eb0f3"
+          test "$(sha256sum "$JAVA_HOME/bin/java" | awk '{print $1}')" = \
+            "ac3505f0c58282f00a6585591324a86b038c89cd171105fe42a1a0cf2f13b517"
+
+          {
+            echo "S1_4X_SCALA_CLI_BIN=$BOOT/bin/scala-cli"
+            echo "S1_4X_SCALAFIX_BIN=$SCALAFIX_BIN"
+            echo "S1_4X_SCALAFMT_ARCHIVE=$BOOT/scalafmt.zip"
+            echo "S1_4X_SCALAFMT_BIN=$BOOT/scalafmt/scalafmt"
+          } >> "$GITHUB_ENV"
+
+      - &bootstrap_haskell
+        name: Bootstrap and verify the frozen GHCup toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes \
+            build-essential curl pkg-config \
+            libffi-dev libgmp-dev libncurses-dev zlib1g-dev \
+            bzip2 gzip unzip xz-utils python3-jsonschema
+
+          BOOT="${RUNNER_TEMP}/s1-4x-haskell-bootstrap"
+          PREFIX="${RUNNER_TEMP}/s1-4x-ghcup-prefix"
+          TOOLS="${RUNNER_TEMP}/s1-4x-haskell-tools"
+          mkdir -p "$BOOT" "$PREFIX" "$TOOLS/bin" "$TOOLS/stack-root"
+
+          curl -fL \
+            https://github.com/haskell/ghcup-hs/releases/download/v0.2.6.2/x86_64-linux-ghcup-0.2.6.2 \
+            -o "$BOOT/ghcup"
+          printf '%s  %s\n' \
+            '9ed5da5449b48043a0d17e767c05d2ef585e25a639bb934329496c6d2fad9cf8' \
+            "$BOOT/ghcup" | sha256sum --check
+          chmod 0555 "$BOOT/ghcup"
+
+          curl -fL \
+            https://raw.githubusercontent.com/haskell/ghcup-metadata/0341867f2d419567cf42ea6931e031b00ab3a922/ghcup-0.1.0.yaml \
+            -o "$BOOT/ghcup-0.1.0.yaml"
+          printf '%s  %s\n' \
+            '49c8a036ce399587205a11ac24e73465cadc5f3232e9418a9d87f4b7f746c4ec' \
+            "$BOOT/ghcup-0.1.0.yaml" | sha256sum --check
+
+          export GHCUP_INSTALL_BASE_PREFIX="$PREFIX"
+          GHCUP="$BOOT/ghcup"
+          METADATA="file://$BOOT/ghcup-0.1.0.yaml"
+          "$GHCUP" --metadata-fetching-mode Strict --url-source "$METADATA" \
+            install ghc 9.10.3
+          "$GHCUP" --metadata-fetching-mode Strict --url-source "$METADATA" \
+            install ghc 9.14.1
+          "$GHCUP" --metadata-fetching-mode Strict --url-source "$METADATA" \
+            install stack 3.11.1
+
+          AUTHORITATIVE_GHC="$("$GHCUP" --offline whereis ghc 9.10.3)"
+          LATEST_GHC="$("$GHCUP" --offline whereis ghc 9.14.1)"
+          STACK="$("$GHCUP" --offline whereis stack 3.11.1)"
+          test "$(sha256sum "$AUTHORITATIVE_GHC" | awk '{print $1}')" = \
+            "d0c0dd79a1bcc5dce3c9e73613c1be51f61b78d5ef7c0970ffe9f142a90a5e2c"
+          test "$(sha256sum "$LATEST_GHC" | awk '{print $1}')" = \
+            "ecfd54b4161699f574d2b163bdc817c54df08a08a310323e43b41ab5fc413ef1"
+          test "$(sha256sum "$STACK" | awk '{print $1}')" = \
+            "923dbd137756652c67b376e2447c655b87fcc373f4d104b5073bca913471ecbe"
+
+          STACK_ROOT="$TOOLS/stack-root" \
+            "$GHCUP" --offline run --quick --ghc 9.10.3 --stack 3.11.1 -- \
+            "$STACK" --resolver lts-24.50 \
+            --system-ghc --no-install-ghc --jobs 1 \
+            install hlint-3.10 stylish-haskell-0.15.1.0 \
+            --local-bin-path "$TOOLS/bin"
+          test "$(sha256sum "$TOOLS/bin/hlint" | awk '{print $1}')" = \
+            "3ff3fb4b571876d668ddf4ad0245769c19a640283fabb0c2629038aa34197f62"
+          test "$(sha256sum "$TOOLS/bin/stylish-haskell" | awk '{print $1}')" = \
+            "385dc27bc2d0fb654e76ecadfb57bc0b7e1c58afe74f19923e20b696e6fe0d7b"
+
+          {
+            echo "GHCUP_INSTALL_BASE_PREFIX=$PREFIX"
+            echo "S1_4X_GHCUP_BIN=$GHCUP"
+            echo "S1_4X_AUTHORITATIVE_GHC_BIN=$AUTHORITATIVE_GHC"
+            echo "S1_4X_LATEST_GHC_BIN=$LATEST_GHC"
+            echo "S1_4X_STACK_BIN=$STACK"
+            echo "S1_4X_HLINT_BIN=$TOOLS/bin/hlint"
+            echo "S1_4X_STYLISH_BIN=$TOOLS/bin/stylish-haskell"
+          } >> "$GITHUB_ENV"
+
+      - name: Build selected profiles and run the typed comparator
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT="$GITHUB_WORKSPACE"
+          S1_4X="$ROOT/workspaces/decision-platform/research/s1-4x-numeric-parity"
+          ORACLE="$S1_4X/oracle"
+          SCALA="$S1_4X/scala"
+          HASKELL="$S1_4X/haskell"
+          PLAN="$S1_4X/benchmarks/benchmark-plan.v1.json"
+          RESULT_DIR="$RUNNER_TEMP/s1-4x-correctness"
+          mkdir -p "$RESULT_DIR/scala" "$RESULT_DIR/haskell"
+          export RESULT_DIR
+          export S1_4X_BENCHMARK_SUBJECT_COMMIT
+          S1_4X_BENCHMARK_SUBJECT_COMMIT="$(git rev-parse HEAD)"
+
+          uv lock --project "$ORACLE" --check
+          uv sync --frozen --all-groups --project "$ORACLE"
+          uv sync --frozen --project \
+            "$ROOT/workspaces/decision-platform/python-services"
+          uv sync --frozen --all-groups --project \
+            "$ROOT/workspaces/decision-platform/research/s1-4r-jax-risk"
+          uv run --frozen --project "$ORACLE" \
+            python "$ORACLE/validate_contract.py" --check-all
+          uv run --frozen --project "$ORACLE" \
+            python "$ORACLE/generate_large_fixtures.py" --check
+
+          "$SCALA/tools/assert-toolchain.sh"
+          "$SCALA/tools/run-jmh-native-smoke.sh" \
+            --plan "$PLAN" \
+            --profile A \
+            --case-id path-transform/log_returns/n100000/b1 \
+            --mode smoke \
+            --output-dir "$RESULT_DIR/scala/jmh-smoke"
+          export S1_4X_SCALA_JVM_ALLOWLIST_RESULT=\
+            "$RESULT_DIR/scala/jmh-smoke/scala-jvm-argument-allowlist.v1.json"
+          "$SCALA/tools/run-correctness-profile.sh" baseline
+          "$SCALA/tools/run-correctness-profile.sh" opt
+          "$SCALA/tools/run-correctness-profile.sh" opt-own-source-inline
+          "$SCALA/tools/run-profile-qualification.sh" \
+            --plan "$PLAN" \
+            --profiles A,B,C \
+            --enforce-order-plan \
+            --output-dir "$RESULT_DIR/scala/qualification"
+          export S1_4X_SCALA_QUALIFICATION_RESULT=\
+            "$RESULT_DIR/scala/qualification/scala-profile-qualification.v1.json"
+          export S1_4X_SCALA_CORRECTNESS_ROOT="$RESULT_DIR/scala/profiles"
+          export S1_4X_SCALA_SELECTED_PROFILE_RESULT=\
+            "$RESULT_DIR/scala/scala-selected-profile-result.v1.json"
+          "$SCALA/tools/select-proven-profile.sh" \
+            --plan "$PLAN" \
+            --qualification "$S1_4X_SCALA_QUALIFICATION_RESULT" \
+            --correctness-root "$S1_4X_SCALA_CORRECTNESS_ROOT" \
+            --output "$S1_4X_SCALA_SELECTED_PROFILE_RESULT"
+          "$SCALA/tools/select-proven-profile.sh" \
+            --check \
+            --plan "$PLAN" \
+            --qualification "$S1_4X_SCALA_QUALIFICATION_RESULT" \
+            --correctness-root "$S1_4X_SCALA_CORRECTNESS_ROOT" \
+            --output "$S1_4X_SCALA_SELECTED_PROFILE_RESULT"
+
+          "$HASKELL/tools/assert-toolchain.sh"
+          "$HASKELL/tools/run-correctness-profile.sh" \
+            baseline-o0-fasm \
+            --output-dir "$RESULT_DIR/haskell/profiles/baseline-o0-fasm"
+          "$HASKELL/tools/run-correctness-profile.sh" \
+            optimized-o2-fasm \
+            --output-dir "$RESULT_DIR/haskell/profiles/optimized-o2-fasm"
+          "$HASKELL/tools/run-profile-qualification.sh" \
+            --plan "$PLAN" \
+            --profiles baseline-o0-fasm,optimized-o2-fasm \
+            --enforce-order-plan \
+            --output-dir "$RESULT_DIR/haskell/qualification"
+          export S1_4X_HASKELL_BASELINE_CORRECTNESS=\
+            "$RESULT_DIR/haskell/profiles/baseline-o0-fasm/correctness-receipt.v1.json"
+          export S1_4X_HASKELL_OPTIMIZED_CORRECTNESS=\
+            "$RESULT_DIR/haskell/profiles/optimized-o2-fasm/correctness-receipt.v1.json"
+          export S1_4X_HASKELL_QUALIFICATION_ARTIFACT=\
+            "$RESULT_DIR/haskell/qualification/qualification-artifact.v1.json"
+          "$HASKELL/tools/select-proven-profile.sh" --check
+
+          SCALA_PROFILE="$(
+            jq -r '.selectedProfileId' "$S1_4X_SCALA_SELECTED_PROFILE_RESULT"
+          )"
+          export S1_4X_SCALA_CANDIDATE_JAR=\
+            "$RESULT_DIR/scala/profiles/$SCALA_PROFILE/candidate.jar"
+          export S1_4X_SCALA_CANDIDATE_SHA256
+          S1_4X_SCALA_CANDIDATE_SHA256="$(
+            sha256sum "$S1_4X_SCALA_CANDIDATE_JAR" | awk '{print $1}'
+          )"
+          "$S1_4X/integration/tools/run-integration-correctness.sh" \
+            "$RESULT_DIR/cross-language"
+
+      - name: Enforce correctness evidence size cap
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifact_bytes="$(du -sb "$RUNNER_TEMP/s1-4x-correctness" | cut -f1)"
+          test "$artifact_bytes" -le "$S1_4X_ARTIFACT_MAX_BYTES"
+
+      - name: Upload correctness prerequisite evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: s1-4x-benchmark-correctness-${{ github.run_id }}
+          path: ${{ runner.temp }}/s1-4x-correctness
+          if-no-files-found: error
+          retention-days: 14
+
+  bounded-timing:
+    name: Bounded non-scoring smoke or frozen full timing
+    needs: correctness-before-timing
+    if: ${{ needs.correctness-before-timing.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    env:
+      S1_4X_ARTIFACT_MAX_BYTES: "536870912"
+    steps:
+      - name: Checkout the exact correctness subject
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - *setup_uv
+      - *expose_uv
+      - *setup_java
+      - *setup_coursier
+      - *bootstrap_scala
+      - *bootstrap_haskell
+
+      - name: Download accepted correctness evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: s1-4x-benchmark-correctness-${{ github.run_id }}
+          path: ${{ runner.temp }}/s1-4x-correctness
+
+      - name: Bind benchmark executable and selection closure
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT="$GITHUB_WORKSPACE"
+          S1_4X="$ROOT/workspaces/decision-platform/research/s1-4x-numeric-parity"
+          ORACLE="$S1_4X/oracle"
+          RESULT_DIR="$RUNNER_TEMP/s1-4x-correctness"
+          BENCHMARK_PYTHON="$(
+            uv run --frozen --project "$ORACLE" \
+              python -c 'import os,sys; print(os.path.realpath(sys.executable))'
+          )"
+          test -f "$BENCHMARK_PYTHON"
+          test -x "$BENCHMARK_PYTHON"
+          test ! -L "$BENCHMARK_PYTHON"
+          {
+            echo "RESULT_DIR=$RESULT_DIR"
+            echo "S1_4X_BENCHMARK_PYTHON_BIN=$BENCHMARK_PYTHON"
+            echo "S1_4X_BENCHMARK_PYTHON_SHA256=$(sha256sum "$BENCHMARK_PYTHON" | awk '{print $1}')"
+            echo "S1_4X_SCALA_JVM_ALLOWLIST_RESULT=$RESULT_DIR/scala/jmh-smoke/scala-jvm-argument-allowlist.v1.json"
+            echo "S1_4X_SCALA_QUALIFICATION_RESULT=$RESULT_DIR/scala/qualification/scala-profile-qualification.v1.json"
+            echo "S1_4X_SCALA_CORRECTNESS_ROOT=$RESULT_DIR/scala/profiles"
+            echo "S1_4X_SCALA_SELECTED_PROFILE_RESULT=$RESULT_DIR/scala/scala-selected-profile-result.v1.json"
+            echo "S1_4X_HASKELL_BASELINE_CORRECTNESS=$RESULT_DIR/haskell/profiles/baseline-o0-fasm/correctness-receipt.v1.json"
+            echo "S1_4X_HASKELL_OPTIMIZED_CORRECTNESS=$RESULT_DIR/haskell/profiles/optimized-o2-fasm/correctness-receipt.v1.json"
+            echo "S1_4X_HASKELL_QUALIFICATION_ARTIFACT=$RESULT_DIR/haskell/qualification/qualification-artifact.v1.json"
+          } >> "$GITHUB_ENV"
+
+      - name: Run the explicitly selected bounded mode
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT="$GITHUB_WORKSPACE"
+          S1_4X="$ROOT/workspaces/decision-platform/research/s1-4x-numeric-parity"
+          ORACLE="$S1_4X/oracle"
+          PLAN="$S1_4X/benchmarks/benchmark-plan.v1.json"
+          BENCH_ROOT="$RUNNER_TEMP/s1-4x-benchmark"
+          mkdir -p "$BENCH_ROOT"
+          SUBJECT="$(git rev-parse HEAD)"
+          test "$SUBJECT" = "$GITHUB_SHA"
+
+          case "${{ inputs.matrix }}" in
+            smallest)
+              "$S1_4X/integration/tools/run-python-benchmark-smoke.sh" \
+                "$BENCH_ROOT/python-smoke"
+              SCALA_PROFILE="$(
+                jq -r '.selectedProfileId' \
+                  "$S1_4X_SCALA_SELECTED_PROFILE_RESULT"
+              )"
+              "$S1_4X/scala/tools/run-jmh-native-smoke.sh" \
+                --plan "$PLAN" \
+                --profile "$SCALA_PROFILE" \
+                --case-id path-transform/log_returns/n100000/b1 \
+                --mode smoke \
+                --output-dir "$BENCH_ROOT/scala-smoke"
+              "$S1_4X/haskell/tools/select-proven-profile.sh" --check \
+                > "$BENCH_ROOT/haskell-selected-profile-check.json"
+              ;;
+            full)
+              COMMANDS="$BENCH_ROOT/commands.json"
+              SIDECAR="$BENCH_ROOT/commands.sha256"
+              uv run --frozen --no-config --project "$ORACLE" \
+                python "$S1_4X/integration/prepare_benchmark_commands.py" \
+                --repo-root "$ROOT" \
+                --benchmark-subject-commit "$SUBJECT" \
+                --host-wrapper \
+                  "$S1_4X/integration/tools/run-host-validator.sh" \
+                --python-wrapper \
+                  "$S1_4X/integration/tools/run-python-benchmark-block.sh" \
+                --scala-wrapper \
+                  "$S1_4X/scala/tools/run-benchmark-block.sh" \
+                --haskell-wrapper \
+                  "$S1_4X/haskell/tools/run-benchmark-block.sh" \
+                --uv "$S1_4X_UV_BIN" \
+                --output "$COMMANDS" \
+                --sidecar "$SIDECAR"
+              COMMAND_SHA256="$(awk '{print $1}' "$SIDECAR")"
+              uv run --frozen --no-config --project "$ORACLE" \
+                python "$S1_4X/integration/run_rotated_blocks.py" run \
+                --plan "$PLAN" \
+                --commands "$COMMANDS" \
+                --commands-sha256 "$COMMAND_SHA256" \
+                --benchmark-subject-commit "$SUBJECT" \
+                --candidate-source-commit "$SUBJECT" \
+                --output-root "$BENCH_ROOT/run" \
+                --run-id \
+                  "s1-4x-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+                --repo-root "$ROOT"
+              ;;
+            *)
+              echo "unsupported matrix: ${{ inputs.matrix }}" >&2
+              exit 64
+              ;;
+          esac
+
+      - name: Enforce benchmark artifact size cap
+        id: artifact_cap
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -d "$RUNNER_TEMP/s1-4x-benchmark"
+          artifact_bytes="$(
+            du -sb "$RUNNER_TEMP/s1-4x-benchmark" | cut -f1
+          )"
+          test "$artifact_bytes" -le "$S1_4X_ARTIFACT_MAX_BYTES"
+
+      - name: Upload bounded benchmark evidence
+        if: ${{ always() && steps.artifact_cap.outcome == 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: s1-4x-${{ inputs.matrix }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/s1-4x-benchmark
+          if-no-files-found: error
+          retention-days: 14
