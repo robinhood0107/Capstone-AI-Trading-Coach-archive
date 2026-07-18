@@ -13,6 +13,8 @@ from pathlib import Path
 
 
 TOOLS_ROOT = Path(__file__).resolve().parents[1]
+HASKELL_ROOT = TOOLS_ROOT.parent
+POLICY_PATH = HASKELL_ROOT.parent / "contract/haskell-module-safety-policy.v1.json"
 MODULE_PATH = TOOLS_ROOT / "haskell_evidence.py"
 SPEC = importlib.util.spec_from_file_location("haskell_evidence", MODULE_PATH)
 if SPEC is None or SPEC.loader is None:
@@ -23,6 +25,9 @@ SPEC.loader.exec_module(haskell_evidence)
 
 
 class HaskellEvidenceTests(unittest.TestCase):
+    def _module_safety_policy(self) -> dict[str, object]:
+        return json.loads(POLICY_PATH.read_text(encoding="utf-8"))
+
     def test_parser_resolves_module_aliases_without_losing_import_identity(self) -> None:
         parsed = haskell_evidence.parse_haskell_module(
             """
@@ -311,6 +316,153 @@ import  -/  Data.Vector.Unboxed deadbeef
                 },
             ),
             ("S14X.Core.Error", "S14X.Core.Models"),
+        )
+
+    def test_module_safety_policy_requires_the_exact_frozen_field_set(self) -> None:
+        policy = self._module_safety_policy()
+        haskell_evidence.validate_module_safety_policy(policy)
+
+        for altered in (
+            {**policy, "unknownPolicyControl": True},
+            {key: value for key, value in policy.items() if key != "forbiddenCoreTypesAndUses"},
+        ):
+            with self.subTest(fields=sorted(altered)):
+                with self.assertRaisesRegex(
+                    haskell_evidence.EvidenceError,
+                    "module-safety policy field set",
+                ):
+                    haskell_evidence.validate_module_safety_policy(altered)
+
+    def test_core_cannot_reenable_a_mandatory_negative_extension(self) -> None:
+        policy = self._module_safety_policy()
+        source = b"""\
+{-# LANGUAGE Safe, CPP #-}
+module Risk.Core (value) where
+value = 1
+"""
+        parsed = haskell_evidence.parse_haskell_module(source)
+
+        with self.assertRaisesRegex(
+            haskell_evidence.EvidenceError,
+            "forbidden core positive extension",
+        ):
+            haskell_evidence.audit_candidate_source(
+                relative="src/core/Risk/Core.hs",
+                parsed=parsed,
+                payload=source,
+                category="safe-scalar",
+                default_extensions=tuple(policy["mandatoryCoreExtensions"]),
+                policy=policy,
+            )
+
+    def test_source_local_controls_are_rejected_across_all_candidate_roots(self) -> None:
+        policy = self._module_safety_policy()
+        fixtures = {
+            "src/contract/Risk/Shell.hs": b"""\
+{-# OPTIONS_GHC -Wno-everything #-}
+module Risk.Shell (value) where
+value = 1
+""",
+            "app/Main.hs": b"""\
+{-# ANN module ("HLint: ignore Use head" :: String) #-}
+module Main (main) where
+main = pure ()
+""",
+            "test/RiskSpec.hs": b"""\
+{-# LANGUAGE CPP #-}
+module RiskSpec (tests) where
+tests = ()
+""",
+            "benchmark/Main.hs": b"""\
+{-# LANGUAGE MagicHash #-}
+module BenchMain (main) where
+main = pure ()
+""",
+        }
+        for relative, source in fixtures.items():
+            with self.subTest(relative=relative):
+                parsed = haskell_evidence.parse_haskell_module(source)
+                category = haskell_evidence.module_category(
+                    relative,
+                    parsed.module_name,
+                )
+                with self.assertRaisesRegex(
+                    haskell_evidence.EvidenceError,
+                    "forbidden source-local control",
+                ):
+                    haskell_evidence.audit_candidate_source(
+                        relative=relative,
+                        parsed=parsed,
+                        payload=source,
+                        category=category,
+                        default_extensions=tuple(policy["mandatoryCoreExtensions"]),
+                        policy=policy,
+                    )
+
+    def test_core_environment_clock_random_and_network_imports_are_rejected(
+        self,
+    ) -> None:
+        policy = self._module_safety_policy()
+        for imported in (
+            "System.Environment",
+            "Data.Time.Clock",
+            "System.Random",
+            "Network.Socket",
+        ):
+            with self.subTest(imported=imported):
+                source = f"""\
+{{-# LANGUAGE Safe #-}}
+module Risk.Core (value) where
+import {imported}
+value = 1
+""".encode()
+                parsed = haskell_evidence.parse_haskell_module(source)
+                with self.assertRaisesRegex(
+                    haskell_evidence.EvidenceError,
+                    "forbidden core capability",
+                ):
+                    haskell_evidence.audit_candidate_source(
+                        relative="src/core/Risk/Core.hs",
+                        parsed=parsed,
+                        payload=source,
+                        category="safe-scalar",
+                        default_extensions=tuple(policy["mandatoryCoreExtensions"]),
+                        policy=policy,
+                    )
+
+    def test_non_stock_deriving_policy_applies_only_to_core_modules(self) -> None:
+        policy = self._module_safety_policy()
+        core_source = b"""\
+{-# LANGUAGE Safe #-}
+module Risk.Core (Wrapped (..)) where
+newtype Wrapped = Wrapped Int
+  deriving (Eq)
+"""
+        with self.assertRaisesRegex(
+            haskell_evidence.EvidenceError,
+            "candidate core deriving must be stock",
+        ):
+            haskell_evidence.audit_candidate_source(
+                relative="src/core/Risk/Core.hs",
+                parsed=haskell_evidence.parse_haskell_module(core_source),
+                payload=core_source,
+                category="safe-scalar",
+                default_extensions=tuple(policy["mandatoryCoreExtensions"]),
+                policy=policy,
+            )
+
+        shell_source = b"""\
+module Risk.Shell (Wrapped (..)) where
+newtype Wrapped = Wrapped Int
+  deriving (Eq)
+"""
+        haskell_evidence.audit_candidate_source(
+            relative="src/contract/Risk/Shell.hs",
+            parsed=haskell_evidence.parse_haskell_module(shell_source),
+            payload=shell_source,
+            category="io-shell",
+            default_extensions=tuple(policy["mandatoryCoreExtensions"]),
+            policy=policy,
         )
 
     def test_vector_edges_are_derived_from_actual_source_graph(self) -> None:

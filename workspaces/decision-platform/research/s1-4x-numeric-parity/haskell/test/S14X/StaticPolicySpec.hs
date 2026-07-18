@@ -226,5 +226,5 @@ haskellSources root = do
 
 candidateSources :: IO [FilePath]
 candidateSources = do
-  groups <- traverse haskellSources ["src", "app", "benchmark"]
+  groups <- traverse haskellSources ["src", "app", "test", "benchmark"]
   pure (concat groups)
