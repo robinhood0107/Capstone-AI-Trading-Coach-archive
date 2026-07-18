@@ -13,8 +13,17 @@ export GIT_OPTIONAL_LOCKS=0
 export GIT_TERMINAL_PROMPT=0
 readonly GIT_BIN=/usr/bin/git
 readonly UV_BIN="${S1_4X_UV_BIN:?S1_4X_UV_BIN is required}"
+readonly PYTHON_BIN="${S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH:?S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH is required}"
+readonly PYTHON_SHA256="${S1_4X_BENCHMARK_PYTHON_SHA256:?S1_4X_BENCHMARK_PYTHON_SHA256 is required}"
 if [[ ! "$UV_BIN" =~ ^/proc/self/fd/[0-9]+$ ]]; then
   echo "UV executable must be inherited through a sealed fd" >&2
+  exit 69
+fi
+if [[ ! "$PYTHON_BIN" =~ ^/proc/self/fd/[0-9]+$ \
+  || ! "$PYTHON_SHA256" =~ ^[0-9a-f]{64}$ \
+  || "$(/usr/bin/sha256sum "$PYTHON_BIN" | /usr/bin/awk '{print $1}')" \
+    != "$PYTHON_SHA256" ]]; then
+  echo "Python executable must be inherited through the declared sealed fd" >&2
   exit 69
 fi
 
@@ -41,11 +50,12 @@ case "$BOUNDARY" in
   *) echo "unsupported Python benchmark boundary: $BOUNDARY" >&2; exit 64 ;;
 esac
 
-export UV_PYTHON=3.12.13
+export UV_PYTHON="$PYTHON_BIN"
 export JAX_PLATFORMS=cpu
 export JAX_ENABLE_X64=1
 
-exec "$UV_BIN" run --frozen --no-config --project "$PROJECT" \
+exec "$UV_BIN" run --frozen --no-config --python "$PYTHON_BIN" \
+  --project "$PROJECT" \
   python "$S1_4X/integration/python_benchmark_block.py" \
   --repo-root "$ROOT" \
   "$@"
