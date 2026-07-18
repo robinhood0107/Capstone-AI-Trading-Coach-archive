@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import importlib.util
-import math
 import sys
 import unittest
 from pathlib import Path
@@ -11,20 +10,6 @@ from pathlib import Path
 
 TOOLS_ROOT = Path(__file__).resolve().parents[1]
 MODULE_PATH = TOOLS_ROOT / "haskell_benchmark_block.py"
-MEASURE_KEYS = [
-    "time",
-    "cpuTime",
-    "cycles",
-    "iters",
-    "allocated",
-    "peakMbAllocated",
-    "numGcs",
-    "bytesCopied",
-    "mutatorWallSeconds",
-    "mutatorCpuSeconds",
-    "gcWallSeconds",
-    "gcCpuSeconds",
-]
 
 
 def load_helper():
@@ -44,55 +29,8 @@ def load_helper():
     return module
 
 
-def criterion_report(
-    name: str,
-    *,
-    measured: list[list[object]] | None = None,
-    mean: float = 99.0,
-) -> list[object]:
-    rows = measured or [
-        [4.0, 4.0, 40, 2, None, None, None, None, None, None, None, None],
-        [9.0, 9.0, 90, 3, None, None, None, None, None, None, None, None],
-    ]
-    report = {
-        "reportNumber": 0,
-        "reportName": name,
-        "reportKeys": MEASURE_KEYS,
-        "reportMeasured": rows,
-        "reportAnalysis": {
-            "anRegress": [],
-            "anMean": {
-                "estPoint": mean,
-                "estLowerBound": mean,
-                "estUpperBound": mean,
-                "estConfidenceLevel": 0.95,
-            },
-            "anStdDev": {
-                "estPoint": 1.0,
-                "estLowerBound": 1.0,
-                "estUpperBound": 1.0,
-                "estConfidenceLevel": 0.95,
-            },
-            "anOutlierVar": {
-                "ovEffect": "Unaffected",
-                "ovDesc": "unaffected",
-                "ovFraction": 0.0,
-            },
-        },
-        "reportOutliers": {
-            "samplesSeen": 2,
-            "lowSevere": 0,
-            "lowMild": 0,
-            "highMild": 0,
-            "highSevere": 0,
-        },
-        "reportKDEs": [],
-    }
-    return ["criterion", "1.6.4.0", [report]]
-
-
 class BenchmarkBlockHelperTests(unittest.TestCase):
-    """Raw samples가 self-reported summary나 ambient command를 대체하지 못하게 한다."""
+    """Haskell lane이 raw 실행만 소유하고 shared evidence 투영을 재구현하지 않게 한다."""
 
     def test_inner_command_is_exact_network_free_frozen_argv(self) -> None:
         helper = load_helper()
@@ -102,7 +40,7 @@ class BenchmarkBlockHelperTests(unittest.TestCase):
             stack_yaml=Path("/repo/haskell/stack.yaml"),
             profile_options=["-O2", "-fasm"],
             time_limit_seconds=5,
-            native_report=Path("/out/native.json"),
+            native_report=Path("/out/raw/criterion-family.json"),
             criterion_prefix="path-transform/",
         )
         self.assertEqual(
@@ -128,91 +66,51 @@ class BenchmarkBlockHelperTests(unittest.TestCase):
                 "bench",
                 "--ghc-options=-O2 -fasm",
                 (
-                    "--benchmark-arguments=--time-limit 5 --json /out/native.json "
+                    "--benchmark-arguments=--time-limit 5 "
+                    "--json /out/raw/criterion-family.json "
                     "--match prefix path-transform/ +RTS -N1 -RTS"
                 ),
             ],
         )
         self.assertNotIn("--offline", command[10:])
 
-    def test_raw_sample_median_not_claimed_analysis_drives_native_value(self) -> None:
-        helper = load_helper()
-        measurements = helper.parse_criterion_reports(
-            criterion_report("path-transform/simple_returns/n32/b1"),
-            ["path-transform/simple_returns/n32/b1"],
-        )
-        self.assertEqual(len(measurements), 1)
-        self.assertEqual(measurements[0].sample_count, 2)
-        self.assertEqual(measurements[0].native_seconds, 2.5)
-        self.assertNotEqual(measurements[0].native_seconds, 99.0)
+    def test_shared_pipeline_owns_ledger_native_projection_and_block_result(
+        self,
+    ) -> None:
+        source = MODULE_PATH.read_text(encoding="utf-8")
+        for shared_tool in (
+            "benchmark_input_ledger.py",
+            "native_benchmark_block.py",
+        ):
+            with self.subTest(shared_tool=shared_tool):
+                self.assertIn(shared_tool, source)
+        for output in (
+            "raw/criterion-family.json",
+            "receipts/criterion-family.json",
+            "input-ledger.json",
+            "native-contract-validation.json",
+            "native-statistics.json",
+            "native.json",
+            "block-result.json",
+        ):
+            with self.subTest(output=output):
+                self.assertIn(output, source)
 
-    def test_raw_parser_rejects_nonfinite_or_case_order_drift(self) -> None:
-        helper = load_helper()
-        nonfinite = criterion_report(
-            "path-transform/simple_returns/n32/b1",
-            measured=[
-                [
-                    math.inf,
-                    1.0,
-                    1,
-                    1,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                ],
-                [1.0, 1.0, 1, 1, None, None, None, None, None, None, None, None],
-            ],
-        )
-        with self.assertRaisesRegex(helper.BlockError, "NONFINITE"):
-            helper.parse_criterion_reports(
-                nonfinite,
-                ["path-transform/simple_returns/n32/b1"],
-            )
-        with self.assertRaisesRegex(helper.BlockError, "CASE_SET_OR_ORDER"):
-            helper.parse_criterion_reports(
-                criterion_report("path-transform/simple_returns/n32/b1"),
-                ["path-transform/log_returns/n32/b1"],
-            )
-
-    def test_receipt_field_set_binds_marker_and_inner_commands(self) -> None:
-        helper = load_helper()
-        self.assertEqual(
-            helper.RECEIPT_FIELDS,
-            {
-                "schemaVersion",
-                "status",
-                "boundaryId",
-                "selectorId",
-                "familyId",
-                "rotationId",
-                "outerRepetition",
-                "runId",
-                "benchmarkSubjectCommit",
-                "planSha256",
-                "qualificationSha256",
-                "selectedProfileSha256",
-                "sourceInputManifestSha256",
-                "toolchainLockSha256",
-                "benchmarkArtifactSha256",
-                "markerPython",
-                "markerScript",
-                "markerArgv",
-                "markerArgvSha256",
-                "commandArgv",
-                "commandArgvSha256",
-                "effectiveRuntimeArguments",
-                "effectiveRuntimeArgumentsSha256",
-                "selectorInputClosureSha256",
-                "nativeReportSha256",
-                "blockResultSha256",
-                "caseCount",
-            },
-        )
+    def test_haskell_helper_does_not_duplicate_shared_statistics_or_report_math(
+        self,
+    ) -> None:
+        source = MODULE_PATH.read_text(encoding="utf-8")
+        for forbidden in (
+            "def _build_block_result",
+            "def parse_criterion_reports",
+            "statistics.median",
+            "reportMeasured",
+            "reportAnalysis",
+            "normalizedNsPerLogicalOperation",
+            "nativeP95",
+        ):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, source)
 
 
 if __name__ == "__main__":
