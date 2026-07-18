@@ -5,11 +5,11 @@ SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 HASKELL_ROOT="$(realpath "${SCRIPT_PATH%/*}/../..")"
 
 : "${S1_4X_GHCUP_BIN:?S1_4X_GHCUP_BIN readiness path is required}"
-: "${S1_4X_GHC_BIN:?S1_4X_GHC_BIN readiness path is required}"
-: "${S1_4X_GHC_914_BIN:?S1_4X_GHC_914_BIN readiness path is required}"
+: "${S1_4X_AUTHORITATIVE_GHC_BIN:?S1_4X_AUTHORITATIVE_GHC_BIN readiness path is required}"
+: "${S1_4X_LATEST_GHC_BIN:?S1_4X_LATEST_GHC_BIN readiness path is required}"
 : "${S1_4X_STACK_BIN:?S1_4X_STACK_BIN readiness path is required}"
 : "${S1_4X_HLINT_BIN:?S1_4X_HLINT_BIN readiness path is required}"
-: "${S1_4X_STYLISH_HASKELL_BIN:?S1_4X_STYLISH_HASKELL_BIN readiness path is required}"
+: "${S1_4X_STYLISH_BIN:?S1_4X_STYLISH_BIN readiness path is required}"
 EVIDENCE_ROOT="${S1_4X_EVIDENCE_ROOT:?S1_4X_EVIDENCE_ROOT cache path is required}"
 
 if [[ "$#" -ne 2 || "$1" != "--output-root" || "$2" != /* || -e "$2" ]]; then

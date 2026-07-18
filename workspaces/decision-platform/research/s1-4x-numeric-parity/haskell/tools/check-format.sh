@@ -5,7 +5,7 @@ SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 HASKELL_ROOT="$(realpath "${SCRIPT_PATH%/*}/..")"
 "$HASKELL_ROOT/tools/assert-toolchain.sh" >/dev/null
 
-STYLISH_BIN="${S1_4X_STYLISH_HASKELL_BIN:?S1_4X_STYLISH_HASKELL_BIN readiness path is required}"
+STYLISH_BIN="${S1_4X_STYLISH_BIN:?S1_4X_STYLISH_BIN readiness path is required}"
 MANDATED_CONFIGURATION="$HASKELL_ROOT/.stylish-haskell.yaml"
 CONFIGURATION="$HASKELL_ROOT/.stylish-haskell-ghc2024-expanded.yaml"
 FALLBACK_CONTRACT="$HASKELL_ROOT/stylish-ghc2024-fallback.v1.json"

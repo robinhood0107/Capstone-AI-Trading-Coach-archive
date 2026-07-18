@@ -21,8 +21,9 @@ if [[ ! -d "$OUTPUT_PARENT" || -L "$OUTPUT_PARENT" ]]; then
   exit 73
 fi
 
-STACK_CONFIGURED="${S1_4X_STACK_BIN:-${HOME}/.ghcup/stack/3.11.1/stack}"
-GHC_CONFIGURED="${S1_4X_GHC_BIN:-${HOME}/.ghcup/ghc/9.10.3/bin/ghc}"
+"$HASKELL_ROOT/tools/assert-toolchain.sh" >/dev/null
+STACK_CONFIGURED="${S1_4X_STACK_BIN:?S1_4X_STACK_BIN readiness path is required}"
+GHC_CONFIGURED="${S1_4X_AUTHORITATIVE_GHC_BIN:?S1_4X_AUTHORITATIVE_GHC_BIN readiness path is required}"
 STACK_BIN="$(readlink -f "$STACK_CONFIGURED")"
 GHC_BIN="$(readlink -f "$GHC_CONFIGURED")"
 

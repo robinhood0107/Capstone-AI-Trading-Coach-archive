@@ -15,11 +15,11 @@ NUMERIC_ROOT="$(realpath "$HASKELL_ROOT/..")"
 
 # readiness packet의 runtime path를 명시적으로 주입해 tracked host path와 PATH discovery를 금지한다.
 GHCUP_BIN="${S1_4X_GHCUP_BIN:?S1_4X_GHCUP_BIN readiness path is required}"
-GHC_BIN="${S1_4X_GHC_BIN:?S1_4X_GHC_BIN readiness path is required}"
-GHC_914_BIN="${S1_4X_GHC_914_BIN:?S1_4X_GHC_914_BIN readiness path is required}"
+AUTHORITATIVE_GHC_BIN="${S1_4X_AUTHORITATIVE_GHC_BIN:?S1_4X_AUTHORITATIVE_GHC_BIN readiness path is required}"
+LATEST_GHC_BIN="${S1_4X_LATEST_GHC_BIN:?S1_4X_LATEST_GHC_BIN readiness path is required}"
 STACK_BIN="${S1_4X_STACK_BIN:?S1_4X_STACK_BIN readiness path is required}"
 HLINT_BIN="${S1_4X_HLINT_BIN:?S1_4X_HLINT_BIN readiness path is required}"
-STYLISH_BIN="${S1_4X_STYLISH_HASKELL_BIN:?S1_4X_STYLISH_HASKELL_BIN readiness path is required}"
+STYLISH_BIN="${S1_4X_STYLISH_BIN:?S1_4X_STYLISH_BIN readiness path is required}"
 
 assert_regular_executable() {
   local label="$1"
@@ -41,10 +41,10 @@ assert_regular_executable \
   "GHCup" "$GHCUP_BIN" \
   "9ed5da5449b48043a0d17e767c05d2ef585e25a639bb934329496c6d2fad9cf8"
 assert_regular_executable \
-  "GHC 9.10.3" "$GHC_BIN" \
+  "GHC 9.10.3" "$AUTHORITATIVE_GHC_BIN" \
   "d0c0dd79a1bcc5dce3c9e73613c1be51f61b78d5ef7c0970ffe9f142a90a5e2c"
 assert_regular_executable \
-  "GHC 9.14.1" "$GHC_914_BIN" \
+  "GHC 9.14.1" "$LATEST_GHC_BIN" \
   "ecfd54b4161699f574d2b163bdc817c54df08a08a310323e43b41ab5fc413ef1"
 assert_regular_executable \
   "Stack" "$STACK_BIN" \
@@ -60,11 +60,11 @@ assert_regular_executable \
   echo "GHCup version mismatch" >&2
   exit 69
 }
-[[ "$("$GHC_BIN" --numeric-version)" == "9.10.3" ]] || {
+[[ "$("$AUTHORITATIVE_GHC_BIN" --numeric-version)" == "9.10.3" ]] || {
   echo "authoritative GHC version mismatch" >&2
   exit 69
 }
-[[ "$("$GHC_914_BIN" --numeric-version)" == "9.14.1" ]] || {
+[[ "$("$LATEST_GHC_BIN" --numeric-version)" == "9.14.1" ]] || {
   echo "compatibility GHC version mismatch" >&2
   exit 69
 }
@@ -81,11 +81,11 @@ assert_regular_executable \
   exit 69
 }
 
-[[ "$("$GHCUP_BIN" --offline whereis ghc 9.10.3)" == "$GHC_BIN" ]] || {
+[[ "$("$GHCUP_BIN" --offline whereis ghc 9.10.3)" == "$AUTHORITATIVE_GHC_BIN" ]] || {
   echo "GHCup authoritative GHC path mismatch" >&2
   exit 69
 }
-[[ "$("$GHCUP_BIN" --offline whereis ghc 9.14.1)" == "$GHC_914_BIN" ]] || {
+[[ "$("$GHCUP_BIN" --offline whereis ghc 9.14.1)" == "$LATEST_GHC_BIN" ]] || {
   echo "GHCup compatibility GHC path mismatch" >&2
   exit 69
 }
@@ -339,8 +339,8 @@ fi
 printf 'HASKELL_TOOLCHAIN_PASS ghcup=%s stack=%s ghc=%s compatibilityGhc=%s compatibilityStatus=%s acceptedMode=%s lockSha256=%s\n' \
   "$GHCUP_BIN" \
   "$STACK_BIN" \
-  "$GHC_BIN" \
-  "$GHC_914_BIN" \
+  "$AUTHORITATIVE_GHC_BIN" \
+  "$LATEST_GHC_BIN" \
   "$compatibility_status" \
   "$([[ "$compatibility_status" == "PENDING_SOLVE" ]] && printf false || printf true)" \
   "$(sha256sum "$LOCK" | awk '{print $1}')"
