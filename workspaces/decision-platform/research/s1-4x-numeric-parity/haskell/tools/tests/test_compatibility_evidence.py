@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import copy
 import importlib.util
+import sqlite3
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -206,6 +208,175 @@ class CompatibilityEvidenceTests(unittest.TestCase):
             canonical["requiredEnvironment"],
         )
         self.assertEqual(historical["argv"], canonical["argv"])
+
+    def test_current_configuration_ast_is_recomputed_from_frozen_stack_yaml(
+        self,
+    ) -> None:
+        configuration = compatibility_evidence.parse_current_configuration_ast(
+            HASKELL_ROOT / "stack-ghc-9.14.1.yaml"
+        )
+
+        self.assertEqual(
+            configuration,
+            {
+                "compilerCheck": "match-exact",
+                "flags": {
+                    "math-functions": {
+                        "system-erf": False,
+                        "system-expm1": False,
+                    }
+                },
+                "installGhc": False,
+                "packages": ["."],
+                "snapshot": "lts-24.50",
+                "systemGhc": True,
+            },
+        )
+        self.assertNotIn("compiler", configuration)
+
+    def test_current_s4804_failure_leaf_is_parsed_not_copied(self) -> None:
+        stderr = """\
+Error: [S-4804]
+       Stack failed to construct a build plan.
+
+       In the dependencies for optparse-applicative-0.18.1.0:
+         * process must match >=1.0 && <1.7, but this GHC boot package has been pruned from the
+           Stack configuration. You need to add the package explicitly to extra-deps. (latest
+           matching version is 1.6.30.0).
+       The above is/are needed due to s1-4x-haskell-0.1.0.0 -> optparse-applicative-0.18.1.0
+
+       In the dependencies for s1-4x-haskell-0.1.0.0:
+         * directory needed, but this GHC boot package has been pruned from the Stack configuration.
+           You need to add the package explicitly to extra-deps. (latest matching version is
+           1.3.11.0).
+       The above is/are needed since s1-4x-haskell is a build target.
+
+         * Recommended action: try adding the following to your extra-deps in
+           /tmp/stack-ghc-9.14.1.yaml
+
+           - directory-1.3.11.0@sha256:2346c4f0af05c4ed55e77543e94b26f1b82523efd24da986bdd48a8f8a84c5a0,3113
+           - process-1.6.30.0@sha256:b74eed77eb3237c4ab6a39f08bcce4712b4486b091712ee20e92c8864f1e80a0,3754
+"""
+        leaf = compatibility_evidence.parse_current_s4804_failure_leaf(
+            stderr,
+            compatibility_boot_versions={
+                "directory": "1.3.10.0",
+                "process": "1.6.26.1",
+            },
+        )
+
+        self.assertEqual(leaf, compatibility_evidence.FAILURE_LEAF)
+        with self.assertRaisesRegex(
+            compatibility_evidence.CompatibilityEvidenceError,
+            "exact S-4804",
+        ):
+            compatibility_evidence.parse_current_s4804_failure_leaf(
+                stderr.replace("1.6.30.0", "1.6.29.0", 1),
+                compatibility_boot_versions={
+                    "directory": "1.3.10.0",
+                    "process": "1.6.26.1",
+                },
+            )
+
+    def test_current_direct_parents_come_from_cabal_snapshot_and_pantry(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            cabal = root / "candidate.cabal"
+            cabal.write_text(
+                """\
+library
+  build-depends:
+      base
+    , alpha ==1.2.3
+    , beta
+    , candidate-core
+""",
+                encoding="utf-8",
+            )
+            pantry = root / "pantry.sqlite3"
+            connection = sqlite3.connect(pantry)
+            connection.executescript(
+                """\
+CREATE TABLE package_name(id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE);
+CREATE TABLE version(id INTEGER PRIMARY KEY, version TEXT NOT NULL UNIQUE);
+CREATE TABLE hackage_tarball(
+  id INTEGER PRIMARY KEY,
+  name INTEGER NOT NULL,
+  version INTEGER NOT NULL,
+  sha BLOB NOT NULL,
+  size INTEGER NOT NULL
+);
+"""
+            )
+            for index, (package, version, digest) in enumerate(
+                (
+                    ("alpha", "1.2.3", "1" * 64),
+                    ("beta", "4.5.6", "2" * 64),
+                ),
+                start=1,
+            ):
+                connection.execute(
+                    "INSERT INTO package_name(id, name) VALUES (?, ?)",
+                    (index, package),
+                )
+                connection.execute(
+                    "INSERT INTO version(id, version) VALUES (?, ?)",
+                    (index, version),
+                )
+                connection.execute(
+                    """
+INSERT INTO hackage_tarball(id, name, version, sha, size)
+VALUES (?, ?, ?, ?, ?)
+""",
+                    (index, index, index, bytes.fromhex(digest), 1),
+                )
+            connection.commit()
+            connection.close()
+            snapshot = """\
+flags:
+  alpha:
+    feature-a: true
+packages:
+- hackage: alpha-1.2.3@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,10
+- hackage: beta-4.5.6@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb,11
+"""
+
+            parents = compatibility_evidence.derive_current_direct_non_boot_parents(
+                cabal_path=cabal,
+                snapshot_text=snapshot,
+                pantry_db=pantry,
+                boot_package_names={"base"},
+                local_package_names={"candidate-core"},
+                approved_flags={"alpha": {"feature-a": True}},
+            )
+
+        self.assertEqual(
+            parents,
+            [
+                {
+                    "effectiveFlags": {"feature-a": True},
+                    "package": "alpha",
+                    "sourceSha256": "1" * 64,
+                    "sourceUri": (
+                        "https://hackage.haskell.org/package/alpha-1.2.3/"
+                        "alpha-1.2.3.tar.gz"
+                    ),
+                    "version": "1.2.3",
+                },
+                {
+                    "effectiveFlags": {},
+                    "package": "beta",
+                    "sourceSha256": "2" * 64,
+                    "sourceUri": (
+                        "https://hackage.haskell.org/package/beta-4.5.6/"
+                        "beta-4.5.6.tar.gz"
+                    ),
+                    "version": "4.5.6",
+                },
+            ],
+        )
 
 
 if __name__ == "__main__":

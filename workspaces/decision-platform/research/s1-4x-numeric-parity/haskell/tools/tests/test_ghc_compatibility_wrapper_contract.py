@@ -128,9 +128,23 @@ class GhcCompatibilityWrapperContractTests(unittest.TestCase):
             "--no-install-ghc",
             "--dry-run",
             "capture-compatibility-failure",
-            "COMPATIBILITY_SOLVE_UNEXPECTED_SUCCESS",
+            "replay-compatibility-success",
+            "authoritative-boot.dump",
+            "compatibility-boot.dump",
+            "pantry.sqlite3",
         ):
             self.assertIn(required, run_source)
+        self.assertNotIn("COMPATIBILITY_SOLVE_UNEXPECTED_SUCCESS", run_source)
+        for phase in (
+            "candidateCompile",
+            "fullCorrectness",
+            "stableErrorReplay",
+            "processReplay",
+            "oracleReplay",
+            "crossReplay",
+        ):
+            with self.subTest(phase=phase):
+                self.assertIn(phase, HELPER_PATH.read_text(encoding="utf-8"))
         for required in (
             "validate-compatibility",
             "ghc-9.14.1-compatibility.v1.json",
@@ -142,6 +156,103 @@ class GhcCompatibilityWrapperContractTests(unittest.TestCase):
             self.assertNotIn("--allow-newer", source)
             self.assertNotIn("--resolver", source)
             self.assertNotIn("eval ", source)
+
+    def test_current_lock_hashes_read_both_exact_files_independently(self) -> None:
+        helper = load_helper()
+        hashes = helper.current_compatibility_lock_hashes(
+            HELPER_PATH.parent.parent,
+        )
+
+        self.assertEqual(
+            hashes,
+            {
+                "authoritativeStackLockSha256": helper.sha256_file(
+                    HELPER_PATH.parent.parent / "stack.yaml.lock"
+                ),
+                "compatibilityStackLockSha256": helper.sha256_file(
+                    HELPER_PATH.parent.parent / "stack-ghc-9.14.1.yaml.lock"
+                ),
+            },
+        )
+        source = HELPER_PATH.read_text(encoding="utf-8")
+        self.assertNotIn(
+            'result["compatibilityStackLockSha256"] = result[\n'
+            '        "authoritativeStackLockSha256"\n'
+            "    ]",
+            source,
+        )
+
+    def test_pass_result_closes_every_typed_replay(self) -> None:
+        helper = load_helper()
+        result = helper.build_current_compatibility_pass_result(
+            candidate_source_tree_sha256="1" * 64,
+            command_records=[
+                {
+                    "phase": phase,
+                    "argv": [phase],
+                    "cwdId": "HASKELL_COMPAT_ROOT",
+                    "startedAt": "2026-07-19T00:00:00Z",
+                    "endedAt": "2026-07-19T00:00:01Z",
+                    "exitCode": 0,
+                    "stdoutSha256": "2" * 64,
+                    "stderrSha256": "3" * 64,
+                }
+                for phase in (
+                    "dependency",
+                    "candidateCompile",
+                    "fullCorrectness",
+                    "stableErrorReplay",
+                    "processReplay",
+                    "oracleReplay",
+                    "crossReplay",
+                )
+            ],
+            phase_evidence_sha256={
+                phase: str(index) * 64
+                for index, phase in enumerate(
+                    (
+                        "dependency",
+                        "candidateCompile",
+                        "fullCorrectness",
+                        "stableErrorReplay",
+                        "processReplay",
+                        "oracleReplay",
+                        "crossReplay",
+                    ),
+                    start=1,
+                )
+            },
+            current_plan={
+                "authoritativeBootSetSha256": "8" * 64,
+                "compatibilityBootSetSha256": "9" * 64,
+                "authoritativeNonBootPlanSha256": "a" * 64,
+                "compatibilityNonBootPlanSha256": "a" * 64,
+                "authoritativePackageSetSha256": "b" * 64,
+                "configurationAstSha256": "c" * 64,
+            },
+            haskell_root=HELPER_PATH.parent.parent,
+        )
+
+        self.assertEqual(result["result"], "PASS")
+        self.assertIsNone(result["failurePhase"])
+        self.assertEqual(result["downstreamNotRun"], [])
+        self.assertIsNone(result["minimalReproducerSha256"])
+        self.assertEqual(result["candidateCompile"]["status"], "PASS")
+        for phase in (
+            "fullCorrectness",
+            "stableErrorReplay",
+            "processReplay",
+            "oracleReplay",
+            "crossReplay",
+        ):
+            self.assertEqual(
+                result[phase],
+                {
+                    "evidenceSha256": result[phase]["evidenceSha256"],
+                    "mismatchCount": 0,
+                    "status": "PASS",
+                },
+            )
 
 
 if __name__ == "__main__":
