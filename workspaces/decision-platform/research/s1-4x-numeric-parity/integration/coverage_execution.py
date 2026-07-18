@@ -51,7 +51,7 @@ def _canonical_sha256(value: Any) -> str:
 
 def _utc_now() -> str:
     return (
-        dt.datetime.now(dt.timezone.utc)
+        dt.datetime.now(dt.UTC)
         .isoformat(timespec="microseconds")
         .replace("+00:00", "Z")
     )

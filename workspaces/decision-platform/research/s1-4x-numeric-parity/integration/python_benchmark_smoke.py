@@ -12,7 +12,6 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-
 from benchmark_input_ledger import generated_fixture_evidence
 from gate import GateError, exclusive_json_write
 from python_benchmark_block import (

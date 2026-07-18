@@ -77,11 +77,8 @@ def _utc_timestamp(value: Any, *, error: str) -> dt.datetime:
 
 
 def _valid_seed(value: Any) -> bool:
-    return (
-        type(value) is int
-        and value >= 0
-        or isinstance(value, str)
-        and TOKEN.fullmatch(value) is not None
+    return (type(value) is int and value >= 0) or (
+        isinstance(value, str) and TOKEN.fullmatch(value) is not None
     )
 
 
@@ -95,7 +92,7 @@ def validate_candidate_coverage(
     registry_report: Any,
     execution_report: Any,
 ) -> dict[str, Any]:
-    """25/25 property와 20/20·19+13 registry exact set을 한 candidate에 강제한다."""
+    """24-seed 25/25 property와 20/20·19+13 registry exact set을 강제한다."""
 
     plan = _object(strict_json_load(property_plan_path), error="PROPERTY_PLAN_INVALID")
     functions = _object(
@@ -137,6 +134,49 @@ def validate_candidate_coverage(
         or errors.get("trackCounts") != {"s1.4": 19, "s1.4r": 13}
     ):
         raise CoverageError("FROZEN_COVERAGE_COUNTS_INVALID")
+    seed_corpus_relative = plan.get("seedCorpusFile")
+    if (
+        not isinstance(seed_corpus_relative, str)
+        or not seed_corpus_relative
+        or Path(seed_corpus_relative).is_absolute()
+        or ".." in Path(seed_corpus_relative).parts
+    ):
+        raise CoverageError("PROPERTY_SEED_CORPUS_INVALID")
+    s1_4x_root = property_plan_path.resolve(strict=True).parent.parent
+    seed_corpus_path = s1_4x_root / seed_corpus_relative
+    try:
+        seed_corpus_path.resolve(strict=True).relative_to(s1_4x_root)
+    except (OSError, ValueError) as exc:
+        raise CoverageError("PROPERTY_SEED_CORPUS_INVALID") from exc
+    if seed_corpus_path.is_symlink() or not seed_corpus_path.is_file():
+        raise CoverageError("PROPERTY_SEED_CORPUS_INVALID")
+    seed_corpus = _object(
+        strict_json_load(seed_corpus_path),
+        error="PROPERTY_SEED_CORPUS_INVALID",
+    )
+    _exact_fields(
+        seed_corpus,
+        {
+            "schemaVersion",
+            "generator",
+            "generatorVersion",
+            "seeds",
+            "replayContract",
+        },
+        error="PROPERTY_SEED_CORPUS_INVALID",
+    )
+    expected_seeds = seed_corpus["seeds"]
+    if (
+        seed_corpus["schemaVersion"] != "s1.4x-property-seeds-v1"
+        or not isinstance(expected_seeds, list)
+        or len(expected_seeds) != plan["seedCount"]
+        or any(not _valid_seed(seed) for seed in expected_seeds)
+        or len(set(expected_seeds)) != len(expected_seeds)
+    ):
+        raise CoverageError("PROPERTY_SEED_CORPUS_INVALID")
+    minimum_per_seed = (
+        plan["minimumSuccessfulPerProperty"] + plan["seedCount"] - 1
+    ) // plan["seedCount"]
 
     property_document = _object(
         property_report,
@@ -198,6 +238,9 @@ def validate_candidate_coverage(
             "schemaVersion",
             "implementation",
             "propertyPlanSha256",
+            "seedCorpusSha256",
+            "seedCount",
+            "minimumSuccessfulPerSeed",
             "framework",
             "toolchainProfile",
             "commandArgvSha256",
@@ -218,6 +261,9 @@ def validate_candidate_coverage(
         != property_document["implementation"]
         or execution_document["propertyPlanSha256"]
         != property_document["propertyPlanSha256"]
+        or execution_document["seedCorpusSha256"] != _sha256(seed_corpus_path)
+        or execution_document["seedCount"] != len(expected_seeds)
+        or execution_document["minimumSuccessfulPerSeed"] != minimum_per_seed
         or execution_document["status"] != "PASS"
         or execution_document["exitCode"] != 0
         or not isinstance(execution_document["framework"], str)
@@ -252,8 +298,8 @@ def validate_candidate_coverage(
             "successfulTests",
             "discardedTests",
             "attemptedTests",
-            "originalSeed",
-            "replayToken",
+            "seedCount",
+            "seedExecutions",
             "shrinks",
             "status",
         },
@@ -270,7 +316,6 @@ def validate_candidate_coverage(
         discarded = executed["discardedTests"]
         attempted = executed["attemptedTests"]
         shrinks = executed["shrinks"]
-        replay_token = executed["replayToken"]
         if (
             executed["status"] != "PASS"
             or type(successes) is not int
@@ -280,10 +325,77 @@ def validate_candidate_coverage(
             or successes != reported["successfulTests"]
             or discarded != reported["discardedTests"]
             or attempted != successes + discarded
+            or executed["seedCount"] != len(expected_seeds)
             or shrinks < 0
-            or not _valid_seed(executed["originalSeed"])
-            or not isinstance(replay_token, str)
-            or TOKEN.fullmatch(replay_token) is None
+        ):
+            raise CoverageError(
+                f"PROPERTY_EXECUTION_REPORT_MISMATCH:{property_id}"
+            )
+        seed_executions = executed["seedExecutions"]
+        if (
+            not isinstance(seed_executions, list)
+            or len(seed_executions) != len(expected_seeds)
+        ):
+            raise CoverageError(
+                f"PROPERTY_EXECUTION_SEED_MISMATCH:{property_id}"
+            )
+        summed_successes = 0
+        summed_discarded = 0
+        summed_attempted = 0
+        summed_shrinks = 0
+        for seed_index, (expected_seed, raw_seed_execution) in enumerate(
+            zip(expected_seeds, seed_executions, strict=True)
+        ):
+            seed_execution = _object(
+                raw_seed_execution,
+                error=f"PROPERTY_EXECUTION_SEED_MISMATCH:{property_id}",
+            )
+            _exact_fields(
+                seed_execution,
+                {
+                    "seedIndex",
+                    "originalSeed",
+                    "successfulTests",
+                    "discardedTests",
+                    "attemptedTests",
+                    "replayToken",
+                    "shrinks",
+                    "status",
+                },
+                error=f"PROPERTY_EXECUTION_SEED_MISMATCH:{property_id}",
+            )
+            seed_successes = seed_execution["successfulTests"]
+            seed_discarded = seed_execution["discardedTests"]
+            seed_attempted = seed_execution["attemptedTests"]
+            seed_shrinks = seed_execution["shrinks"]
+            replay_token = seed_execution["replayToken"]
+            if (
+                seed_execution["seedIndex"] != seed_index
+                or seed_execution["originalSeed"] != expected_seed
+                or type(seed_successes) is not int
+                or seed_successes < minimum_per_seed
+                or type(seed_discarded) is not int
+                or seed_discarded < 0
+                or type(seed_attempted) is not int
+                or seed_attempted != seed_successes + seed_discarded
+                or type(seed_shrinks) is not int
+                or seed_shrinks < 0
+                or not isinstance(replay_token, str)
+                or TOKEN.fullmatch(replay_token) is None
+                or seed_execution["status"] != "PASS"
+            ):
+                raise CoverageError(
+                    f"PROPERTY_EXECUTION_SEED_MISMATCH:{property_id}"
+                )
+            summed_successes += seed_successes
+            summed_discarded += seed_discarded
+            summed_attempted += seed_attempted
+            summed_shrinks += seed_shrinks
+        if (
+            successes != summed_successes
+            or discarded != summed_discarded
+            or attempted != summed_attempted
+            or shrinks != summed_shrinks
         ):
             raise CoverageError(
                 f"PROPERTY_EXECUTION_REPORT_MISMATCH:{property_id}"
@@ -375,6 +487,11 @@ def validate_candidate_coverage(
         "propertyExecution": {
             "framework": execution_document["framework"],
             "toolchainProfile": execution_document["toolchainProfile"],
+            "seedCorpusSha256": execution_document["seedCorpusSha256"],
+            "seedCount": execution_document["seedCount"],
+            "minimumSuccessfulPerSeed": execution_document[
+                "minimumSuccessfulPerSeed"
+            ],
             "runnerSha256": execution_document["runnerSha256"],
             "sourceClosureSha256": execution_document["sourceClosureSha256"],
             "startedAt": execution_document["startedAt"],

@@ -18,7 +18,6 @@ from pathlib import Path
 from typing import Any, cast
 
 import numpy as np
-
 from benchmark_input_ledger import (
     build_input_ledger,
     generated_fixture_evidence,
@@ -81,7 +80,7 @@ def _source_closure_sha256(repo_root: Path, paths: Sequence[Path]) -> str:
 
 def _utc_now() -> str:
     return (
-        dt.datetime.now(dt.timezone.utc)
+        dt.datetime.now(dt.UTC)
         .isoformat(timespec="microseconds")
         .replace("+00:00", "Z")
     )
@@ -130,8 +129,10 @@ def _production_operation(
     prices: np.ndarray,
     returns: np.ndarray,
 ) -> Operation:
-    from app.financial_engineering import returns as returns_module  # type: ignore[import-not-found]
-    from app.financial_engineering import risk_metrics
+    from app.financial_engineering import (  # type: ignore[import-not-found]
+        returns as returns_module,
+    )
+    from app.financial_engineering import risk_metrics  # type: ignore[import-not-found]
 
     function_id = case["functionId"]
     length = case["vectorLength"]
@@ -157,7 +158,9 @@ def _production_operation(
 
 
 def _trial_provenance(trial_count: int) -> object:
-    from s1_4r_risk_research.models import EffectiveTrialProvenance  # type: ignore[import-not-found]
+    from s1_4r_risk_research.models import (  # type: ignore[import-not-found]
+        EffectiveTrialProvenance,
+    )
 
     return EffectiveTrialProvenance(
         schema_version="s1.4r-effective-trials-v1",
@@ -624,6 +627,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                         "rawEvidenceSha256": _sha256_json(
                             case["rawSamplesNs"]
                         ),
+                        "executionReceiptPath": None,
+                        "executionReceiptSha256": None,
                         "status": "PASS",
                     }
                     for case in native_cases

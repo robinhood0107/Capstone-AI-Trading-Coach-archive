@@ -20,7 +20,10 @@ from native_benchmark_block import validate_native_contract_evidence
 BENCHMARKS = Path(__file__).resolve().parents[1] / "benchmarks"
 sys.path.insert(0, str(BENCHMARKS))
 
-from benchmark_contract import ContractError, sha256_file  # type: ignore[import-not-found]  # noqa: E402
+from benchmark_contract import (  # type: ignore[import-not-found]  # noqa: E402
+    ContractError,
+    sha256_file,
+)
 from run_rotated_blocks import (  # type: ignore[import-not-found]  # noqa: E402
     ScheduledBlock,
     build_schedule,
@@ -648,12 +651,36 @@ def finalize_run(
             raise BenchmarkSummaryError(
                 f"BENCHMARK_NATIVE_EVIDENCE_BINDING_INVALID:{block.selector_id}"
             )
+        selector = selector_by_id[block.selector_id]
+        expected_cases = [
+            case_by_id[case_id] for case_id in selector["expectedCaseIds"]
+        ]
+        statistics_entries = _native_statistics(
+            block_directory / "native-statistics.json",
+            boundary_id=block.boundary_id,
+            selector_id=block.selector_id,
+            native_report_sha256=sha256_file(native_path),
+            expected_cases=expected_cases,
+            expected_unit=plan["execution"]["nativeTimeUnit"][block.boundary_id],
+        )
         validate_native_contract_evidence(
             strict_json_load(native_contract_path),
             boundary_id=block.boundary_id,
             selector_id=block.selector_id,
             block_directory=block_directory,
             native_cases=native_document["cases"],
+            native_statistics_cases=statistics_entries,
+            plan_path=resolved_plan_path,
+            fixture_root_path=(
+                repo_root
+                / "workspaces/decision-platform/research/"
+                "s1-4x-numeric-parity/contract/fixtures"
+            ),
+            input_ledger_path=input_ledger_path,
+            effective_runtime_arguments_sha256=str(
+                native_document["effectiveRuntimeArgumentsSha256"]
+            ),
+            profile=str(native_document["profile"]),
         )
         report = validate_block_result(
             result_path,
@@ -669,18 +696,6 @@ def finalize_run(
             raise BenchmarkSummaryError(
                 f"BENCHMARK_SUBJECT_OR_STATUS_INVALID:{block.selector_id}"
             )
-        selector = selector_by_id[block.selector_id]
-        expected_cases = [
-            case_by_id[case_id] for case_id in selector["expectedCaseIds"]
-        ]
-        statistics_entries = _native_statistics(
-            block_directory / "native-statistics.json",
-            boundary_id=block.boundary_id,
-            selector_id=block.selector_id,
-            native_report_sha256=sha256_file(native_path),
-            expected_cases=expected_cases,
-            expected_unit=plan["execution"]["nativeTimeUnit"][block.boundary_id],
-        )
         for case in report["cases"]:
             measurements[block.boundary_id][case["caseId"]].append(
                 float(case["normalizedNsPerLogicalOperation"])

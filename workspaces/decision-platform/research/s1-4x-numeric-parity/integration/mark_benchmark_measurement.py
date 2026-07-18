@@ -11,8 +11,13 @@ from pathlib import Path
 BENCHMARKS = Path(__file__).resolve().parents[1] / "benchmarks"
 sys.path.insert(0, str(BENCHMARKS))
 
-from benchmark_contract import ContractError, sha256_file  # type: ignore[import-not-found]  # noqa: E402
-from run_rotated_blocks import mark_measurement_entered  # type: ignore[import-not-found]  # noqa: E402
+from benchmark_contract import (  # type: ignore[import-not-found]  # noqa: E402
+    ContractError,
+    sha256_file,
+)
+from run_rotated_blocks import (  # type: ignore[import-not-found]  # noqa: E402
+    mark_measurement_entered,
+)
 
 
 def _parser() -> argparse.ArgumentParser:

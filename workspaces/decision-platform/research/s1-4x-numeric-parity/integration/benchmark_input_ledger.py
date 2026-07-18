@@ -16,7 +16,10 @@ from gate import GateError, exclusive_json_write, strict_json_load
 BENCHMARKS = Path(__file__).resolve().parents[1] / "benchmarks"
 sys.path.insert(0, str(BENCHMARKS))
 
-from benchmark_contract import ContractError, sha256_file  # type: ignore[import-not-found]  # noqa: E402
+from benchmark_contract import (  # type: ignore[import-not-found]  # noqa: E402
+    ContractError,
+    sha256_file,
+)
 from validate_benchmark_report import validate_plan  # type: ignore[import-not-found]  # noqa: E402
 
 FIXTURE_FILES = {

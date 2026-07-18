@@ -9,6 +9,7 @@ import json
 import math
 import os
 import re
+import statistics
 import sys
 from collections.abc import Mapping
 from pathlib import Path
@@ -20,7 +21,10 @@ from gate import GateError, exclusive_json_write, strict_json_load
 BENCHMARKS = Path(__file__).resolve().parents[1] / "benchmarks"
 sys.path.insert(0, str(BENCHMARKS))
 
-from benchmark_contract import ContractError, sha256_file  # type: ignore[import-not-found]  # noqa: E402
+from benchmark_contract import (  # type: ignore[import-not-found]  # noqa: E402
+    ContractError,
+    sha256_file,
+)
 from validate_benchmark_report import (  # type: ignore[import-not-found]  # noqa: E402
     validate_block_result,
     validate_plan,
@@ -69,8 +73,69 @@ NATIVE_CONTRACT_CASE_FIELDS = {
     "nativeSampleCount",
     "rawEvidencePath",
     "rawEvidenceSha256",
+    "executionReceiptPath",
+    "executionReceiptSha256",
     "status",
 }
+EXECUTION_RECEIPT_FIELDS = {
+    "schemaVersion",
+    "boundaryId",
+    "selectorId",
+    "caseId",
+    "commandArgv",
+    "environment",
+    "exitCode",
+    "rawEvidencePath",
+    "rawEvidenceSha256",
+    "provenance",
+    "status",
+}
+EXECUTION_PROVENANCE_FIELDS = {
+    "planPath",
+    "planSha256",
+    "fixtureRootPath",
+    "fixtureFreezeIdentitySha256",
+    "inputLedgerPath",
+    "inputLedgerSha256",
+    "selectorId",
+    "caseIds",
+    "benchmarkExecutablePath",
+    "benchmarkExecutableSha256",
+    "effectiveRuntimeArgumentsSha256",
+    "candidateProvenance",
+}
+NATIVE_STATISTICS_CASE_FIELDS = {
+    "caseId",
+    "nativeSampleCount",
+    "nativeP95",
+    "confidenceLevel",
+    "confidenceLow",
+    "confidenceHigh",
+    "dispersionMetric",
+    "dispersionValue",
+    "nativeUnit",
+    "logicalOperationsPerInvocation",
+    "normalizedP95NsPerLogicalOperation",
+    "normalizedConfidenceLowNsPerLogicalOperation",
+    "normalizedConfidenceHighNsPerLogicalOperation",
+    "normalizedDispersionNsPerLogicalOperation",
+}
+CRITERION_MEASUREMENT_KEYS = [
+    "time",
+    "cpuTime",
+    "cycles",
+    "iters",
+    "allocated",
+    "peakMbAllocated",
+    "numGcs",
+    "bytesCopied",
+    "mutatorWallSeconds",
+    "mutatorCpuSeconds",
+    "gcWallSeconds",
+    "gcCpuSeconds",
+]
+# Criterion 1.6.4.0 analyseSample은 total measTime 0.03초 이상만 bootstrap에 사용한다.
+CRITERION_BOOTSTRAP_THRESHOLD_SECONDS = 0.03
 
 
 def _exact_object(value: Any, fields: set[str], *, error: str) -> dict[str, Any]:
@@ -97,6 +162,699 @@ def _canonical_sha256(value: Any) -> str:
     ).hexdigest()
 
 
+def _argv_pair(arguments: list[str], option: str, expected: str) -> bool:
+    return any(
+        arguments[index] == option and arguments[index + 1] == expected
+        for index in range(len(arguments) - 1)
+    )
+
+
+def _number(value: Any, *, positive: bool = False) -> float | None:
+    if (
+        not isinstance(value, (int, float))
+        or isinstance(value, bool)
+        or not math.isfinite(float(value))
+        or (positive and float(value) <= 0.0)
+    ):
+        return None
+    return float(value)
+
+
+def _same_number(left: Any, right: Any) -> bool:
+    left_number = _number(left)
+    right_number = _number(right)
+    return (
+        left_number is not None
+        and right_number is not None
+        and math.isclose(
+            left_number,
+            right_number,
+            rel_tol=1e-12,
+            abs_tol=1e-15,
+        )
+    )
+
+
+def _nearest_rank_p95(values: list[float]) -> float:
+    ordered = sorted(values)
+    return ordered[max(0, math.ceil(0.95 * len(ordered)) - 1)]
+
+
+def _ols_slope(predictors: list[float], responses: list[float]) -> float:
+    predictor_mean = statistics.fmean(predictors)
+    response_mean = statistics.fmean(responses)
+    denominator = math.fsum((predictor - predictor_mean) ** 2 for predictor in predictors)
+    if denominator <= 0.0:
+        raise GateError("CRITERION_REGRESSION_INPUT_INVALID")
+    return (
+        math.fsum(
+            (predictor - predictor_mean) * (response - response_mean)
+            for predictor, response in zip(predictors, responses, strict=True)
+        )
+        / denominator
+    )
+
+
+def _estimate(value: Any, *, error: str) -> dict[str, float]:
+    estimate = _exact_object(
+        value,
+        {"estPoint", "estError"},
+        error=error,
+    )
+    interval = _exact_object(
+        estimate["estError"],
+        {"confIntLDX", "confIntUDX", "confIntCL"},
+        error=error,
+    )
+    point = _number(estimate["estPoint"])
+    lower_distance = _number(interval["confIntLDX"])
+    upper_distance = _number(interval["confIntUDX"])
+    significance = _number(interval["confIntCL"])
+    if (
+        point is None
+        or lower_distance is None
+        or lower_distance < 0.0
+        or upper_distance is None
+        or upper_distance < 0.0
+        or significance is None
+        or not 0.0 < significance < 1.0
+        or point - lower_distance < 0.0
+    ):
+        raise GateError(error)
+    return {
+        "point": point,
+        "confidenceLevel": 1.0 - significance,
+        "confidenceLow": point - lower_distance,
+        "confidenceHigh": point + upper_distance,
+    }
+
+
+def _validate_native_statistics_case(
+    value: Any,
+    *,
+    case_id: str,
+    expected: Mapping[str, Any],
+    error: str,
+) -> None:
+    statistics_case = _exact_object(
+        value,
+        NATIVE_STATISTICS_CASE_FIELDS,
+        error=error,
+    )
+    expected_confidence_level = expected["confidenceLevel"]
+    actual_confidence_level = statistics_case["confidenceLevel"]
+    if (
+        statistics_case["caseId"] != case_id
+        or statistics_case["nativeSampleCount"] != expected["nativeSampleCount"]
+        or (expected_confidence_level is None and actual_confidence_level is not None)
+        or (
+            expected_confidence_level is not None
+            and not _same_number(
+                actual_confidence_level,
+                expected_confidence_level,
+            )
+        )
+        or statistics_case["dispersionMetric"] != expected["dispersionMetric"]
+        or statistics_case["nativeUnit"] != expected["nativeUnit"]
+        or not _same_number(statistics_case["nativeP95"], expected["nativeP95"])
+        or not _same_number(
+            statistics_case["confidenceLow"],
+            expected["confidenceLow"],
+        )
+        or not _same_number(
+            statistics_case["confidenceHigh"],
+            expected["confidenceHigh"],
+        )
+        or not _same_number(
+            statistics_case["dispersionValue"],
+            expected["dispersionValue"],
+        )
+    ):
+        raise GateError(error)
+
+
+def _validate_execution_receipt(
+    *,
+    item: Mapping[str, Any],
+    boundary_id: str,
+    selector_id: str,
+    case_id: str,
+    expected_case_ids: list[str],
+    block_directory: Path,
+    plan_path: Path,
+    fixture_root_path: Path,
+    input_ledger_path: Path,
+    effective_runtime_arguments_sha256: str,
+    profile: str,
+) -> None:
+    receipt_path_text = item["executionReceiptPath"]
+    if (
+        not isinstance(receipt_path_text, str)
+        or not receipt_path_text
+        or Path(receipt_path_text).is_absolute()
+        or ".." in Path(receipt_path_text).parts
+        or SHA256.fullmatch(str(item["executionReceiptSha256"])) is None
+    ):
+        raise GateError(f"NATIVE_EXECUTION_RECEIPT_PATH_INVALID:{case_id}")
+    receipt_path = block_directory / receipt_path_text
+    try:
+        receipt_path.resolve(strict=True).relative_to(block_directory.resolve(strict=True))
+    except (OSError, ValueError) as exc:
+        raise GateError(f"NATIVE_EXECUTION_RECEIPT_PATH_INVALID:{case_id}") from exc
+    if (
+        receipt_path.is_symlink()
+        or not receipt_path.is_file()
+        or sha256_file(receipt_path) != item["executionReceiptSha256"]
+    ):
+        raise GateError(f"NATIVE_EXECUTION_RECEIPT_DIGEST_INVALID:{case_id}")
+    receipt = _exact_object(
+        strict_json_load(receipt_path),
+        EXECUTION_RECEIPT_FIELDS,
+        error=f"NATIVE_EXECUTION_RECEIPT_INVALID:{case_id}",
+    )
+    arguments = receipt["commandArgv"]
+    provenance = _exact_object(
+        receipt["provenance"],
+        EXECUTION_PROVENANCE_FIELDS,
+        error=f"NATIVE_EXECUTION_PROVENANCE_INVALID:{case_id}",
+    )
+    resolved_plan = plan_path.resolve(strict=True)
+    resolved_fixture_root = fixture_root_path.resolve(strict=True)
+    resolved_input_ledger = input_ledger_path.resolve(strict=True)
+    plan = strict_json_load(resolved_plan)
+    if not isinstance(plan, dict):
+        raise GateError(f"NATIVE_EXECUTION_PROVENANCE_INVALID:{case_id}")
+    benchmark_executable_text = provenance["benchmarkExecutablePath"]
+    if (
+        not isinstance(benchmark_executable_text, str)
+        or not Path(benchmark_executable_text).is_absolute()
+    ):
+        raise GateError(f"NATIVE_EXECUTION_PROVENANCE_INVALID:{case_id}")
+    benchmark_executable = Path(benchmark_executable_text)
+    candidate_provenance = provenance["candidateProvenance"]
+    expected_receipt_case_id: str | None = case_id if boundary_id == "scala" else None
+    expected_environment = (
+        {"S1_4X_BENCHMARK_CASE_ID": case_id}
+        if boundary_id == "scala"
+        else {"S1_4X_BENCHMARK_SELECTOR_ID": selector_id}
+    )
+    if (
+        receipt["schemaVersion"] != "s1.4x-native-case-execution-receipt-v1"
+        or receipt["boundaryId"] != boundary_id
+        or receipt["selectorId"] != selector_id
+        or receipt["caseId"] != expected_receipt_case_id
+        or not isinstance(arguments, list)
+        or not arguments
+        or not all(isinstance(argument, str) and argument for argument in arguments)
+        or receipt["environment"] != expected_environment
+        or receipt["exitCode"] != 0
+        or receipt["rawEvidencePath"] != item["rawEvidencePath"]
+        or receipt["rawEvidenceSha256"] != item["rawEvidenceSha256"]
+        or receipt["status"] != "PASS"
+        or provenance["planPath"] != str(resolved_plan)
+        or provenance["planSha256"] != sha256_file(resolved_plan)
+        or provenance["fixtureRootPath"] != str(resolved_fixture_root)
+        or provenance["fixtureFreezeIdentitySha256"]
+        != _canonical_sha256(plan.get("fixtureFreezeIdentity"))
+        or provenance["inputLedgerPath"] != str(resolved_input_ledger)
+        or provenance["inputLedgerSha256"] != sha256_file(resolved_input_ledger)
+        or provenance["selectorId"] != selector_id
+        or provenance["caseIds"] != expected_case_ids
+        or provenance["effectiveRuntimeArgumentsSha256"] != effective_runtime_arguments_sha256
+        or SHA256.fullmatch(str(provenance["benchmarkExecutableSha256"])) is None
+        or benchmark_executable.is_symlink()
+        or not benchmark_executable.is_file()
+        or sha256_file(benchmark_executable) != provenance["benchmarkExecutableSha256"]
+        or (boundary_id == "scala" and benchmark_executable_text not in arguments)
+    ):
+        raise GateError(f"NATIVE_EXECUTION_RECEIPT_INVALID:{case_id}")
+    if boundary_id == "scala":
+        scala_provenance = _exact_object(
+            candidate_provenance,
+            {
+                "kind",
+                "effectiveJvmArgumentsCapabilityPath",
+                "effectiveJvmArgumentsCapabilitySha256",
+            },
+            error=f"NATIVE_EXECUTION_PROVENANCE_INVALID:{case_id}",
+        )
+        capability_path_text = scala_provenance["effectiveJvmArgumentsCapabilityPath"]
+        if (
+            scala_provenance["kind"] != "scala"
+            or not isinstance(capability_path_text, str)
+            or not Path(capability_path_text).is_absolute()
+            or SHA256.fullmatch(str(scala_provenance["effectiveJvmArgumentsCapabilitySha256"]))
+            is None
+            or Path(capability_path_text).is_symlink()
+            or not Path(capability_path_text).is_file()
+            or sha256_file(Path(capability_path_text))
+            != scala_provenance["effectiveJvmArgumentsCapabilitySha256"]
+        ):
+            raise GateError(f"NATIVE_EXECUTION_PROVENANCE_INVALID:{case_id}")
+        required_pairs = {
+            "-bm": "avgt",
+            "-tu": "ns",
+            "-t": "1",
+            "-f": "3",
+            "-wi": "5",
+            "-i": "10",
+            "-w": "1s",
+            "-r": "1s",
+            "-rf": "json",
+            "-rff": str(block_directory / item["rawEvidencePath"]),
+        }
+        if any(
+            not _argv_pair(arguments, option, expected)
+            for option, expected in required_pairs.items()
+        ):
+            raise GateError(f"NATIVE_EXECUTION_ARGV_INVALID:{case_id}")
+    else:
+        haskell_provenance = _exact_object(
+            candidate_provenance,
+            {
+                "kind",
+                "selectedProfilePath",
+                "selectedProfileSha256",
+                "selectedProfileId",
+                "effectiveCompilerFlagsSha256",
+                "ghcupPath",
+                "ghcupSha256",
+                "stackPath",
+                "stackSha256",
+                "stackYamlPath",
+                "stackYamlSha256",
+                "selectedGhcOptions",
+            },
+            error=f"NATIVE_EXECUTION_PROVENANCE_INVALID:{case_id}",
+        )
+        selected_profile_text = haskell_provenance["selectedProfilePath"]
+        ghcup_path_text = haskell_provenance["ghcupPath"]
+        stack_path_text = haskell_provenance["stackPath"]
+        stack_yaml_path_text = haskell_provenance["stackYamlPath"]
+        selected_options = haskell_provenance["selectedGhcOptions"]
+        if (
+            haskell_provenance["kind"] != "haskell"
+            or not isinstance(selected_profile_text, str)
+            or not Path(selected_profile_text).is_absolute()
+            or not isinstance(ghcup_path_text, str)
+            or not isinstance(stack_path_text, str)
+            or not isinstance(stack_yaml_path_text, str)
+            or not Path(ghcup_path_text).is_absolute()
+            or not Path(stack_path_text).is_absolute()
+            or not Path(stack_yaml_path_text).is_absolute()
+            or SHA256.fullmatch(str(haskell_provenance["selectedProfileSha256"])) is None
+            or Path(selected_profile_text).is_symlink()
+            or not Path(selected_profile_text).is_file()
+            or sha256_file(Path(selected_profile_text))
+            != haskell_provenance["selectedProfileSha256"]
+            or haskell_provenance["selectedProfileId"] != profile
+            or haskell_provenance["effectiveCompilerFlagsSha256"]
+            != effective_runtime_arguments_sha256
+            or selected_options not in (["-O0", "-fasm"], ["-O2", "-fasm"])
+            or _canonical_sha256(selected_options) != effective_runtime_arguments_sha256
+            or SHA256.fullmatch(str(haskell_provenance["ghcupSha256"])) is None
+            or SHA256.fullmatch(str(haskell_provenance["stackSha256"])) is None
+            or SHA256.fullmatch(str(haskell_provenance["stackYamlSha256"])) is None
+        ):
+            raise GateError(f"NATIVE_EXECUTION_PROVENANCE_INVALID:{case_id}")
+        ghcup_path = Path(ghcup_path_text)
+        stack_path = Path(stack_path_text)
+        stack_yaml_path = Path(stack_yaml_path_text)
+        if (
+            any(
+                path.is_symlink() or not path.is_file()
+                for path in (ghcup_path, stack_path, stack_yaml_path)
+            )
+            or sha256_file(ghcup_path) != haskell_provenance["ghcupSha256"]
+            or sha256_file(stack_path) != haskell_provenance["stackSha256"]
+            or sha256_file(stack_yaml_path) != haskell_provenance["stackYamlSha256"]
+        ):
+            raise GateError(f"NATIVE_EXECUTION_PROVENANCE_INVALID:{case_id}")
+        selected_profile = _exact_object(
+            strict_json_load(Path(selected_profile_text)),
+            {"schemaVersion", "profileId", "ghcOptions", "optionsSha256"},
+            error=f"NATIVE_EXECUTION_PROVENANCE_INVALID:{case_id}",
+        )
+        if (
+            selected_profile["schemaVersion"] != "s1.4x-haskell-selected-profile-v1"
+            or selected_profile["profileId"] != profile
+            or selected_profile["optionsSha256"] != effective_runtime_arguments_sha256
+            or selected_profile["ghcOptions"] != selected_options
+        ):
+            raise GateError(f"NATIVE_EXECUTION_PROVENANCE_INVALID:{case_id}")
+        selector = next(
+            (
+                entry
+                for entry in plan.get("familySelectors", [])
+                if isinstance(entry, dict) and entry.get("selectorId") == selector_id
+            ),
+            None,
+        )
+        criterion_prefix = selector.get("criterionPrefix") if isinstance(selector, dict) else None
+        selector_case_ids = (
+            selector.get("expectedCaseIds") if isinstance(selector, dict) else None
+        )
+        raw_path = str(block_directory / item["rawEvidencePath"])
+        expected_arguments = [
+            str(ghcup_path),
+            "run",
+            "--ghc",
+            "9.10.3",
+            "--stack",
+            "3.11.1",
+            "--",
+            str(stack_path),
+            "--stack-yaml",
+            str(stack_yaml_path),
+            "--system-ghc",
+            "--no-install-ghc",
+            "bench",
+            f"--ghc-options={' '.join(selected_options)}",
+            (
+                "--benchmark-arguments=--time-limit 5 "
+                f"--json {raw_path} --match prefix {criterion_prefix} "
+                "+RTS -N1 -RTS"
+            ),
+        ]
+        if (
+            not isinstance(criterion_prefix, str)
+            or not criterion_prefix
+            or selector_case_ids != expected_case_ids
+            or arguments != expected_arguments
+        ):
+            raise GateError(f"NATIVE_EXECUTION_ARGV_INVALID:{case_id}")
+
+
+def _parse_jmh_raw(
+    value: Any,
+    *,
+    case_id: str,
+    native_case: Mapping[str, Any],
+    native_statistics_case: Mapping[str, Any],
+) -> None:
+    if not isinstance(value, list) or len(value) != 1 or not isinstance(value[0], dict):
+        raise GateError(f"JMH_RAW_DOCUMENT_INVALID:{case_id}")
+    result = value[0]
+    metric = result.get("primaryMetric")
+    raw_data = metric.get("rawData") if isinstance(metric, dict) else None
+    score = metric.get("score") if isinstance(metric, dict) else None
+    score_confidence = metric.get("scoreConfidence") if isinstance(metric, dict) else None
+    if (
+        result.get("jmhVersion") != "1.37"
+        or not isinstance(result.get("benchmark"), str)
+        or not result["benchmark"]
+        or result.get("mode") != "avgt"
+        or result.get("threads") != 1
+        or result.get("forks") != 3
+        or result.get("warmupIterations") != 5
+        or result.get("warmupTime") != "1 s"
+        or result.get("measurementIterations") != 10
+        or result.get("measurementTime") != "1 s"
+        or not isinstance(metric, dict)
+        or metric.get("scoreUnit") != "ns/op"
+        or not isinstance(score_confidence, list)
+        or len(score_confidence) != 2
+        or _number(score_confidence[0]) is None
+        or _number(score_confidence[1]) is None
+        or float(score_confidence[0]) > float(score_confidence[1])
+        or not isinstance(score, (int, float))
+        or isinstance(score, bool)
+        or not math.isfinite(float(score))
+        or float(score) <= 0.0
+        or not isinstance(raw_data, list)
+        or len(raw_data) != 3
+        or any(
+            not isinstance(fork, list)
+            or len(fork) != 10
+            or any(
+                not isinstance(sample, (int, float))
+                or isinstance(sample, bool)
+                or not math.isfinite(float(sample))
+                or float(sample) <= 0.0
+                for sample in fork
+            )
+            for fork in raw_data
+        )
+        or native_case.get("samples") != 30
+        or native_case.get("warmupIterations") != 5
+        or native_case.get("measurementIterations") != 10
+        or not math.isclose(
+            float(score),
+            float(native_case.get("nativeValue", math.nan)),
+            rel_tol=1e-12,
+            abs_tol=1e-9,
+        )
+    ):
+        raise GateError(f"JMH_RAW_CONTRACT_INVALID:{case_id}")
+    samples = [float(sample) for fork in raw_data for sample in fork]
+    _validate_native_statistics_case(
+        native_statistics_case,
+        case_id=case_id,
+        expected={
+            "nativeSampleCount": len(samples),
+            "nativeP95": _nearest_rank_p95(samples),
+            "confidenceLevel": None,
+            "confidenceLow": float(score_confidence[0]),
+            "confidenceHigh": float(score_confidence[1]),
+            "dispersionMetric": "p95-minus-median-ns-per-invocation",
+            "dispersionValue": (_nearest_rank_p95(samples) - statistics.median(samples)),
+            "nativeUnit": "ns",
+        },
+        error=f"JMH_NATIVE_STATISTICS_MISMATCH:{case_id}",
+    )
+
+
+def _parse_criterion_report(
+    report_value: Any,
+    *,
+    report_number: int,
+    case_id: str,
+    native_case: Mapping[str, Any],
+    native_statistics_case: Mapping[str, Any],
+) -> None:
+    report = _exact_object(
+        report_value,
+        {
+            "reportNumber",
+            "reportName",
+            "reportKeys",
+            "reportMeasured",
+            "reportAnalysis",
+            "reportOutliers",
+            "reportKDEs",
+        },
+        error=f"CRITERION_RAW_CONTRACT_INVALID:{case_id}",
+    )
+    measurements = report["reportMeasured"]
+    if (
+        report["reportNumber"] != report_number
+        or report["reportName"] != case_id
+        or report["reportKeys"] != CRITERION_MEASUREMENT_KEYS
+        or not isinstance(measurements, list)
+        or len(measurements) < 2
+        or native_case.get("samples") != len(measurements)
+        or native_case.get("warmupIterations") != 0
+        or native_case.get("measurementIterations") != len(measurements)
+    ):
+        raise GateError(f"CRITERION_RAW_CONTRACT_INVALID:{case_id}")
+    samples: list[float] = []
+    bootstrap_samples: list[float] = []
+    iteration_counts: list[float] = []
+    elapsed_times: list[float] = []
+    for measurement in measurements:
+        if not isinstance(measurement, list) or len(measurement) != 12:
+            raise GateError(f"CRITERION_RAW_CONTRACT_INVALID:{case_id}")
+        elapsed = _number(measurement[0], positive=True)
+        cpu_time = _number(measurement[1])
+        cycles = measurement[2]
+        iterations = measurement[3]
+        optional_integers = measurement[4:8]
+        optional_seconds = measurement[8:12]
+        if (
+            elapsed is None
+            or cpu_time is None
+            or cpu_time < 0.0
+            or type(cycles) is not int
+            or cycles < 0
+            or type(iterations) is not int
+            or iterations < 1
+            or any(
+                item is not None and (type(item) is not int or item < 0)
+                for item in optional_integers
+            )
+            or any(
+                item is not None and (_number(item) is None or float(item) < 0.0)
+                for item in optional_seconds
+            )
+        ):
+            raise GateError(f"CRITERION_RAW_CONTRACT_INVALID:{case_id}")
+        samples.append(elapsed / iterations)
+        if elapsed >= CRITERION_BOOTSTRAP_THRESHOLD_SECONDS:
+            bootstrap_samples.append(elapsed / iterations)
+        iteration_counts.append(float(iterations))
+        elapsed_times.append(elapsed)
+    analysis = _exact_object(
+        report["reportAnalysis"],
+        {"anRegress", "anMean", "anStdDev", "anOutlierVar"},
+        error=f"CRITERION_RAW_CONTRACT_INVALID:{case_id}",
+    )
+    regressions = analysis["anRegress"]
+    if not isinstance(regressions, list) or not regressions:
+        raise GateError(f"CRITERION_RAW_CONTRACT_INVALID:{case_id}")
+    time_regressions = [
+        regression
+        for regression in regressions
+        if isinstance(regression, dict) and regression.get("regResponder") == "time"
+    ]
+    if len(time_regressions) != 1:
+        raise GateError(f"CRITERION_RAW_CONTRACT_INVALID:{case_id}")
+    time_regression = _exact_object(
+        time_regressions[0],
+        {"regResponder", "regCoeffs", "regRSquare"},
+        error=f"CRITERION_RAW_CONTRACT_INVALID:{case_id}",
+    )
+    coefficients = time_regression["regCoeffs"]
+    if (
+        time_regression["regResponder"] != "time"
+        or not isinstance(coefficients, dict)
+        or "iters" not in coefficients
+    ):
+        raise GateError(f"CRITERION_RAW_CONTRACT_INVALID:{case_id}")
+    regression_time = _estimate(
+        coefficients["iters"],
+        error=f"CRITERION_RAW_CONTRACT_INVALID:{case_id}",
+    )
+    _estimate(
+        time_regression["regRSquare"],
+        error=f"CRITERION_RAW_CONTRACT_INVALID:{case_id}",
+    )
+    mean = _estimate(
+        analysis["anMean"],
+        error=f"CRITERION_RAW_CONTRACT_INVALID:{case_id}",
+    )
+    standard_deviation = _estimate(
+        analysis["anStdDev"],
+        error=f"CRITERION_RAW_CONTRACT_INVALID:{case_id}",
+    )
+    if (
+        len(bootstrap_samples) < 2
+        or len(set(iteration_counts)) < 2
+        or not _same_number(
+            regression_time["point"],
+            _ols_slope(iteration_counts, elapsed_times),
+        )
+        or not _same_number(
+            mean["point"],
+            statistics.fmean(bootstrap_samples),
+        )
+        or not _same_number(
+            standard_deviation["point"],
+            statistics.stdev(bootstrap_samples),
+        )
+        or not _same_number(
+            native_case.get("nativeValue"),
+            regression_time["point"],
+        )
+    ):
+        raise GateError(f"CRITERION_RAW_CONTRACT_INVALID:{case_id}")
+    outlier_variance = _exact_object(
+        analysis["anOutlierVar"],
+        {"ovEffect", "ovDesc", "ovFraction"},
+        error=f"CRITERION_RAW_CONTRACT_INVALID:{case_id}",
+    )
+    outliers = _exact_object(
+        report["reportOutliers"],
+        {"samplesSeen", "lowSevere", "lowMild", "highMild", "highSevere"},
+        error=f"CRITERION_RAW_CONTRACT_INVALID:{case_id}",
+    )
+    kdes = report["reportKDEs"]
+    if (
+        outlier_variance["ovEffect"] not in {"Unaffected", "Slight", "Moderate", "Severe"}
+        or not isinstance(outlier_variance["ovDesc"], str)
+        or _number(outlier_variance["ovFraction"]) is None
+        or not 0.0 <= float(outlier_variance["ovFraction"]) <= 1.0
+        or type(outliers["samplesSeen"]) is not int
+        or outliers["samplesSeen"] != len(bootstrap_samples)
+        or any(
+            type(outliers[field]) is not int or outliers[field] < 0
+            for field in ("lowSevere", "lowMild", "highMild", "highSevere")
+        )
+        or not isinstance(kdes, list)
+        or not kdes
+    ):
+        raise GateError(f"CRITERION_RAW_CONTRACT_INVALID:{case_id}")
+    for raw_kde in kdes:
+        kde = _exact_object(
+            raw_kde,
+            {"kdeType", "kdeValues", "kdePDF"},
+            error=f"CRITERION_RAW_CONTRACT_INVALID:{case_id}",
+        )
+        if (
+            kde["kdeType"] != "time"
+            or not isinstance(kde["kdeValues"], list)
+            or not isinstance(kde["kdePDF"], list)
+            or not kde["kdeValues"]
+            or len(kde["kdeValues"]) != len(kde["kdePDF"])
+            or any(_number(item) is None for item in kde["kdeValues"])
+            or any(_number(item) is None or float(item) < 0.0 for item in kde["kdePDF"])
+        ):
+            raise GateError(f"CRITERION_RAW_CONTRACT_INVALID:{case_id}")
+    _validate_native_statistics_case(
+        native_statistics_case,
+        case_id=case_id,
+        expected={
+            "nativeSampleCount": len(samples),
+            "nativeP95": _nearest_rank_p95(samples),
+            "confidenceLevel": regression_time["confidenceLevel"],
+            "confidenceLow": regression_time["confidenceLow"],
+            "confidenceHigh": regression_time["confidenceHigh"],
+            "dispersionMetric": ("criterion-bootstrap-standard-deviation-seconds-per-invocation"),
+            "dispersionValue": standard_deviation["point"],
+            "nativeUnit": "s",
+        },
+        error=f"CRITERION_NATIVE_STATISTICS_MISMATCH:{case_id}",
+    )
+
+
+def _parse_criterion_family_raw(
+    value: Any,
+    *,
+    native_cases: list[dict[str, Any]],
+    native_statistics_cases: list[dict[str, Any]],
+) -> None:
+    expected_case_ids = [str(case["caseId"]) for case in native_cases]
+    if (
+        not isinstance(value, list)
+        or len(value) != 3
+        or value[0] != "criterion"
+        or value[1] != "1.6.4.0"
+        or not isinstance(value[2], list)
+        or not 2 <= len(native_cases) <= 45
+        or len(value[2]) != len(native_cases)
+    ):
+        raise GateError("CRITERION_RAW_DOCUMENT_INVALID")
+    actual_names = [
+        report.get("reportName") if isinstance(report, dict) else None for report in value[2]
+    ]
+    if actual_names != expected_case_ids:
+        raise GateError("CRITERION_RAW_CASE_ORDER_INVALID")
+    for report_number, (report, native_case, native_statistics_case) in enumerate(
+        zip(
+            value[2],
+            native_cases,
+            native_statistics_cases,
+            strict=True,
+        )
+    ):
+        _parse_criterion_report(
+            report,
+            report_number=report_number,
+            case_id=expected_case_ids[report_number],
+            native_case=native_case,
+            native_statistics_case=native_statistics_case,
+        )
+
+
 def validate_native_contract_evidence(
     value: Any,
     *,
@@ -104,6 +862,12 @@ def validate_native_contract_evidence(
     selector_id: str,
     block_directory: Path,
     native_cases: list[dict[str, Any]],
+    native_statistics_cases: list[dict[str, Any]] | None = None,
+    plan_path: Path | None = None,
+    fixture_root_path: Path | None = None,
+    input_ledger_path: Path | None = None,
+    effective_runtime_arguments_sha256: str | None = None,
+    profile: str | None = None,
 ) -> dict[str, Any]:
     """Candidate framework별 frozen timing 설정과 raw evidence bytes를 검증한다."""
 
@@ -177,8 +941,7 @@ def validate_native_contract_evidence(
     }
     if (
         boundary_id not in expected_configuration
-        or document["schemaVersion"]
-        != "s1.4x-native-contract-validation-v1"
+        or document["schemaVersion"] != "s1.4x-native-contract-validation-v1"
         or document["boundaryId"] != boundary_id
         or document["selectorId"] != selector_id
         or document["framework"] != expected_framework[boundary_id]
@@ -189,10 +952,34 @@ def validate_native_contract_evidence(
         or not isinstance(document["cases"], list)
     ):
         raise GateError("NATIVE_CONTRACT_CONFIGURATION_INVALID")
+    if boundary_id in {"scala", "haskell"} and (
+        not isinstance(native_statistics_cases, list)
+        or len(native_statistics_cases) != len(native_cases)
+        or not native_cases
+        or plan_path is None
+        or fixture_root_path is None
+        or input_ledger_path is None
+        or SHA256.fullmatch(str(effective_runtime_arguments_sha256)) is None
+        or not isinstance(profile, str)
+        or not profile
+    ):
+        raise GateError("NATIVE_STATISTICS_CASES_INVALID")
     actual_case_ids: list[str] = []
-    for evidence, native_case in zip(
+    expected_case_ids = [str(case["caseId"]) for case in native_cases]
+    statistics_cases: list[dict[str, Any] | None] = (
+        list(native_statistics_cases)
+        if native_statistics_cases is not None
+        else [None] * len(native_cases)
+    )
+    if len(document["cases"]) != len(native_cases):
+        raise GateError("NATIVE_CONTRACT_CASE_ORDER_INVALID")
+    haskell_raw_identities: set[tuple[str, str]] = set()
+    haskell_receipt_identities: set[tuple[str, str]] = set()
+    haskell_raw_path: Path | None = None
+    for evidence, native_case, native_statistics_case in zip(
         document["cases"],
         native_cases,
+        statistics_cases,
         strict=True,
     ):
         item = _exact_object(
@@ -203,9 +990,7 @@ def validate_native_contract_evidence(
         case_id = native_case.get("caseId")
         raw_samples = native_case.get("rawSamplesNs")
         sample_count = (
-            len(raw_samples)
-            if isinstance(raw_samples, list)
-            else native_case.get("samples")
+            len(raw_samples) if isinstance(raw_samples, list) else native_case.get("samples")
         )
         raw_path_text = item["rawEvidencePath"]
         if (
@@ -218,13 +1003,13 @@ def validate_native_contract_evidence(
         if boundary_id.startswith("python-"):
             if (
                 raw_path_text is not None
+                or item["executionReceiptPath"] is not None
+                or item["executionReceiptSha256"] is not None
                 or not isinstance(raw_samples, list)
                 or len(raw_samples) != 30
                 or item["rawEvidenceSha256"] != _canonical_sha256(raw_samples)
             ):
-                raise GateError(
-                    f"NATIVE_CONTRACT_RAW_EVIDENCE_INVALID:{case_id}"
-                )
+                raise GateError(f"NATIVE_CONTRACT_RAW_EVIDENCE_INVALID:{case_id}")
             actual_case_ids.append(str(case_id))
             continue
         if (
@@ -236,9 +1021,7 @@ def validate_native_contract_evidence(
             raise GateError(f"NATIVE_CONTRACT_RAW_PATH_INVALID:{case_id}")
         raw_path = block_directory / raw_path_text
         try:
-            raw_path.resolve(strict=True).relative_to(
-                block_directory.resolve(strict=True)
-            )
+            raw_path.resolve(strict=True).relative_to(block_directory.resolve(strict=True))
         except (OSError, ValueError) as exc:
             raise GateError(f"NATIVE_CONTRACT_RAW_PATH_INVALID:{case_id}") from exc
         if (
@@ -248,12 +1031,63 @@ def validate_native_contract_evidence(
             or sha256_file(raw_path) != item["rawEvidenceSha256"]
         ):
             raise GateError(f"NATIVE_CONTRACT_RAW_EVIDENCE_INVALID:{case_id}")
+        if (
+            plan_path is None
+            or fixture_root_path is None
+            or input_ledger_path is None
+            or effective_runtime_arguments_sha256 is None
+            or profile is None
+        ):
+            raise GateError("NATIVE_EXECUTION_CONTEXT_INVALID")
+        _validate_execution_receipt(
+            item=item,
+            boundary_id=boundary_id,
+            selector_id=selector_id,
+            case_id=str(case_id),
+            expected_case_ids=expected_case_ids,
+            block_directory=block_directory,
+            plan_path=plan_path,
+            fixture_root_path=fixture_root_path,
+            input_ledger_path=input_ledger_path,
+            effective_runtime_arguments_sha256=str(effective_runtime_arguments_sha256),
+            profile=profile,
+        )
+        if boundary_id == "scala":
+            if native_statistics_case is None:
+                raise GateError(f"NATIVE_STATISTICS_CASE_INVALID:{case_id}")
+            _parse_jmh_raw(
+                strict_json_load(raw_path),
+                case_id=str(case_id),
+                native_case=native_case,
+                native_statistics_case=native_statistics_case,
+            )
+        elif boundary_id == "haskell":
+            if native_statistics_case is None:
+                raise GateError(f"NATIVE_STATISTICS_CASE_INVALID:{case_id}")
+            haskell_raw_identities.add((raw_path_text, str(item["rawEvidenceSha256"])))
+            haskell_receipt_identities.add(
+                (
+                    str(item["executionReceiptPath"]),
+                    str(item["executionReceiptSha256"]),
+                )
+            )
+            haskell_raw_path = raw_path
         actual_case_ids.append(str(case_id))
-    if (
-        len(document["cases"]) != len(native_cases)
-        or actual_case_ids != [str(case["caseId"]) for case in native_cases]
-    ):
+    if actual_case_ids != expected_case_ids:
         raise GateError("NATIVE_CONTRACT_CASE_ORDER_INVALID")
+    if boundary_id == "haskell":
+        if (
+            len(haskell_raw_identities) != 1
+            or len(haskell_receipt_identities) != 1
+            or haskell_raw_path is None
+            or native_statistics_cases is None
+        ):
+            raise GateError("CRITERION_FAMILY_EVIDENCE_NOT_SHARED")
+        _parse_criterion_family_raw(
+            strict_json_load(haskell_raw_path),
+            native_cases=native_cases,
+            native_statistics_cases=native_statistics_cases,
+        )
     return document
 
 
@@ -321,20 +1155,16 @@ def build_block_result(
         or actual_affinity_cpu_set != plan["execution"]["cpuSet"]
     ):
         raise GateError("CANDIDATE_NATIVE_RUN_IDENTITY_INVALID")
-    qualification_document = (
-        qualification if isinstance(qualification, dict) else {}
-    )
+    qualification_document = qualification if isinstance(qualification, dict) else {}
     qualification_subject = qualification_document.get("subject")
     qualification_run = qualification_document.get("run")
     host_validity = qualification_document.get("hostValidity")
     if (
-        qualification_document.get("schemaVersion")
-        != "s1.4x-timeout-qualification-v1"
+        qualification_document.get("schemaVersion") != "s1.4x-timeout-qualification-v1"
         or qualification_document.get("phase") != "MEASUREMENT"
         or qualification_document.get("measurementEntered") is not True
         or not isinstance(qualification_subject, dict)
-        or qualification_subject.get("benchmarkSubjectCommit")
-        != benchmark_subject_commit
+        or qualification_subject.get("benchmarkSubjectCommit") != benchmark_subject_commit
         or not isinstance(qualification_run, dict)
         or qualification_run.get("runId") != run_id
         or qualification_run.get("rotationId") != rotation_id
@@ -405,9 +1235,7 @@ def build_block_result(
         )
     if actual_case_ids != expected_case_ids:
         raise GateError("CANDIDATE_NATIVE_CASE_ORDER_INVALID")
-    expected_rotation = plan["execution"]["candidateOrderBlocks"][
-        outer_repetition - 1
-    ]
+    expected_rotation = plan["execution"]["candidateOrderBlocks"][outer_repetition - 1]
     scheduling_group = "Scala" if boundary_id == "scala" else "Haskell"
     return {
         "schemaVersion": "s1.4x-benchmark-block-result-v1",
@@ -440,9 +1268,7 @@ def build_block_result(
             "startedAt": document["startedAt"],
             "finishedAt": document["finishedAt"],
             "status": "PASS",
-            "nativeReportPath": (
-                f"{run_id}/{rotation_id}/{boundary_id}/{family_id}/native.json"
-            ),
+            "nativeReportPath": (f"{run_id}/{rotation_id}/{boundary_id}/{family_id}/native.json"),
             "nativeReportSha256": native_report_sha256,
         },
         "environment": {
@@ -450,9 +1276,7 @@ def build_block_result(
             "hostValidityArtifactSha256": host_artifact_sha,
             "toolchainProvenanceSha256": toolchain_provenance_sha256,
             "fixtureFreezeIdentity": plan["fixtureFreezeIdentity"],
-            "effectiveRuntimeArgumentsSha256": document[
-                "effectiveRuntimeArgumentsSha256"
-            ],
+            "effectiveRuntimeArgumentsSha256": document["effectiveRuntimeArgumentsSha256"],
         },
         "cases": measured_cases,
     }
@@ -501,8 +1325,7 @@ def main(argv: list[str] | None = None) -> int:
             or native.get("boundaryId") != arguments.boundary
             or native.get("selectorId") != arguments.selector
             or native.get("inputLedgerSha256") != sha256_file(input_ledger_path)
-            or native.get("nativeContractValidationSha256")
-            != sha256_file(native_contract_path)
+            or native.get("nativeContractValidationSha256") != sha256_file(native_contract_path)
         ):
             raise GateError("CANDIDATE_NATIVE_ARGV_MISMATCH")
         validate_input_ledger(
@@ -516,12 +1339,43 @@ def main(argv: list[str] | None = None) -> int:
         native_cases = native.get("cases")
         if not isinstance(native_cases, list):
             raise GateError("CANDIDATE_NATIVE_CASES_INVALID")
+        statistics_document = _exact_object(
+            strict_json_load(statistics_path),
+            {
+                "schemaVersion",
+                "boundaryId",
+                "selectorId",
+                "nativeReportSha256",
+                "cases",
+                "status",
+            },
+            error="CANDIDATE_NATIVE_STATISTICS_INVALID",
+        )
+        statistics_cases = statistics_document["cases"]
+        if (
+            statistics_document["schemaVersion"] != "s1.4x-native-statistics-v1"
+            or statistics_document["boundaryId"] != arguments.boundary
+            or statistics_document["selectorId"] != arguments.selector
+            or statistics_document["nativeReportSha256"] != sha256_file(native_path)
+            or statistics_document["status"] != "PASS"
+            or not isinstance(statistics_cases, list)
+        ):
+            raise GateError("CANDIDATE_NATIVE_STATISTICS_INVALID")
         validate_native_contract_evidence(
             strict_json_load(native_contract_path),
             boundary_id=arguments.boundary,
             selector_id=arguments.selector,
             block_directory=block_dir,
             native_cases=native_cases,
+            native_statistics_cases=statistics_cases,
+            plan_path=plan_path,
+            fixture_root_path=(
+                repo / "workspaces/decision-platform/research/"
+                "s1-4x-numeric-parity/contract/fixtures"
+            ),
+            input_ledger_path=input_ledger_path,
+            effective_runtime_arguments_sha256=str(native["effectiveRuntimeArgumentsSha256"]),
+            profile=str(native["profile"]),
         )
         report = build_block_result(
             plan=plan,
@@ -534,8 +1388,7 @@ def main(argv: list[str] | None = None) -> int:
             benchmark_subject_commit=arguments.benchmark_subject_commit,
             native_report_sha256=sha256_file(native_path),
             toolchain_provenance_sha256=sha256_file(
-                repo
-                / "workspaces/decision-platform/research/s1-4x-numeric-parity/"
+                repo / "workspaces/decision-platform/research/s1-4x-numeric-parity/"
                 "contract/toolchain-provenance.v1.json"
             ),
             actual_affinity_cpu_set=sorted(os.sched_getaffinity(0)),
