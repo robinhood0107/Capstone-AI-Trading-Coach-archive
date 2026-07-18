@@ -47,7 +47,7 @@ S1_4X_FIXTURE_ROOT="$temporary/empty-fixtures" \
 missing_fixture_exit=$?
 set -e
 [[ "$missing_fixture_exit" -eq 70 ]]
-! grep -Eq '(^|[[:space:]])(Exception|Error)(:|[[:space:]])|at [A-Za-z0-9_.]+\\(' \
+! grep -Eq '(^|[[:space:]])(Exception|Error)(:|[[:space:]])|at [A-Za-z0-9_.]+\(' \
   "$temporary/missing-fixture.stderr"
 
 set +e
@@ -58,7 +58,7 @@ S1_4X_FIXTURE_ROOT="$temporary/empty-fixtures" \
 missing_plan_exit=$?
 set -e
 [[ "$missing_plan_exit" -eq 70 ]]
-! grep -Eq '(^|[[:space:]])(Exception|Error)(:|[[:space:]])|at [A-Za-z0-9_.]+\\(' \
+! grep -Eq '(^|[[:space:]])(Exception|Error)(:|[[:space:]])|at [A-Za-z0-9_.]+\(' \
   "$temporary/missing-plan.stderr"
 
 printf 'SCALA_BENCHMARK_SETUP_FAIL_CLOSED_PASS missingFixture=70 missingPlan=70\n'
