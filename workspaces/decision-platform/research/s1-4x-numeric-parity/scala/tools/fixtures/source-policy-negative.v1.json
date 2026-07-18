@@ -80,6 +80,30 @@
       "expectedDisposition": "SEMANTIC_REJECT"
     },
     {
+      "fixtureId": "qualified-given-conversion",
+      "file": "qualified-given-conversion.scala",
+      "expectedSymbol": "scala.Conversion",
+      "expectedDisposition": "SEMANTIC_REJECT"
+    },
+    {
+      "fixtureId": "renamed-given-conversion",
+      "file": "renamed-given-conversion.scala",
+      "expectedSymbol": "scala.Conversion",
+      "expectedDisposition": "SEMANTIC_REJECT"
+    },
+    {
+      "fixtureId": "runtime-checked-annotation",
+      "file": "runtime-checked-annotation.scala",
+      "expectedSymbol": "scala.annotation.internal.RuntimeChecked",
+      "expectedDisposition": "SEMANTIC_REJECT"
+    },
+    {
+      "fixtureId": "experimental-language-import",
+      "file": "experimental-language-import.scala",
+      "expectedSymbol": "scala.language.experimental",
+      "expectedDisposition": "SEMANTIC_REJECT"
+    },
+    {
       "fixtureId": "disable-syntax-null",
       "file": "disable-syntax-null.scala",
       "expectedSymbol": "DisableSyntax.null",
