@@ -253,8 +253,14 @@ class NumericParityCorrectnessWorkflowTests(unittest.TestCase):
             "mypy app",
             "mypy src benchmarks",
             "pytest -q",
+            "test_s1_4r_regression_boundary.py",
+            (
+                "--deselect=tests/test_production_isolation.py::"
+                "test_branch_diff_is_confined_to_the_research_project_and_two_workflows"
+            ),
         ):
             self.assertIn(token, regression)
+        self.assertNotIn("S1_4R_EXECUTION_BOUNDARY=oci", regression)
 
 
 class NumericParityBenchmarkWorkflowTests(unittest.TestCase):
