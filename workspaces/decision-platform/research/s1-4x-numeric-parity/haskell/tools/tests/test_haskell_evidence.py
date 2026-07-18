@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -15,6 +16,7 @@ SPEC = importlib.util.spec_from_file_location("haskell_evidence", MODULE_PATH)
 if SPEC is None or SPEC.loader is None:
     raise RuntimeError("unable to load haskell_evidence.py")
 haskell_evidence = importlib.util.module_from_spec(SPEC)
+sys.modules[SPEC.name] = haskell_evidence
 SPEC.loader.exec_module(haskell_evidence)
 
 
