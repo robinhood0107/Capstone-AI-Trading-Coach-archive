@@ -27,6 +27,10 @@ ANSI = re.compile(r"\x1b\[[0-9;]*m")
 DIAGNOSTIC = re.compile(
     r"forbidden semantic symbol: ([^ \r\n]+) resolved=([^ \r\n]+)"
 )
+TEST_DEPENDENCY_DIRECTIVE = re.compile(
+    r"//> using test\.dep "
+    r"([A-Za-z0-9_.-]+:{1,3}[A-Za-z0-9_.-]+:[A-Za-z0-9_.+-]+)"
+)
 
 
 def sha256_bytes(payload: bytes) -> str:
@@ -165,6 +169,25 @@ def parse_classpath(stdout: bytes) -> tuple[str, list[str]]:
     return classpath, entries
 
 
+def project_test_dependencies(project_source: Path) -> list[str]:
+    """명시 source compile에서도 test scope가 빠지지 않도록 project.scala의 핀을 읽는다."""
+
+    dependencies: list[str] = []
+    for line in project_source.read_text(encoding="utf-8").splitlines():
+        if not line.startswith("//> using test.dep"):
+            continue
+        matched = TEST_DEPENDENCY_DIRECTIVE.fullmatch(line)
+        if matched is None:
+            raise SemanticPolicyError("TEST_DEPENDENCY_DIRECTIVE_INVALID")
+        dependency = matched.group(1)
+        if dependency in dependencies:
+            raise SemanticPolicyError("TEST_DEPENDENCY_DIRECTIVE_DUPLICATE")
+        dependencies.append(dependency)
+    if not dependencies:
+        raise SemanticPolicyError("TEST_DEPENDENCY_DIRECTIVE_MISSING")
+    return dependencies
+
+
 def extract_policy_symbols(rule_source: Path) -> list[str]:
     source = rule_source.read_text(encoding="utf-8")
     match = re.search(
@@ -181,6 +204,40 @@ def scalafix_rule_classpath_sha256(scalafix: Path) -> str:
     with zipfile.ZipFile(scalafix) as archive:
         lock = archive.read("META-INF/coursier/lock-file")
     return sha256_bytes(lock)
+
+
+def clean_semanticdb_compile_command(
+    *,
+    scala_cli: Path,
+    scala_root: Path,
+    semanticdb_root: Path,
+    sources: list[Path],
+    test_dependencies: list[str],
+) -> list[str]:
+    """명시 파일 closure에 test dependency를 일반 compile 입력으로 승격한다."""
+
+    dependency_arguments = [
+        argument
+        for dependency in test_dependencies
+        for argument in ("--dependency", dependency)
+    ]
+    return [
+        str(scala_cli),
+        "--power",
+        "compile",
+        *map(str, sources),
+        "--server=false",
+        "--jvm",
+        "system",
+        "--coursier-validate-checksums",
+        *dependency_arguments,
+        "--semanticdb",
+        "--semanticdb-targetroot",
+        str(semanticdb_root),
+        "--semanticdb-sourceroot",
+        str(scala_root),
+        "--print-classpath",
+    ]
 
 
 def process_evidence(
@@ -374,23 +431,15 @@ def run(arguments: argparse.Namespace) -> Path:
     if syntactic.returncode != 0:
         raise SemanticPolicyError("CLEAN_DISABLE_SYNTAX_FAILED")
 
-    compile_command = [
-        str(scala_cli),
-        "--power",
-        "compile",
-        *map(str, sources),
-        "--test",
-        "--server=false",
-        "--jvm",
-        "system",
-        "--coursier-validate-checksums",
-        "--semanticdb",
-        "--semanticdb-targetroot",
-        str(semanticdb_root),
-        "--semanticdb-sourceroot",
-        str(scala_root),
-        "--print-classpath",
-    ]
+    compile_command = clean_semanticdb_compile_command(
+        scala_cli=scala_cli,
+        scala_root=scala_root,
+        semanticdb_root=semanticdb_root,
+        sources=sources,
+        test_dependencies=project_test_dependencies(
+            scala_root / "project.scala"
+        ),
+    )
     compiled = run_process(
         compile_command,
         cwd=scala_root,
