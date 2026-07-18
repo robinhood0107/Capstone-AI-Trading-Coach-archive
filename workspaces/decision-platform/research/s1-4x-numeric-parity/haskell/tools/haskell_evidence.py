@@ -11,7 +11,9 @@ import os
 import re
 import subprocess
 import sys
+import tarfile
 import tempfile
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
@@ -454,6 +456,272 @@ def _has_prefix(module_name: str, prefixes: Iterable[str]) -> bool:
     )
 
 
+def parse_show_iface_home_imports(
+    output: str,
+    *,
+    candidate_modules: set[str],
+) -> tuple[str, ...]:
+    """`ghc --show-iface`의 direct module dependencies에서 candidate home edge만 읽는다."""
+
+    section = re.search(
+        r"(?ms)^direct module dependencies:(.*?)^boot module dependencies:",
+        output,
+    )
+    if section is None:
+        raise EvidenceError("GHC interface direct dependency section is missing")
+    imports: list[str] = []
+    for token in section.group(1).split():
+        module_name = token.rsplit(":", 1)[-1]
+        if module_name in candidate_modules:
+            imports.append(module_name)
+    if len(imports) != len(set(imports)):
+        raise EvidenceError("GHC interface repeats a direct home dependency")
+    return tuple(sorted(imports, key=str.encode))
+
+
+def _shortest_module_path(
+    graph: Mapping[str, tuple[str, ...]],
+    *,
+    start: str,
+    target: str,
+) -> list[str]:
+    queue: deque[list[str]] = deque([[start]])
+    visited = {start}
+    while queue:
+        path = queue.popleft()
+        current = path[-1]
+        if current == target:
+            return path
+        for imported in graph.get(current, ()):
+            if imported in graph and imported not in visited:
+                visited.add(imported)
+                queue.append([*path, imported])
+    raise EvidenceError(f"vector source graph has no path from {start} to {target}")
+
+
+def derive_vector_transitive_edges(
+    sources: Mapping[str, bytes],
+    *,
+    source_sha256: str,
+    provenance: str,
+) -> list[dict[str, str]]:
+    """Actual vector source imports에서 두 unsafe leaf와 한 compiler-primop leaf를 도출한다."""
+
+    parsed = {
+        module_name: parse_haskell_module(payload)
+        for module_name, payload in sources.items()
+    }
+    if set(parsed) != set(sources):
+        raise EvidenceError("vector source module identity is ambiguous")
+    for expected_name, module in parsed.items():
+        if module.module_name != expected_name:
+            raise EvidenceError("vector source map key does not match its module declaration")
+    graph = {module_name: module.imports for module_name, module in parsed.items()}
+    reachable: set[str] = set()
+    queue: deque[str] = deque(["Data.Vector.Unboxed"])
+    while queue:
+        current = queue.popleft()
+        if current in reachable:
+            continue
+        if current not in graph:
+            raise EvidenceError(f"vector source graph is missing module {current}")
+        reachable.add(current)
+        queue.extend(imported for imported in graph[current] if imported in graph)
+    unsafe_targets = sorted(
+        module_name
+        for module_name in reachable
+        if "Unsafe.Coerce" in graph[module_name]
+    )
+    expected_unsafe_targets = [
+        "Data.Vector.Primitive",
+        "Data.Vector.Primitive.Mutable",
+    ]
+    if unsafe_targets != expected_unsafe_targets:
+        raise EvidenceError(
+            "vector unsafe target set drift: "
+            f"expected={expected_unsafe_targets}, actual={unsafe_targets}"
+        )
+    check_module = "Data.Vector.Internal.Check"
+    check_source = sources.get(check_module)
+    if (
+        check_module not in reachable
+        or check_source is None
+        or "GHC.Exts" not in graph[check_module]
+        or re.search(rb"\bInt#", check_source) is None
+    ):
+        raise EvidenceError("vector compiler-primop edge drift")
+
+    def identity(import_path: str, edge_kind: str) -> dict[str, str]:
+        return {
+            "package": "vector",
+            "version": "0.13.2.0",
+            "sourceSha256": source_sha256,
+            "importPath": import_path,
+            "provenance": provenance,
+            "edgeKind": edge_kind,
+        }
+
+    primitive_path = _shortest_module_path(
+        graph,
+        start="Data.Vector.Unboxed",
+        target="Data.Vector.Primitive",
+    )
+    mutable_path = _shortest_module_path(
+        graph,
+        start="Data.Vector.Unboxed",
+        target="Data.Vector.Primitive.Mutable",
+    )
+    check_path = _shortest_module_path(
+        graph,
+        start="Data.Vector.Unboxed",
+        target=check_module,
+    )
+    return [
+        identity(" -> ".join([*primitive_path, "Unsafe.Coerce"]), "unsafe-import"),
+        identity(" -> ".join([*mutable_path, "Unsafe.Coerce"]), "unsafe-import"),
+        identity(" -> ".join([*check_path, "GHC.Exts(Int#)"]), "compiler-primop"),
+    ]
+
+
+def audit_vector_archive(
+    archive_path: Path,
+    *,
+    policy: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    """Official vector archive bytes와 actual source graph를 frozen exact allowlist와 비교한다."""
+
+    archive_path = archive_path.resolve(strict=True)
+    vector = policy.get("vectorProvenance")
+    if not isinstance(vector, Mapping):
+        raise EvidenceError("vector provenance policy is missing")
+    source_sha256 = sha256_file(archive_path)
+    if source_sha256 != vector.get("officialArchiveSha256"):
+        raise EvidenceError("vector official archive SHA-256 mismatch")
+    raw_allowlist = vector.get("upstreamTransitiveAllowlist")
+    if not isinstance(raw_allowlist, list) or len(raw_allowlist) != 3:
+        raise EvidenceError("vector transitive policy allowlist drift")
+    provenance_values = {
+        edge.get("provenance") for edge in raw_allowlist if isinstance(edge, Mapping)
+    }
+    if len(provenance_values) != 1:
+        raise EvidenceError("vector transitive policy provenance drift")
+    provenance = next(iter(provenance_values))
+    if not isinstance(provenance, str) or not provenance:
+        raise EvidenceError("vector transitive policy provenance is invalid")
+
+    sources: dict[str, bytes] = {}
+    cabal_payload: bytes | None = None
+    try:
+        with tarfile.open(archive_path, mode="r:gz") as archive:
+            for member in archive.getmembers():
+                if member.issym() or member.islnk():
+                    raise EvidenceError("vector archive links are forbidden")
+                if not member.isfile():
+                    continue
+                if member.name.endswith("/vector.cabal"):
+                    extracted = archive.extractfile(member)
+                    if extracted is None or cabal_payload is not None:
+                        raise EvidenceError("vector archive Cabal identity is ambiguous")
+                    cabal_payload = extracted.read()
+                    continue
+                if "/src/" not in member.name or not member.name.endswith(".hs"):
+                    continue
+                extracted = archive.extractfile(member)
+                if extracted is None:
+                    raise EvidenceError("unable to read vector archive source")
+                payload = extracted.read()
+                parsed = parse_haskell_module(payload)
+                if parsed.module_name in sources:
+                    raise EvidenceError("duplicate vector source module in archive")
+                sources[parsed.module_name] = payload
+    except (tarfile.TarError, OSError) as exc:
+        raise EvidenceError("invalid vector source archive") from exc
+    if cabal_payload is None or re.search(
+        rb"(?im)^version:\s*0\.13\.2\.0\s*$",
+        cabal_payload,
+    ) is None:
+        raise EvidenceError("vector archive package version mismatch")
+    derived = derive_vector_transitive_edges(
+        sources,
+        source_sha256=source_sha256,
+        provenance=provenance,
+    )
+    if derived != raw_allowlist:
+        raise EvidenceError("vector transitive exact-set allowlist mismatch")
+    return [{**edge, "allowlisted": True} for edge in derived]
+
+
+def collect_interface_home_imports(
+    *,
+    interface_root: Path,
+    ghc_bin: Path,
+    inventory: Mapping[str, tuple[str, str, ParsedModule, bytes]],
+) -> dict[str, tuple[str, ...]]:
+    """Fresh build `.hi` closure를 `ghc --show-iface`로 읽어 actual home graph를 반환한다."""
+
+    interface_root = interface_root.resolve(strict=True)
+    ghc_bin = ghc_bin.resolve(strict=True)
+    if interface_root.is_symlink() or not interface_root.is_dir():
+        raise EvidenceError("compiler interface root must be a regular directory")
+    if ghc_bin.is_symlink() or not ghc_bin.is_file() or not os.access(ghc_bin, os.X_OK):
+        raise EvidenceError("GHC interface reader must be a regular executable")
+    version = subprocess.run(
+        [str(ghc_bin), "--numeric-version"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    if version != "9.10.3":
+        raise EvidenceError("module-safety interface audit requires GHC 9.10.3")
+
+    candidate_modules = set(inventory)
+    results: dict[str, tuple[str, ...]] = {}
+    for module_name, (_, _, parsed, _) in inventory.items():
+        suffix = module_name.replace(".", "/") + ".hi"
+        candidates = sorted(
+            (
+                path
+                for path in interface_root.rglob("*.hi")
+                if not path.is_symlink() and path.as_posix().endswith("/" + suffix)
+            ),
+            key=lambda item: item.as_posix().encode(),
+        )
+        if not candidates:
+            raise EvidenceError(f"compiled interface is missing for {module_name}")
+        observed: set[tuple[str, ...]] = set()
+        for interface in candidates:
+            completed = subprocess.run(
+                [str(ghc_bin), "--show-iface", str(interface)],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            if f"interface {module_name} 9103" not in completed.stdout:
+                raise EvidenceError(f"compiled interface identity mismatch for {module_name}")
+            observed.add(
+                parse_show_iface_home_imports(
+                    completed.stdout,
+                    candidate_modules=candidate_modules,
+                )
+            )
+        if len(observed) != 1:
+            raise EvidenceError(f"compiled interface graph disagrees across artifacts: {module_name}")
+        actual = next(iter(observed))
+        supplemental = tuple(
+            sorted(
+                (imported for imported in parsed.imports if imported in candidate_modules),
+                key=str.encode,
+            )
+        )
+        if actual != supplemental:
+            raise EvidenceError(
+                f"compiler/source home graph mismatch for {module_name}: "
+                f"compiler={actual}, source={supplemental}"
+            )
+        results[module_name] = actual
+    return results
+
+
 def _audit_core_source(
     *,
     relative: str,
@@ -485,6 +753,9 @@ def build_module_safety_result(
     *,
     numeric_root: Path,
     source_manifest_path: Path,
+    interface_root: Path,
+    ghc_bin: Path,
+    vector_archive: Path,
 ) -> dict[str, Any]:
     """Candidate module/import graph와 frozen vector provenance를 typed report로 만든다."""
 
@@ -549,30 +820,17 @@ def build_module_safety_result(
             }
         )
 
+    compiler_home_imports = collect_interface_home_imports(
+        interface_root=interface_root,
+        ghc_bin=ghc_bin,
+        inventory=inventory,
+    )
     direct_imports: list[dict[str, str]] = []
     home_edges: list[dict[str, str]] = []
     for module_name, (_, category, parsed, _) in inventory.items():
         for imported in parsed.imports:
             target = inventory.get(imported)
             if target is not None:
-                target_category = target[1]
-                if category in CORE_CATEGORIES and target_category in SHELL_CATEGORIES:
-                    raise EvidenceError(f"candidate core-to-shell edge: {module_name}->{imported}")
-                if category in CORE_CATEGORIES:
-                    classification = "core-to-core"
-                elif target_category in CORE_CATEGORIES:
-                    classification = "shell-to-core"
-                else:
-                    classification = "shell-to-shell"
-                home_edges.append(
-                    {
-                        "fromModule": module_name,
-                        "fromCategory": category,
-                        "toModule": imported,
-                        "toCategory": target_category,
-                        "classification": classification,
-                    }
-                )
                 continue
             if _has_prefix(imported, FORBIDDEN_ALL_IMPORT_PREFIXES):
                 raise EvidenceError(f"forbidden candidate direct import: {module_name}->{imported}")
@@ -596,20 +854,29 @@ def build_module_safety_result(
                     ),
                 }
             )
-
-    vector_provenance = policy.get("vectorProvenance")
-    if not isinstance(vector_provenance, dict):
-        raise EvidenceError("vector provenance policy is missing")
-    policy_edges = vector_provenance.get("upstreamTransitiveAllowlist")
-    if not isinstance(policy_edges, list) or len(policy_edges) != 3:
-        raise EvidenceError("vector transitive allowlist must contain exactly three edges")
-    upstream_edges: list[dict[str, Any]] = []
-    for raw_edge in policy_edges:
-        if not isinstance(raw_edge, dict):
-            raise EvidenceError("vector transitive edge must be an object")
-        edge = dict(raw_edge)
-        edge["allowlisted"] = True
-        upstream_edges.append(edge)
+        for imported in compiler_home_imports[module_name]:
+            target = inventory.get(imported)
+            if target is None:
+                raise EvidenceError(f"compiler home edge target is missing: {imported}")
+            target_category = target[1]
+            if category in CORE_CATEGORIES and target_category in SHELL_CATEGORIES:
+                raise EvidenceError(f"candidate core-to-shell edge: {module_name}->{imported}")
+            if category in CORE_CATEGORIES:
+                classification = "core-to-core"
+            elif target_category in CORE_CATEGORIES:
+                classification = "shell-to-core"
+            else:
+                classification = "shell-to-shell"
+            home_edges.append(
+                {
+                    "fromModule": module_name,
+                    "fromCategory": category,
+                    "toModule": imported,
+                    "toCategory": target_category,
+                    "classification": classification,
+                }
+            )
+    upstream_edges = audit_vector_archive(vector_archive, policy=policy)
 
     return {
         "schemaVersion": "s1.4x-haskell-module-safety-result-v1",
@@ -762,6 +1029,9 @@ def _module_safety_command(arguments: argparse.Namespace) -> None:
         arguments.haskell_root,
         numeric_root=arguments.numeric_root,
         source_manifest_path=arguments.manifest,
+        interface_root=arguments.interface_root,
+        ghc_bin=arguments.ghc_bin,
+        vector_archive=arguments.vector_archive,
     )
     if arguments.write:
         atomic_write_json(output, result)
@@ -826,6 +1096,9 @@ def _parser() -> argparse.ArgumentParser:
     module_safety.add_argument("--haskell-root", type=Path, required=True)
     module_safety.add_argument("--numeric-root", type=Path, required=True)
     module_safety.add_argument("--manifest", type=Path, required=True)
+    module_safety.add_argument("--interface-root", type=Path, required=True)
+    module_safety.add_argument("--ghc-bin", type=Path, required=True)
+    module_safety.add_argument("--vector-archive", type=Path, required=True)
     module_safety.add_argument("--output", type=Path, required=True)
     module_safety.add_argument("--write", action="store_true")
     module_safety.set_defaults(handler=_module_safety_command)
