@@ -1465,7 +1465,11 @@ def select_haskell_profile(
     """Frozen 4×7 paired-ratio selector로 optimized 또는 proven baseline을 고른다."""
 
     case_order = list(qualification_case_order)
-    if len(case_order) != 7 or len(case_order) != len(set(case_order)):
+    if (
+        len(case_order) != 7
+        or len(case_order) != len(set(case_order))
+        or any(type(case_id) is not str or not case_id for case_id in case_order)
+    ):
         raise EvidenceError("qualification case order must contain seven unique cases")
     if len(blocks) != 4:
         raise EvidenceError("qualification must contain exactly four order blocks")
@@ -1473,12 +1477,23 @@ def select_haskell_profile(
     by_case: dict[str, list[float]] = {case_id: [] for case_id in case_order}
     improving = 0
     for expected_index, block in enumerate(blocks):
-        if block.get("orderBlock") != expected_index:
+        if type(block) is not dict or set(block) != {"orderBlock", "ratios"}:
+            raise EvidenceError("qualification block field set drift")
+        if type(block["orderBlock"]) is not int:
+            raise EvidenceError("qualification order block index type drift")
+        if block["orderBlock"] != expected_index:
             raise EvidenceError("qualification order block sequence drift")
-        ratios = block.get("ratios")
-        if not isinstance(ratios, Mapping) or set(ratios) != set(case_order):
+        ratios = block["ratios"]
+        if type(ratios) is not dict or set(ratios) != set(case_order):
             raise EvidenceError("qualification block case set drift")
-        ordered = [float(ratios[case_id]) for case_id in case_order]
+        ordered: list[float] = []
+        for case_id in case_order:
+            ratio = ratios[case_id]
+            if type(ratio) is not float or not math.isfinite(ratio) or ratio <= 0.0:
+                raise EvidenceError(
+                    "qualification ratio must be a finite JSON decimal"
+                )
+            ordered.append(ratio)
         _geometric_mean(ordered)
         paired.extend(ordered)
         for case_id, value in zip(case_order, ordered, strict=True):
