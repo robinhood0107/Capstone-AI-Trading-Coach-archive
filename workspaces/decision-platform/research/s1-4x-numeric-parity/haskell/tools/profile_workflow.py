@@ -1182,6 +1182,190 @@ def _repo_commit(repo_root: Path) -> str:
     return commit
 
 
+def _git_output(
+    repo_root: Path,
+    *arguments: str,
+    text: bool = True,
+) -> str | bytes:
+    completed = subprocess.run(
+        ["/usr/bin/git", "-C", str(repo_root), *arguments],
+        check=False,
+        capture_output=True,
+        text=text,
+    )
+    if completed.returncode != 0:
+        raise WorkflowError("SELECTED_PROFILE_GIT_QUERY_FAILED")
+    return completed.stdout
+
+
+def _strict_json_bytes(payload: bytes, *, label: str) -> Any:
+    def object_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise WorkflowError(f"{label}_DUPLICATE_KEY")
+            result[key] = value
+        return result
+
+    try:
+        return json.loads(
+            payload.decode("utf-8"),
+            object_pairs_hook=object_pairs,
+            parse_constant=lambda token: (_ for _ in ()).throw(
+                WorkflowError(f"{label}_NON_FINITE:{token}")
+            ),
+        )
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise WorkflowError(f"{label}_INVALID_JSON") from exc
+
+
+def resolve_selected_profile_commit_fixed_point(
+    repo_root: Path,
+    *,
+    mode: str,
+    expected_subject_commit: str,
+    profile_relative_path: str,
+    manifest_relative_path: str,
+) -> dict[str, str | None]:
+    """프로필 전 subject와 두 파일만 바꾸는 materialization commit을 결속한다."""
+
+    root = _absolute_existing_directory(
+        repo_root,
+        label="SELECTED_PROFILE_REPOSITORY",
+    )
+    paths = (profile_relative_path, manifest_relative_path)
+    if (
+        mode not in {"materialize", "check"}
+        or COMMIT_PATTERN.fullmatch(expected_subject_commit) is None
+        or len(set(paths)) != 2
+        or any(
+            not path
+            or Path(path).is_absolute()
+            or ".." in Path(path).parts
+            or Path(path).as_posix() != path
+            for path in paths
+        )
+    ):
+        raise WorkflowError("SELECTED_PROFILE_COMMIT_INPUT_INVALID")
+    current_commit = _repo_commit(root)
+    _git_output(
+        root,
+        "cat-file",
+        "-e",
+        f"{expected_subject_commit}^{{commit}}",
+    )
+    pending_bytes = _git_output(
+        root,
+        "show",
+        f"{expected_subject_commit}:{profile_relative_path}",
+        text=False,
+    )
+    assert isinstance(pending_bytes, bytes)
+    pending = _strict_json_bytes(
+        pending_bytes,
+        label="SELECTED_PROFILE_PRE_MATERIALIZATION_SUBJECT",
+    )
+    if (
+        not isinstance(pending, dict)
+        or pending.get("schemaVersion")
+        != "s1.4x-haskell-selected-profile-pending-v1"
+    ):
+        raise WorkflowError(
+            "SELECTED_PROFILE_PRE_MATERIALIZATION_SUBJECT_INVALID"
+        )
+    if mode == "materialize":
+        if current_commit != expected_subject_commit:
+            raise WorkflowError("SELECTED_PROFILE_MATERIALIZE_SUBJECT_DRIFT")
+        return {
+            "currentCommit": current_commit,
+            "materializationCommit": None,
+            "preMaterializationSubjectCommit": expected_subject_commit,
+        }
+
+    ancestor = subprocess.run(
+        [
+            "/usr/bin/git",
+            "-C",
+            str(root),
+            "merge-base",
+            "--is-ancestor",
+            expected_subject_commit,
+            current_commit,
+        ],
+        check=False,
+        capture_output=True,
+    )
+    if ancestor.returncode != 0:
+        raise WorkflowError("SELECTED_PROFILE_SUBJECT_NOT_ANCESTOR")
+    ancestry_output = _git_output(
+        root,
+        "rev-list",
+        "--ancestry-path",
+        "--parents",
+        f"{expected_subject_commit}..{current_commit}",
+    )
+    assert isinstance(ancestry_output, str)
+    current_blobs = {
+        path: _git_output(
+            root,
+            "show",
+            f"{current_commit}:{path}",
+            text=False,
+        )
+        for path in paths
+    }
+    final_profile = _strict_json_bytes(
+        current_blobs[profile_relative_path],
+        label="SELECTED_PROFILE_MATERIALIZED_HEAD",
+    )
+    if (
+        not isinstance(final_profile, dict)
+        or final_profile.get("schemaVersion")
+        != "s1.4x-haskell-selected-profile-v1"
+    ):
+        raise WorkflowError("SELECTED_PROFILE_MATERIALIZED_HEAD_INVALID")
+    candidates: list[str] = []
+    expected_paths = set(paths)
+    for line in ancestry_output.splitlines():
+        fields = line.split()
+        if len(fields) != 2 or fields[1] != expected_subject_commit:
+            continue
+        commit = fields[0]
+        changed_output = _git_output(
+            root,
+            "diff-tree",
+            "--no-commit-id",
+            "--name-only",
+            "-r",
+            expected_subject_commit,
+            commit,
+        )
+        assert isinstance(changed_output, str)
+        changed_paths = {
+            path for path in changed_output.splitlines() if path
+        }
+        if changed_paths != expected_paths:
+            continue
+        if all(
+            _git_output(
+                root,
+                "show",
+                f"{commit}:{path}",
+                text=False,
+            )
+            == current_blobs[path]
+            for path in paths
+        ):
+            candidates.append(commit)
+    if len(candidates) != 1:
+        raise WorkflowError("SELECTED_PROFILE_MATERIALIZATION_COMMIT_INVALID")
+    return {
+        "currentCommit": current_commit,
+        "materializationCommit": candidates[0],
+        "preMaterializationSubjectCommit": expected_subject_commit,
+    }
+
+
 def _sealed_child_environment(*, ghc_bin: Path, stack_bin: Path) -> dict[str, str]:
     home = os.environ.get("HOME")
     if home is None:
@@ -2048,7 +2232,6 @@ def _select_profile(arguments: argparse.Namespace) -> None:
     haskell_root = Path(__file__).resolve(strict=True).parent.parent
     numeric_root = haskell_root.parent
     repo_root = numeric_root.parents[3]
-    candidate_commit = _repo_commit(repo_root)
     evidence = _load_haskell_evidence(haskell_root)
     source_tree_sha256 = evidence.benchmark_source_tree_sha256(haskell_root)
     plan_path = _absolute_regular(
@@ -2067,6 +2250,53 @@ def _select_profile(arguments: argparse.Namespace) -> None:
         if value is None:
             raise WorkflowError(f"REQUIRED_ENVIRONMENT_MISSING:{name}")
         environment_paths[name] = Path(value)
+    subject_commits = {
+        document.get("candidateSourceCommit")
+        for document in (
+            strict_json_load(
+                _absolute_regular(
+                    environment_paths[
+                        "S1_4X_HASKELL_BASELINE_CORRECTNESS"
+                    ],
+                    label="BASELINE_CORRECTNESS_RECEIPT",
+                )
+            ),
+            strict_json_load(
+                _absolute_regular(
+                    environment_paths[
+                        "S1_4X_HASKELL_OPTIMIZED_CORRECTNESS"
+                    ],
+                    label="OPTIMIZED_CORRECTNESS_RECEIPT",
+                )
+            ),
+            strict_json_load(
+                _absolute_regular(
+                    environment_paths[
+                        "S1_4X_HASKELL_QUALIFICATION_ARTIFACT"
+                    ],
+                    label="QUALIFICATION_ARTIFACT",
+                )
+            ),
+        )
+        if isinstance(document, dict)
+    }
+    subject_commit = next(iter(subject_commits), None)
+    if (
+        len(subject_commits) != 1
+        or not isinstance(subject_commit, str)
+        or COMMIT_PATTERN.fullmatch(subject_commit) is None
+    ):
+        raise WorkflowError("SELECTED_PROFILE_SUBJECT_COMMIT_INVALID")
+    candidate_commit = subject_commit
+    profile_path = haskell_root / "selected-profile.v1.json"
+    manifest_path = haskell_root / "source-inputs.v1.json"
+    fixed_point = resolve_selected_profile_commit_fixed_point(
+        repo_root,
+        mode=arguments.mode,
+        expected_subject_commit=candidate_commit,
+        profile_relative_path=profile_path.relative_to(repo_root).as_posix(),
+        manifest_relative_path=manifest_path.relative_to(repo_root).as_posix(),
+    )
     baseline = _validate_correctness_receipt(
         environment_paths["S1_4X_HASKELL_BASELINE_CORRECTNESS"],
         expected_profile_id="baseline-o0-fasm",
@@ -2105,8 +2335,6 @@ def _select_profile(arguments: argparse.Namespace) -> None:
         selector_config_sha256=canonical_sha256(configuration),
         compiler_sha256=selected_receipt["compilerSha256"],
     )
-    profile_path = haskell_root / "selected-profile.v1.json"
-    manifest_path = haskell_root / "source-inputs.v1.json"
     if arguments.mode == "materialize":
         pending = strict_json_load(profile_path)
         if pending.get("schemaVersion") != "s1.4x-haskell-selected-profile-pending-v1":
@@ -2118,6 +2346,7 @@ def _select_profile(arguments: argparse.Namespace) -> None:
             expected_qualification_plan_sha256=sha256_file(plan_path),
             expected_selector_config_sha256=canonical_sha256(configuration),
         )
+        evidence.validate_source_manifest(haskell_root, manifest_path)
         lock_path = profile_path.with_name(f"{profile_path.name}.materialize.lock")
         try:
             descriptor = os.open(
@@ -2147,6 +2376,10 @@ def _select_profile(arguments: argparse.Namespace) -> None:
         json.dumps(
             {
                 "mode": arguments.mode,
+                "materializationCommit": fixed_point["materializationCommit"],
+                "preMaterializationSubjectCommit": fixed_point[
+                    "preMaterializationSubjectCommit"
+                ],
                 "profileId": profile_document["profileId"],
                 "profileSha256": sha256_file(profile_path),
                 "status": "PASS",
