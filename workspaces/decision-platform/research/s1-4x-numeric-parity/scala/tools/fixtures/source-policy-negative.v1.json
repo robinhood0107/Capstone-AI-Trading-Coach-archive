@@ -78,6 +78,36 @@
       "file": "missing-public-result-type.scala",
       "expectedSymbol": "ExplicitResultTypes",
       "expectedDisposition": "SEMANTIC_REJECT"
+    },
+    {
+      "fixtureId": "disable-syntax-null",
+      "file": "disable-syntax-null.scala",
+      "expectedSymbol": "DisableSyntax.null",
+      "expectedDisposition": "SYNTAX_REJECT"
+    },
+    {
+      "fixtureId": "disable-syntax-return",
+      "file": "disable-syntax-return.scala",
+      "expectedSymbol": "DisableSyntax.return",
+      "expectedDisposition": "SYNTAX_REJECT"
+    },
+    {
+      "fixtureId": "disable-syntax-as-instance-of",
+      "file": "disable-syntax-as-instance-of.scala",
+      "expectedSymbol": "DisableSyntax.asInstanceOf",
+      "expectedDisposition": "SYNTAX_REJECT"
+    },
+    {
+      "fixtureId": "disable-syntax-is-instance-of",
+      "file": "disable-syntax-is-instance-of.scala",
+      "expectedSymbol": "DisableSyntax.isInstanceOf",
+      "expectedDisposition": "SYNTAX_REJECT"
+    },
+    {
+      "fixtureId": "disable-syntax-throw",
+      "file": "disable-syntax-throw.scala",
+      "expectedSymbol": "DisableSyntax.throw",
+      "expectedDisposition": "SYNTAX_REJECT"
     }
   ]
 }
