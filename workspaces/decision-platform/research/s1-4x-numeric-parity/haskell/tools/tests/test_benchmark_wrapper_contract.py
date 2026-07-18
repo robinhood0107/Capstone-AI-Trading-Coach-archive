@@ -37,10 +37,14 @@ class BenchmarkWrapperContractTests(unittest.TestCase):
 
     def test_outer_wrapper_uses_exact_twenty_argument_order(self) -> None:
         source = WRAPPER.read_text(encoding="utf-8")
+        self.assertEqual(source.splitlines()[0], "#!/usr/bin/bash")
         self.assertIn('[[ "$#" -eq 20 ]]', source)
         offsets = [source.index(f'"{option}"') for option in EXPECTED_OPTIONS]
         self.assertEqual(offsets, sorted(offsets))
-        self.assertEqual(source.count('git rev-parse --show-toplevel'), 1)
+        self.assertEqual(
+            source.count('/usr/bin/git -C "$PWD" rev-parse --show-toplevel'),
+            1,
+        )
 
     def test_sealed_outer_wrapper_never_discovers_its_own_path(self) -> None:
         source = WRAPPER.read_text(encoding="utf-8")
@@ -64,6 +68,25 @@ class BenchmarkWrapperContractTests(unittest.TestCase):
         self.assertNotIn("bash -c", source)
         self.assertNotIn("sh -c", source)
         self.assertNotIn("mark-measurement-entered", source)
+
+    def test_outer_wrapper_scrubs_interpreter_and_git_injection(self) -> None:
+        source = WRAPPER.read_text(encoding="utf-8")
+        self.assertIn('export PATH="/usr/bin:/bin"', source)
+        self.assertIn("compgen -e", source)
+        for forbidden_environment in (
+            "BASH_ENV",
+            "ENV",
+            "PYTHONPATH",
+            "PYTHONHOME",
+            "VIRTUAL_ENV",
+            "JAVA_TOOL_OPTIONS",
+            "JDK_JAVA_OPTIONS",
+            "_JAVA_OPTIONS",
+            "GIT_*",
+        ):
+            self.assertIn(forbidden_environment, source)
+        self.assertIn("/usr/bin/sha256sum", source)
+        self.assertIn("/usr/bin/awk", source)
 
     def test_wrapper_mode_is_regular_not_symlink(self) -> None:
         self.assertFalse(WRAPPER.is_symlink())
