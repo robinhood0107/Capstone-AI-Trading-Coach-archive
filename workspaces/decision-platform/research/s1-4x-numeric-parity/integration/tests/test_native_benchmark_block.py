@@ -148,9 +148,20 @@ class NativeBenchmarkBlockTests(TestCase):
         haskell_root.mkdir()
         contract_root = temporary / "contract"
         contract_root.mkdir()
+        contract_schema_root = contract_root / "schemas"
+        contract_schema_root.mkdir()
         merged_provenance = contract_root / "toolchain-provenance.v1.json"
         merged_provenance.write_bytes(
             (PLAN.parent.parent / "contract/toolchain-provenance.v1.json").read_bytes()
+        )
+        merged_provenance_schema = (
+            contract_schema_root / "toolchain-provenance.schema.json"
+        )
+        merged_provenance_schema.write_bytes(
+            (
+                PLAN.parent.parent
+                / "contract/schemas/toolchain-provenance.schema.json"
+            ).read_bytes()
         )
         input_ledger = temporary / "input-ledger.json"
         input_ledger.write_text('{"status":"fixture"}', encoding="utf-8")
@@ -198,44 +209,103 @@ class NativeBenchmarkBlockTests(TestCase):
             )
         )
         toolchain_lock = haskell_root / "toolchain-lock.v1.json"
+        merged_provenance_document = strict_json_load(merged_provenance)
+        contract_projection = {
+            field: merged_provenance_document[field]
+            for field in native_block_module.TOOLCHAIN_PROJECTION_FIELDS
+        }
         toolchain_lock.write_text(
             json.dumps(
                 {
                     "schemaVersion": "s1.4x-haskell-toolchain-lock-v1",
                     "snapshot": "lts-24.50",
-                    "ghcup": {
-                        "pathId": "GHCUP_0_2_6_2_LINUX_X86_64",
-                        "version": "0.2.6.2",
-                        "sha256": ghcup_sha256,
+                    "mergedToolchainProvenance": {
+                        "path": "contract/toolchain-provenance.v1.json",
+                        "sha256": hashlib.sha256(
+                            merged_provenance.read_bytes()
+                        ).hexdigest(),
+                        "schemaPath": (
+                            "contract/schemas/toolchain-provenance.schema.json"
+                        ),
+                        "schemaSha256": hashlib.sha256(
+                            merged_provenance_schema.read_bytes()
+                        ).hexdigest(),
                     },
-                    "authoritativeGhc": {
-                        "pathId": "GHCUP_GHC_9_10_3",
-                        "version": "9.10.3",
-                        "sha256": "1" * 64,
+                    "contractProjection": contract_projection,
+                    "resolvedTools": {
+                        "ghcup": {
+                            "pathId": "GHCUP_0_2_6_2_LINUX_X86_64",
+                            "version": "0.2.6.2",
+                            "sha256": ghcup_sha256,
+                        },
+                        "authoritativeGhc": {
+                            "pathId": "GHCUP_GHC_9_10_3",
+                            "version": "9.10.3",
+                            "sha256": native_block_module.FROZEN_GHC_910_SHA256,
+                        },
+                        "compatibilityGhc": {
+                            "pathId": "GHCUP_GHC_9_14_1",
+                            "version": "9.14.1",
+                            "sha256": native_block_module.FROZEN_GHC_914_SHA256,
+                        },
+                        "stack": {
+                            "pathId": "GHCUP_STACK_3_11_1",
+                            "version": "3.11.1",
+                            "sha256": stack_sha256,
+                        },
+                        "hlint": {
+                            "pathId": "HLINT_3_10",
+                            "version": "3.10",
+                            "sha256": native_block_module.FROZEN_HLINT_SHA256,
+                        },
+                        "stylishHaskell": {
+                            "pathId": "STYLISH_HASKELL_0_15_1_0",
+                            "version": "0.15.1.0",
+                            "sha256": (
+                                native_block_module.FROZEN_STYLISH_HASKELL_SHA256
+                            ),
+                        },
                     },
-                    "compatibilityGhc": {
-                        "pathId": "GHCUP_GHC_9_14_1",
-                        "version": "9.14.1",
-                        "sha256": "2" * 64,
+                    "resolverAssertions": {
+                        "authoritativeGhc": [
+                            "--offline",
+                            "run",
+                            "--quick",
+                            "--ghc",
+                            "9.10.3",
+                            "--stack",
+                            "3.11.1",
+                            "--",
+                            "ghc",
+                            "--numeric-version",
+                        ],
+                        "authoritativeStack": [
+                            "--offline",
+                            "run",
+                            "--quick",
+                            "--ghc",
+                            "9.10.3",
+                            "--stack",
+                            "3.11.1",
+                            "--",
+                            "stack",
+                            "--numeric-version",
+                        ],
+                        "compatibilityGhc": [
+                            "--offline",
+                            "run",
+                            "--quick",
+                            "--ghc",
+                            "9.14.1",
+                            "--stack",
+                            "3.11.1",
+                            "--",
+                            "ghc",
+                            "--numeric-version",
+                        ],
                     },
-                    "stack": {
-                        "pathId": "GHCUP_STACK_3_11_1",
-                        "version": "3.11.1",
-                        "sha256": stack_sha256,
-                    },
-                    "hlint": {
-                        "pathId": "HLINT_3_10",
-                        "version": "3.10",
-                        "sha256": "3" * 64,
-                    },
-                    "stylishHaskell": {
-                        "pathId": "STYLISH_HASKELL_0_15_1_0",
-                        "version": "0.15.1.0",
-                        "sha256": "4" * 64,
-                    },
-                    "toolchainProvenanceSha256": hashlib.sha256(
-                        merged_provenance.read_bytes()
-                    ).hexdigest(),
+                    "compatibilityPlan": {},
+                    "stackConfigurations": {},
                 },
                 sort_keys=True,
             ),
@@ -776,7 +846,7 @@ class NativeBenchmarkBlockTests(TestCase):
             )
 
         tampered_lock = json.loads(toolchain_lock.read_text(encoding="utf-8"))
-        tampered_lock["stack"]["sha256"] = "0" * 64
+        tampered_lock["resolvedTools"]["stack"]["sha256"] = "0" * 64
         toolchain_lock.write_text(
             json.dumps(tampered_lock, sort_keys=True),
             encoding="utf-8",
@@ -846,6 +916,21 @@ class NativeBenchmarkBlockTests(TestCase):
             )
         )
         toolchain_lock = scala_root / "toolchain-lock.v1.json"
+        merged_provenance_document = strict_json_load(merged_provenance)
+        scala_projection_fields = tuple(
+            field
+            for field in native_block_module.TOOLCHAIN_PROJECTION_FIELDS
+            if field
+            not in {
+                "ghcupReleaseUri",
+                "ghcupAssetUri",
+                "upstreamStandaloneAssetUri",
+            }
+        )
+        shared_distribution_provenance = {
+            field: merged_provenance_document[field]
+            for field in scala_projection_fields
+        }
         toolchain_lock.write_text(
             json.dumps(
                 {
@@ -888,6 +973,35 @@ class NativeBenchmarkBlockTests(TestCase):
                         ),
                         "configSha256": hashlib.sha256(scalafmt_config.read_bytes()).hexdigest(),
                         "runnerPathId": "SCALA_CLI_1_15_0",
+                        "archiveUri": (
+                            "https://github.com/scalameta/scalafmt/releases/download/"
+                            "v3.11.4/scalafmt-x86_64-pc-linux.zip"
+                        ),
+                        "archivePathId": (
+                            "S1_4X_CACHE_ROOT/coursier/https/github.com/scalameta/"
+                            "scalafmt/releases/download/v3.11.4/"
+                            "scalafmt-x86_64-pc-linux.zip"
+                        ),
+                        "archiveSha256": (
+                            native_block_module.FROZEN_SCALAFMT_ARCHIVE_SHA256
+                        ),
+                        "executablePathId": (
+                            "COURSIER_ARCHIVE_CACHE/https/github.com/scalameta/"
+                            "scalafmt/releases/download/v3.11.4/"
+                            "scalafmt-x86_64-pc-linux.zip/scalafmt"
+                        ),
+                        "executableSha256": (
+                            native_block_module.FROZEN_SCALAFMT_EXECUTABLE_SHA256
+                        ),
+                        "resolvedVersionOutput": "scalafmt 3.11.4",
+                        "resolutionLogUri": (
+                            "evidence://s1-4x-scala-scalafmt-evidence-9c3cb8f-01/"
+                            "logs/first-apply.stderr"
+                        ),
+                        "resolutionLogSha256": (
+                            "1cc7516d57c230f10242f43884f12f3d26cbd6d681dbaed317262148c136b781"
+                        ),
+                        "networkPolicy": "OFFLINE_PINNED_LAUNCHER",
                     },
                     "scalafix": {
                         "pathId": "SCALAFIX_0_14_7",
@@ -896,7 +1010,9 @@ class NativeBenchmarkBlockTests(TestCase):
                             "9db6db7359e580de8f4b72cd7c104d70023cf32a278db0c30aefb79c939eb0f3"
                         ),
                     },
-                    "sharedDistributionProvenance": {},
+                    "sharedDistributionProvenance": (
+                        shared_distribution_provenance
+                    ),
                 },
                 sort_keys=True,
             ),
