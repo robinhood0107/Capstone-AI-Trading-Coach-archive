@@ -132,7 +132,7 @@ def non_scala_source_violations(
         root = scala_root / root_name
         candidates = [root] if root.is_file() else root.rglob("*") if root.is_dir() else []
         for candidate in candidates:
-            if candidate.is_file() and candidate.suffix in {".java", ".kt", ".kts"}:
+            if candidate.is_file() and candidate.suffix in {".sc", ".java", ".kt", ".kts"}:
                 violations.append(
                     {
                         "file": candidate.relative_to(scala_root).as_posix(),

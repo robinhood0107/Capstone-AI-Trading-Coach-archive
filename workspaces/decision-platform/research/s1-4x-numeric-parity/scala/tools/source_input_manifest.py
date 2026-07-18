@@ -35,6 +35,7 @@ SHA256 = re.compile(r"^[0-9a-f]{64}$")
 SAFE_PATH = re.compile(
     r"^(?!/)(?!.*(?:^|/)\.\.(?:/|$))[A-Za-z0-9._/-]+$"
 )
+FORBIDDEN_COMPILED_SUFFIXES = (".sc", ".java", ".kt", ".kts")
 
 
 def sha256_file(path: Path) -> str:
@@ -101,7 +102,7 @@ def under_root(path: str, root: str) -> bool:
 
 
 def git_source_files(scala_root: Path, roots: list[str]) -> list[str]:
-    """Git index와 non-ignored untracked file에서 production `.scala` 집합을 열거한다."""
+    """Git production closure의 compiled escape를 거부한 뒤 `.scala` 집합을 반환한다."""
 
     completed = subprocess.run(
         [
@@ -120,8 +121,21 @@ def git_source_files(scala_root: Path, roots: list[str]) -> list[str]:
     )
     if completed.returncode != 0:
         raise SourceInputManifestError("GIT_SOURCE_ENUMERATION_FAILED")
+    production_files = sorted(
+        set(completed.stdout.splitlines()),
+        key=lambda value: value.encode("utf-8"),
+    )
+    forbidden = [
+        path
+        for path in production_files
+        if path.endswith(FORBIDDEN_COMPILED_SUFFIXES)
+    ]
+    if forbidden:
+        raise SourceInputManifestError(
+            f"FORBIDDEN_COMPILED_SOURCE:{forbidden[0]}"
+        )
     return sorted(
-        {line for line in completed.stdout.splitlines() if line.endswith(".scala")},
+        {line for line in production_files if line.endswith(".scala")},
         key=lambda value: value.encode("utf-8"),
     )
 
