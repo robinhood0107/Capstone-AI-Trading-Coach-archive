@@ -61,12 +61,39 @@ def _candidate_reports() -> tuple[dict[str, Any], dict[str, Any]]:
         ],
         "status": "PASS",
     }
-    return property_report, registry_report
+    execution_report = {
+        "schemaVersion": "s1.4x-candidate-property-execution-v1",
+        "implementation": "candidate-test",
+        "propertyPlanSha256": plan_sha,
+        "framework": "test-framework-1.0",
+        "toolchainProfile": "test-profile",
+        "commandArgvSha256": "a" * 64,
+        "runnerSha256": "b" * 64,
+        "sourceClosureSha256": "c" * 64,
+        "startedAt": "2026-07-18T12:00:00.000000Z",
+        "finishedAt": "2026-07-18T12:00:01.000000Z",
+        "exitCode": 0,
+        "properties": [
+            {
+                "propertyId": item["propertyId"],
+                "successfulTests": plan["minimumSuccessfulPerProperty"],
+                "discardedTests": 0,
+                "attemptedTests": plan["minimumSuccessfulPerProperty"],
+                "originalSeed": index,
+                "replayToken": f"test:{index}",
+                "shrinks": 0,
+                "status": "PASS",
+            }
+            for index, item in enumerate(plan["properties"])
+        ],
+        "status": "PASS",
+    }
+    return property_report, registry_report, execution_report
 
 
 class CandidateCoverageTests(TestCase):
     def test_exact_25_20_19_plus_13_and_dynamic_static_closure(self) -> None:
-        property_report, registry_report = _candidate_reports()
+        property_report, registry_report, execution_report = _candidate_reports()
         evidence = validate_candidate_coverage(
             implementation_label="scala",
             property_plan_path=CONTRACT / "property-plan.v1.json",
@@ -74,6 +101,7 @@ class CandidateCoverageTests(TestCase):
             error_registry_path=CONTRACT / "error-registry.v1.json",
             property_report=property_report,
             registry_report=registry_report,
+            execution_report=execution_report,
         )
         self.assertEqual(evidence["propertyCount"], 25)
         self.assertEqual(evidence["functionCount"], 20)
@@ -84,7 +112,7 @@ class CandidateCoverageTests(TestCase):
         )
 
     def test_missing_property_or_mode_drift_fails_closed(self) -> None:
-        property_report, registry_report = _candidate_reports()
+        property_report, registry_report, execution_report = _candidate_reports()
         property_report["properties"].pop()
         with self.assertRaisesRegex(CoverageError, "PROPERTY_ID_SET_MISMATCH"):
             validate_candidate_coverage(
@@ -94,9 +122,10 @@ class CandidateCoverageTests(TestCase):
                 error_registry_path=CONTRACT / "error-registry.v1.json",
                 property_report=property_report,
                 registry_report=registry_report,
+                execution_report=execution_report,
             )
 
-        property_report, registry_report = _candidate_reports()
+        property_report, registry_report, execution_report = _candidate_reports()
         registry_report["errors"][0]["verificationMode"] = "registryStatic"
         with self.assertRaisesRegex(CoverageError, "ERROR_COVERAGE_MISMATCH"):
             validate_candidate_coverage(
@@ -106,10 +135,11 @@ class CandidateCoverageTests(TestCase):
                 error_registry_path=CONTRACT / "error-registry.v1.json",
                 property_report=property_report,
                 registry_report=registry_report,
+                execution_report=execution_report,
             )
 
     def test_success_and_discard_thresholds_are_enforced(self) -> None:
-        property_report, registry_report = _candidate_reports()
+        property_report, registry_report, execution_report = _candidate_reports()
         property_report["properties"][0]["successfulTests"] = 999
         with self.assertRaisesRegex(CoverageError, "PROPERTY_EXECUTION_INSUFFICIENT"):
             validate_candidate_coverage(
@@ -119,4 +149,34 @@ class CandidateCoverageTests(TestCase):
                 error_registry_path=CONTRACT / "error-registry.v1.json",
                 property_report=property_report,
                 registry_report=registry_report,
+                execution_report=execution_report,
+            )
+
+    def test_property_counts_must_match_actual_execution_sidecar(self) -> None:
+        property_report, registry_report, execution_report = _candidate_reports()
+        execution_report["properties"][0]["successfulTests"] = 1001
+        execution_report["properties"][0]["attemptedTests"] = 1001
+        with self.assertRaisesRegex(CoverageError, "PROPERTY_EXECUTION_REPORT_MISMATCH"):
+            validate_candidate_coverage(
+                implementation_label="scala",
+                property_plan_path=CONTRACT / "property-plan.v1.json",
+                function_registry_path=CONTRACT / "function-registry.v1.json",
+                error_registry_path=CONTRACT / "error-registry.v1.json",
+                property_report=property_report,
+                registry_report=registry_report,
+                execution_report=execution_report,
+            )
+
+    def test_detached_or_failed_execution_sidecar_is_rejected(self) -> None:
+        property_report, registry_report, execution_report = _candidate_reports()
+        execution_report["exitCode"] = 1
+        with self.assertRaisesRegex(CoverageError, "PROPERTY_EXECUTION_IDENTITY_INVALID"):
+            validate_candidate_coverage(
+                implementation_label="haskell",
+                property_plan_path=CONTRACT / "property-plan.v1.json",
+                function_registry_path=CONTRACT / "function-registry.v1.json",
+                error_registry_path=CONTRACT / "error-registry.v1.json",
+                property_report=property_report,
+                registry_report=registry_report,
+                execution_report=execution_report,
             )
