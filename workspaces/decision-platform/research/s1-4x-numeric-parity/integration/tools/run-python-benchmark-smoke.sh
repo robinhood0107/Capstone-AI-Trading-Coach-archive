@@ -8,7 +8,7 @@ PRODUCTION="$ROOT/workspaces/decision-platform/python-services"
 RESEARCH="$ROOT/workspaces/decision-platform/research/s1-4r-jax-risk"
 PLAN="$S1_4X/benchmarks/benchmark-plan.v1.json"
 OUTPUT_DIR="${1:?usage: run-python-benchmark-smoke.sh ABSOLUTE_OUTPUT_DIR}"
-UV_BIN="${S1_4X_UV_BIN:-$(command -v uv)}"
+UV_BIN="${S1_4X_UV_BIN:?set the verified absolute uv executable path}"
 
 case "$OUTPUT_DIR" in
   /*) ;;
