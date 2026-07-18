@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import difflib
 import hashlib
 import json
 import os
@@ -53,6 +54,38 @@ def source_tree_sha256(root: Path, sources: list[Path]) -> str:
         )
     ]
     return hashlib.sha256("".join(lines).encode("utf-8")).hexdigest()
+
+
+def formatted_source_patch(
+    *,
+    scala_root: Path,
+    sources: list[Path],
+    temporary: Path,
+    temporary_sources: list[Path],
+) -> str:
+    """원본과 formatted copy의 전체 diff를 repo-relative portable path로 만든다."""
+
+    if len(sources) != len(temporary_sources):
+        raise ScalafmtEvidenceError("FORMATTED_SOURCE_SET_SIZE_MISMATCH")
+    pairs = sorted(
+        zip(sources, temporary_sources, strict=True),
+        key=lambda pair: pair[0].relative_to(scala_root).as_posix().encode("utf-8"),
+    )
+    output: list[str] = []
+    for source, formatted in pairs:
+        relative = source.relative_to(scala_root).as_posix()
+        if formatted.relative_to(temporary).as_posix() != relative:
+            raise ScalafmtEvidenceError("FORMATTED_SOURCE_SET_PATH_MISMATCH")
+        output.extend(
+            difflib.unified_diff(
+                source.read_text(encoding="utf-8").splitlines(keepends=True),
+                formatted.read_text(encoding="utf-8").splitlines(keepends=True),
+                fromfile=f"a/{relative}",
+                tofile=f"b/{relative}",
+                lineterm="\n",
+            )
+        )
+    return "".join(output)
 
 
 def strict_json(path: Path) -> dict[str, Any]:
@@ -341,6 +374,19 @@ def run(arguments: argparse.Namespace) -> Path:
         if first_hash != second_hash:
             raise ScalafmtEvidenceError("SCALAFMT_NOT_BYTE_IDEMPOTENT")
 
+        formatted_patch = formatted_source_patch(
+            scala_root=scala_root,
+            sources=sources,
+            temporary=temporary,
+            temporary_sources=temporary_sources,
+        )
+        formatted_patch_path = output_root / "formatted-source.patch"
+        with formatted_patch_path.open("x", encoding="utf-8", newline="\n") as stream:
+            stream.write(formatted_patch)
+        formatted_patch_sha256 = sha256_file(formatted_patch_path)
+        if source_tree_sha256(scala_root, sources) != source_before:
+            raise ScalafmtEvidenceError("REAL_SOURCE_MUTATED_WHILE_BUILDING_PATCH")
+
         copied_check_command = format_command(
             scala_cli=arguments.scala_cli,
             scalafmt_launcher=arguments.scalafmt_launcher,
@@ -427,6 +473,7 @@ def run(arguments: argparse.Namespace) -> Path:
             "sourceBeforeSha256": source_before,
             "firstPassSourceSha256": first_hash,
             "secondPassSourceSha256": second_hash,
+            "formattedSourcePatchSha256": formatted_patch_sha256,
             "firstApply": process_evidence(first_command, first),
             "secondApply": process_evidence(second_command, second),
             "copiedNonMutatingCheck": process_evidence(
