@@ -8,6 +8,7 @@ import json
 import sys
 import tempfile
 from pathlib import Path
+from typing import Any
 from unittest import TestCase
 
 INTEGRATION = Path(__file__).resolve().parents[1]
@@ -127,7 +128,7 @@ class NativeBenchmarkBlockTests(TestCase):
         raw.parent.mkdir()
         raw.write_text('{"criterion":"raw"}\n', encoding="utf-8")
         raw_sha = hashlib.sha256(raw.read_bytes()).hexdigest()
-        cases = [
+        cases: list[dict[str, Any]] = [
             {
                 "caseId": "case-a",
                 "nativeValue": 0.1,
@@ -143,7 +144,7 @@ class NativeBenchmarkBlockTests(TestCase):
                 "measurementIterations": 100,
             },
         ]
-        evidence = {
+        evidence: dict[str, Any] = {
             "schemaVersion": "s1.4x-native-contract-validation-v1",
             "boundaryId": "haskell",
             "selectorId": "haskell/test",
