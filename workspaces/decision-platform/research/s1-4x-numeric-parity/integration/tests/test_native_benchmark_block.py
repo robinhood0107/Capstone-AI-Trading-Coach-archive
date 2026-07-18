@@ -674,16 +674,48 @@ class NativeBenchmarkBlockTests(TestCase):
         receipt = temporary / "receipts/000.json"
         raw.parent.mkdir()
         receipt.parent.mkdir()
+        scala_root = temporary / "scala"
+        (scala_root / "src/main/scala").mkdir(parents=True)
+        (scala_root / "benchmarks").mkdir()
+        project_scala = scala_root / "project.scala"
+        project_scala.write_text("//> using scala 3.8.4\n", encoding="utf-8")
+        selected_profile = scala_root / "selected-profile.scala"
+        selected_profile.write_text(
+            "// selected profile: profile-a\n",
+            encoding="utf-8",
+        )
+        source_input_manifest = scala_root / "source-inputs.v1.json"
+        source_input_manifest.write_text(
+            '{"schemaVersion":"test-source-inputs-v1"}',
+            encoding="utf-8",
+        )
         input_ledger = temporary / "input-ledger.json"
         input_ledger.write_text('{"status":"fixture"}', encoding="utf-8")
-        benchmark_executable = temporary / "benchmark.jar"
-        benchmark_executable.write_bytes(b"JMH executable fixture")
+        benchmark_executable = temporary / "scala-cli"
+        benchmark_executable.write_bytes(b"Scala CLI fixture")
         jvm_capability = temporary / "effective-jvm-arguments.json"
         jvm_capability.write_text(
             '{"schemaVersion":"test-effective-jvm-arguments-v1"}',
             encoding="utf-8",
         )
         plan = strict_json_load(PLAN)
+        selector_id = "scala/test"
+        jmh_include_regex = r"^s1_4x\.benchmarks\.test\.case_a$"
+        plan["familySelectors"].append(
+            {
+                "boundaryId": "scala",
+                "familyId": "test",
+                "selectorId": selector_id,
+                "expectedCaseIds": ["case-a"],
+                "jmhIncludeRegex": jmh_include_regex,
+                "criterionMatchMode": None,
+                "criterionPrefix": None,
+                "pythonFamilyId": None,
+            }
+        )
+        plan_path = temporary / "benchmarks/benchmark-plan.v1.json"
+        plan_path.parent.mkdir()
+        plan_path.write_text(json.dumps(plan, sort_keys=True), encoding="utf-8")
         native_cases: list[dict[str, Any]] = [
             {
                 "caseId": "case-a",
@@ -714,7 +746,7 @@ class NativeBenchmarkBlockTests(TestCase):
         raw_document: list[dict[str, Any]] = [
             {
                 "jmhVersion": "1.37",
-                "benchmark": "s1_4x.Benchmark.run",
+                "benchmark": "s1_4x.benchmarks.test.case_a",
                 "mode": "avgt",
                 "threads": 1,
                 "forks": 3,
@@ -739,12 +771,23 @@ class NativeBenchmarkBlockTests(TestCase):
                     {
                         "schemaVersion": ("s1.4x-native-case-execution-receipt-v1"),
                         "boundaryId": "scala",
-                        "selectorId": "scala/test",
+                        "selectorId": selector_id,
                         "caseId": "case-a",
                         "commandArgv": [
-                            "java",
-                            "-jar",
                             str(benchmark_executable.resolve()),
+                            "--power",
+                            "run",
+                            str(project_scala.resolve()),
+                            str(selected_profile.resolve()),
+                            str((scala_root / "src/main/scala").resolve()),
+                            str((scala_root / "benchmarks").resolve()),
+                            "--server=false",
+                            "--jvm",
+                            "system",
+                            "--jmh",
+                            "--jmh-version",
+                            "1.37",
+                            "--",
                             "-bm",
                             "avgt",
                             "-tu",
@@ -765,14 +808,17 @@ class NativeBenchmarkBlockTests(TestCase):
                             "json",
                             "-rff",
                             str(raw),
+                            jmh_include_regex,
                         ],
                         "environment": {"S1_4X_BENCHMARK_CASE_ID": "case-a"},
                         "exitCode": 0,
                         "rawEvidencePath": "raw/000.json",
                         "rawEvidenceSha256": raw_sha,
                         "provenance": {
-                            "planPath": str(PLAN.resolve()),
-                            "planSha256": hashlib.sha256(PLAN.read_bytes()).hexdigest(),
+                            "planPath": str(plan_path.resolve()),
+                            "planSha256": hashlib.sha256(
+                                plan_path.read_bytes()
+                            ).hexdigest(),
                             "fixtureRootPath": str(FIXTURES.resolve()),
                             "fixtureFreezeIdentitySha256": _canonical_sha256(
                                 plan["fixtureFreezeIdentity"]
@@ -781,7 +827,7 @@ class NativeBenchmarkBlockTests(TestCase):
                             "inputLedgerSha256": hashlib.sha256(
                                 input_ledger.read_bytes()
                             ).hexdigest(),
-                            "selectorId": "scala/test",
+                            "selectorId": selector_id,
                             "caseIds": ["case-a"],
                             "benchmarkExecutablePath": str(benchmark_executable.resolve()),
                             "benchmarkExecutableSha256": hashlib.sha256(
@@ -790,6 +836,19 @@ class NativeBenchmarkBlockTests(TestCase):
                             "effectiveRuntimeArgumentsSha256": (EFFECTIVE_RUNTIME_ARGUMENTS_SHA256),
                             "candidateProvenance": {
                                 "kind": "scala",
+                                "selectedProfilePath": str(
+                                    selected_profile.resolve()
+                                ),
+                                "selectedProfileSha256": hashlib.sha256(
+                                    selected_profile.read_bytes()
+                                ).hexdigest(),
+                                "selectedProfileId": "profile-a",
+                                "sourceInputManifestPath": str(
+                                    source_input_manifest.resolve()
+                                ),
+                                "sourceInputManifestSha256": hashlib.sha256(
+                                    source_input_manifest.read_bytes()
+                                ).hexdigest(),
                                 "effectiveJvmArgumentsCapabilityPath": str(
                                     jvm_capability.resolve()
                                 ),
@@ -807,7 +866,7 @@ class NativeBenchmarkBlockTests(TestCase):
             return {
                 "schemaVersion": "s1.4x-native-contract-validation-v1",
                 "boundaryId": "scala",
-                "selectorId": "scala/test",
+                "selectorId": selector_id,
                 "framework": "JMH",
                 "frameworkVersion": "1.37",
                 "configuration": {
@@ -837,15 +896,15 @@ class NativeBenchmarkBlockTests(TestCase):
         validate_native_contract_evidence(
             evidence_for(raw_document),
             boundary_id="scala",
-            selector_id="scala/test",
+            selector_id=selector_id,
             block_directory=temporary,
             native_cases=native_cases,
             native_statistics_cases=statistics_cases,
-            plan_path=PLAN,
+            plan_path=plan_path,
             fixture_root_path=FIXTURES,
             input_ledger_path=input_ledger,
             effective_runtime_arguments_sha256=(EFFECTIVE_RUNTIME_ARGUMENTS_SHA256),
-            profile="baseline",
+            profile="profile-a",
         )
 
         forged_provenance = evidence_for(raw_document)
@@ -865,15 +924,81 @@ class NativeBenchmarkBlockTests(TestCase):
             validate_native_contract_evidence(
                 forged_provenance,
                 boundary_id="scala",
-                selector_id="scala/test",
+                selector_id=selector_id,
                 block_directory=temporary,
                 native_cases=native_cases,
                 native_statistics_cases=statistics_cases,
-                plan_path=PLAN,
+                plan_path=plan_path,
                 fixture_root_path=FIXTURES,
                 input_ledger_path=input_ledger,
                 effective_runtime_arguments_sha256=(EFFECTIVE_RUNTIME_ARGUMENTS_SHA256),
-                profile="baseline",
+                profile="profile-a",
+            )
+
+        direct_runner = evidence_for(raw_document)
+        receipt_document = json.loads(receipt.read_text(encoding="utf-8"))
+        receipt_document["commandArgv"] = [
+            str(benchmark_executable.resolve()),
+            "-bm",
+            "avgt",
+            "-rff",
+            str(raw),
+            jmh_include_regex,
+        ]
+        receipt.write_text(
+            json.dumps(receipt_document, sort_keys=True),
+            encoding="utf-8",
+        )
+        direct_runner["cases"][0]["executionReceiptSha256"] = hashlib.sha256(
+            receipt.read_bytes()
+        ).hexdigest()
+        with self.assertRaisesRegex(GateError, "NATIVE_EXECUTION_ARGV_INVALID"):
+            validate_native_contract_evidence(
+                direct_runner,
+                boundary_id="scala",
+                selector_id=selector_id,
+                block_directory=temporary,
+                native_cases=native_cases,
+                native_statistics_cases=statistics_cases,
+                plan_path=plan_path,
+                fixture_root_path=FIXTURES,
+                input_ledger_path=input_ledger,
+                effective_runtime_arguments_sha256=(
+                    EFFECTIVE_RUNTIME_ARGUMENTS_SHA256
+                ),
+                profile="profile-a",
+            )
+
+        forged_profile = evidence_for(raw_document)
+        receipt_document = json.loads(receipt.read_text(encoding="utf-8"))
+        receipt_document["provenance"]["candidateProvenance"][
+            "selectedProfileSha256"
+        ] = "0" * 64
+        receipt.write_text(
+            json.dumps(receipt_document, sort_keys=True),
+            encoding="utf-8",
+        )
+        forged_profile["cases"][0]["executionReceiptSha256"] = hashlib.sha256(
+            receipt.read_bytes()
+        ).hexdigest()
+        with self.assertRaisesRegex(
+            GateError,
+            "NATIVE_EXECUTION_PROVENANCE_INVALID",
+        ):
+            validate_native_contract_evidence(
+                forged_profile,
+                boundary_id="scala",
+                selector_id=selector_id,
+                block_directory=temporary,
+                native_cases=native_cases,
+                native_statistics_cases=statistics_cases,
+                plan_path=plan_path,
+                fixture_root_path=FIXTURES,
+                input_ledger_path=input_ledger,
+                effective_runtime_arguments_sha256=(
+                    EFFECTIVE_RUNTIME_ARGUMENTS_SHA256
+                ),
+                profile="profile-a",
             )
 
         wrong_shape = copy.deepcopy(raw_document)
@@ -882,15 +1007,15 @@ class NativeBenchmarkBlockTests(TestCase):
             validate_native_contract_evidence(
                 evidence_for(wrong_shape),
                 boundary_id="scala",
-                selector_id="scala/test",
+                selector_id=selector_id,
                 block_directory=temporary,
                 native_cases=native_cases,
                 native_statistics_cases=statistics_cases,
-                plan_path=PLAN,
+                plan_path=plan_path,
                 fixture_root_path=FIXTURES,
                 input_ledger_path=input_ledger,
                 effective_runtime_arguments_sha256=(EFFECTIVE_RUNTIME_ARGUMENTS_SHA256),
-                profile="baseline",
+                profile="profile-a",
             )
 
         wrong_score = copy.deepcopy(raw_document)
@@ -899,15 +1024,53 @@ class NativeBenchmarkBlockTests(TestCase):
             validate_native_contract_evidence(
                 evidence_for(wrong_score),
                 boundary_id="scala",
-                selector_id="scala/test",
+                selector_id=selector_id,
                 block_directory=temporary,
                 native_cases=native_cases,
                 native_statistics_cases=statistics_cases,
-                plan_path=PLAN,
+                plan_path=plan_path,
                 fixture_root_path=FIXTURES,
                 input_ledger_path=input_ledger,
                 effective_runtime_arguments_sha256=(EFFECTIVE_RUNTIME_ARGUMENTS_SHA256),
-                profile="baseline",
+                profile="profile-a",
+            )
+
+        wrong_benchmark = copy.deepcopy(raw_document)
+        wrong_benchmark[0]["benchmark"] = "s1_4x.benchmarks.other.case_a"
+        with self.assertRaisesRegex(GateError, "JMH_RAW_CASE_SELECTION_INVALID"):
+            validate_native_contract_evidence(
+                evidence_for(wrong_benchmark),
+                boundary_id="scala",
+                selector_id=selector_id,
+                block_directory=temporary,
+                native_cases=native_cases,
+                native_statistics_cases=statistics_cases,
+                plan_path=plan_path,
+                fixture_root_path=FIXTURES,
+                input_ledger_path=input_ledger,
+                effective_runtime_arguments_sha256=(
+                    EFFECTIVE_RUNTIME_ARGUMENTS_SHA256
+                ),
+                profile="profile-a",
+            )
+
+        hidden_params = copy.deepcopy(raw_document)
+        hidden_params[0]["params"] = {"caseId": "case-forged"}
+        with self.assertRaisesRegex(GateError, "JMH_RAW_CASE_SELECTION_INVALID"):
+            validate_native_contract_evidence(
+                evidence_for(hidden_params),
+                boundary_id="scala",
+                selector_id=selector_id,
+                block_directory=temporary,
+                native_cases=native_cases,
+                native_statistics_cases=statistics_cases,
+                plan_path=plan_path,
+                fixture_root_path=FIXTURES,
+                input_ledger_path=input_ledger,
+                effective_runtime_arguments_sha256=(
+                    EFFECTIVE_RUNTIME_ARGUMENTS_SHA256
+                ),
+                profile="profile-a",
             )
 
         wrong_version = copy.deepcopy(raw_document)
@@ -916,15 +1079,15 @@ class NativeBenchmarkBlockTests(TestCase):
             validate_native_contract_evidence(
                 evidence_for(wrong_version),
                 boundary_id="scala",
-                selector_id="scala/test",
+                selector_id=selector_id,
                 block_directory=temporary,
                 native_cases=native_cases,
                 native_statistics_cases=statistics_cases,
-                plan_path=PLAN,
+                plan_path=plan_path,
                 fixture_root_path=FIXTURES,
                 input_ledger_path=input_ledger,
                 effective_runtime_arguments_sha256=(EFFECTIVE_RUNTIME_ARGUMENTS_SHA256),
-                profile="baseline",
+                profile="profile-a",
             )
 
         tampered_receipt_evidence = evidence_for(raw_document)
@@ -939,15 +1102,15 @@ class NativeBenchmarkBlockTests(TestCase):
             validate_native_contract_evidence(
                 tampered_receipt_evidence,
                 boundary_id="scala",
-                selector_id="scala/test",
+                selector_id=selector_id,
                 block_directory=temporary,
                 native_cases=native_cases,
                 native_statistics_cases=statistics_cases,
-                plan_path=PLAN,
+                plan_path=plan_path,
                 fixture_root_path=FIXTURES,
                 input_ledger_path=input_ledger,
                 effective_runtime_arguments_sha256=(EFFECTIVE_RUNTIME_ARGUMENTS_SHA256),
-                profile="baseline",
+                profile="profile-a",
             )
 
     def test_marker_cli_performs_only_pre_run_to_measurement_transition(self) -> None:
