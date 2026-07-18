@@ -26,6 +26,18 @@ from executable_identity import (  # noqa: E402
     inspect_regular_file_path,
 )
 
+__all__ = [
+    "BOUNDARY_IDS",
+    "CommandManifestError",
+    "boundary_command_template",
+    "build_manifest",
+    "host_command_template",
+    "inspect_executable_identity",
+    "validate_manifest",
+    "validate_manifest_file",
+    "write_manifest_exclusive",
+]
+
 BOUNDARY_IDS = (
     "python-numpy-s1-4",
     "python-numpy-s1-4r",

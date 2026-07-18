@@ -19,7 +19,7 @@ from contextlib import ExitStack, contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from string import Formatter
-from typing import Any
+from typing import Any, Protocol
 
 from benchmark_contract import ContractError, sha256_file, strict_json_load
 from executable_identity import (
@@ -97,6 +97,14 @@ class PinnedExecutable:
     binding: dict[str, str]
     descriptor: int
     required_seals: int
+
+
+class WaitableProcess(Protocol):
+    """process-group 종료 helper가 요구하는 최소 child-process 계약이다."""
+
+    pid: int
+
+    def wait(self, timeout: float | None = None) -> int: ...
 
 
 def _create_memfd(name: str, flags: int) -> int:
@@ -797,7 +805,7 @@ def _wait_for_process_group_exit(
 
 
 def _wait_for_leader(
-    process: subprocess.Popen[bytes],
+    process: WaitableProcess,
     *,
     timeout_seconds: float,
 ) -> bool:
@@ -810,7 +818,7 @@ def _wait_for_leader(
     return True
 
 
-def _terminate_process_group(process: subprocess.Popen[bytes]) -> None:
+def _terminate_process_group(process: WaitableProcess) -> None:
     """timeout 뒤 leader와 같은 session의 모든 descendant를 bounded 종료한다."""
 
     _signal_process_group(process.pid, signal.SIGTERM)
@@ -829,7 +837,7 @@ def _terminate_process_group(process: subprocess.Popen[bytes]) -> None:
         raise ContractError("TIMEOUT_PROCESS_LEADER_NOT_REAPED")
 
 
-def _reject_surviving_process_group(process: subprocess.Popen[bytes]) -> None:
+def _reject_surviving_process_group(process: WaitableProcess) -> None:
     """leader가 끝난 뒤 남은 descendant를 정리하고 해당 block을 무효화한다."""
 
     if not _process_group_exists(process.pid):
