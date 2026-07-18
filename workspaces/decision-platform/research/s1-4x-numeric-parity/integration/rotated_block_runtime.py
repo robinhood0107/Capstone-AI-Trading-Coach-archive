@@ -26,7 +26,11 @@ BENCHMARKS_DIRECTORY = Path(__file__).resolve().parents[1] / "benchmarks"
 if str(BENCHMARKS_DIRECTORY) not in sys.path:
     sys.path.append(str(BENCHMARKS_DIRECTORY))
 
-from benchmark_contract import ContractError, sha256_file, strict_json_load  # noqa: E402
+from benchmark_contract import (  # noqa: E402
+    ContractError,
+    sha256_file,
+    strict_json_load,  # noqa: F401 - path-loader absence is a tested compatibility surface.
+)
 from executable_identity import (  # noqa: E402
     ExecutableIdentityError,
     inspect_executable_identity,
@@ -1111,9 +1115,19 @@ def _write_json_exclusive(path: Path, value: Any) -> None:
 def mark_measurement_entered(path: Path) -> None:
     """native wrapper가 setup 완료 후 첫 timing 직전에 호출하는 단일 전이이다."""
 
-    if path.is_symlink() or not path.is_file():
-        raise ContractError("TIMEOUT_QUALIFICATION_ARTIFACT_MISSING")
-    document = strict_json_load(path)
+    try:
+        snapshot = inspect_regular_file_path(
+            path,
+            role="timeoutQualificationPreRun",
+        )
+    except ExecutableIdentityError as exc:
+        raise ContractError(
+            "TIMEOUT_QUALIFICATION_ARTIFACT_MISSING"
+        ) from exc
+    document = _strict_json_load_bytes(
+        snapshot.payload,
+        error_leaf="INVALID_PRE_RUN_QUALIFICATION_STATE",
+    )
     if (
         not isinstance(document, dict)
         or document.get("schemaVersion") != "s1.4x-timeout-qualification-v1"
@@ -1126,6 +1140,21 @@ def mark_measurement_entered(path: Path) -> None:
     entered["measurementEntered"] = True
     temporary = path.with_name(f".{path.name}.{os.getpid()}.measurement.tmp")
     _write_json_exclusive(temporary, entered)
+    try:
+        current = inspect_regular_file_path(
+            path,
+            role="timeoutQualificationPreReplace",
+        )
+    except ExecutableIdentityError as exc:
+        temporary.unlink(missing_ok=True)
+        raise ContractError(
+            "TIMEOUT_QUALIFICATION_CHANGED_BEFORE_TRANSITION"
+        ) from exc
+    if current.sha256 != snapshot.sha256:
+        temporary.unlink(missing_ok=True)
+        raise ContractError(
+            "TIMEOUT_QUALIFICATION_CHANGED_BEFORE_TRANSITION"
+        )
     os.replace(temporary, path)
 
 
@@ -1134,15 +1163,25 @@ def _verify_measurement_qualification(
     *,
     expected: dict[str, Any],
 ) -> str:
-    if path.is_symlink() or not path.is_file():
-        raise ContractError("TIMEOUT_QUALIFICATION_ARTIFACT_MISSING")
-    actual = strict_json_load(path)
+    try:
+        snapshot = inspect_regular_file_path(
+            path,
+            role="timeoutQualificationMeasurement",
+        )
+    except ExecutableIdentityError as exc:
+        raise ContractError(
+            "TIMEOUT_QUALIFICATION_ARTIFACT_MISSING"
+        ) from exc
+    actual = _strict_json_load_bytes(
+        snapshot.payload,
+        error_leaf="INVALID_MEASUREMENT_QUALIFICATION",
+    )
     entered = dict(expected)
     entered["phase"] = "MEASUREMENT"
     entered["measurementEntered"] = True
     if actual != entered:
         raise ContractError("INVALID_MEASUREMENT_QUALIFICATION")
-    return sha256_file(path)
+    return snapshot.sha256
 
 
 def _read_process_record(pid: int) -> ProcessRecord | None:

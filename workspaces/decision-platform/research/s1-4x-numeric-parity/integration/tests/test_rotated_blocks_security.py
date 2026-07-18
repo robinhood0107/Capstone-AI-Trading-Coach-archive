@@ -976,6 +976,17 @@ def test_measurement_transition_is_exact_and_tamper_evident(
     with pytest.raises(ContractError, match="INVALID_MEASUREMENT_QUALIFICATION"):
         runner._verify_measurement_qualification(path, expected=expected)
 
+    runner.mark_measurement_entered(path)
+    assert runner._verify_measurement_qualification(path, expected=expected) == (
+        sha256_file(path)
+    )
+
+    tampered = strict_json_load(path)
+    tampered["selectorInputClosure"]["expectedCaseIds"] = []
+    path.write_text(json.dumps(tampered, allow_nan=False), encoding="utf-8")
+    with pytest.raises(ContractError, match="INVALID_MEASUREMENT_QUALIFICATION"):
+        runner._verify_measurement_qualification(path, expected=expected)
+
 
 def test_measurement_qualification_hash_and_parse_share_one_snapshot(
     tmp_path: Path,
@@ -1037,17 +1048,6 @@ def test_measurement_qualification_hash_and_parse_share_one_snapshot(
 
     assert swap_attempted is False
     assert digest == hashlib.sha256(original).hexdigest()
-
-    runner.mark_measurement_entered(path)
-    assert runner._verify_measurement_qualification(path, expected=expected) == (
-        sha256_file(path)
-    )
-
-    tampered = strict_json_load(path)
-    tampered["selectorInputClosure"]["expectedCaseIds"] = []
-    path.write_text(json.dumps(tampered, allow_nan=False), encoding="utf-8")
-    with pytest.raises(ContractError, match="INVALID_MEASUREMENT_QUALIFICATION"):
-        runner._verify_measurement_qualification(path, expected=expected)
 
 
 def _install_execute_fakes(
