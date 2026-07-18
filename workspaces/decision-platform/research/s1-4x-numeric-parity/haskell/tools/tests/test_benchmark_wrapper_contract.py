@@ -131,6 +131,33 @@ class BenchmarkWrapperContractTests(unittest.TestCase):
         self.assertIn('"S1_4X_BENCHMARK_QUALIFICATION"', source)
         self.assertIn("INVALID_PRE_RUN_QUALIFICATION_STATE", source)
 
+    def test_benchmark_self_reports_the_exact_executed_runtime_identity(self) -> None:
+        source = BENCHMARK_MAIN.read_text(encoding="utf-8")
+        for token in (
+            "getExecutablePath",
+            "exclusiveAtomicWrite",
+            '"S1_4X_BENCHMARK_RUNTIME_IDENTITY"',
+            '"s1.4x-haskell-benchmark-runtime-identity-v1"',
+            '"boundaryId" .= ("haskell"',
+            '"selectorId" .= selectorIdText',
+            '"executedBenchmarkPath" .= executablePath',
+            '"executedBenchmarkSha256" .= executableSha256',
+            '"status" .= ("PASS"',
+        ):
+            with self.subTest(token=token):
+                self.assertIn(token, source)
+        self.assertLess(
+            source.index("publishRuntimeIdentity"),
+            source.index("defaultMain"),
+        )
+
+    def test_outer_wrapper_exports_verified_authoritative_ghc_sha(self) -> None:
+        source = WRAPPER.read_text(encoding="utf-8")
+        self.assertIn(
+            'S1_4X_AUTHORITATIVE_GHC_SHA256="$AUTHORITATIVE_GHC_SHA256"',
+            source,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

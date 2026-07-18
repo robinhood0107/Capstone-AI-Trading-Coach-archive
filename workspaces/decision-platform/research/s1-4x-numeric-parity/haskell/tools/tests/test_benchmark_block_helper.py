@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
+import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -111,6 +114,70 @@ class BenchmarkBlockHelperTests(unittest.TestCase):
         ):
             with self.subTest(forbidden=forbidden):
                 self.assertNotIn(forbidden, source)
+
+    def test_runtime_identity_is_an_exact_self_reported_executable_object(
+        self,
+    ) -> None:
+        helper = load_helper()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            executable = root / "criterion-benchmark"
+            executable.write_bytes(b"verified benchmark executable")
+            executable.chmod(0o755)
+            digest = hashlib.sha256(executable.read_bytes()).hexdigest()
+            identity = root / "benchmark-runtime-identity.json"
+            document = {
+                "schemaVersion": "s1.4x-haskell-benchmark-runtime-identity-v1",
+                "boundaryId": "haskell",
+                "selectorId": "haskell/path-transform",
+                "executedBenchmarkPath": str(executable),
+                "executedBenchmarkSha256": digest,
+                "status": "PASS",
+            }
+            identity.write_text(
+                json.dumps(document, separators=(",", ":"), sort_keys=True),
+                encoding="utf-8",
+            )
+
+            executed_path, executed_sha256 = helper.validate_runtime_identity(
+                identity,
+                selector_id="haskell/path-transform",
+            )
+            self.assertEqual(executed_path, executable)
+            self.assertEqual(executed_sha256, digest)
+
+            for altered in (
+                {**document, "unknown": True},
+                {**document, "selectorId": "haskell/advanced-risk"},
+                {**document, "executedBenchmarkSha256": "0" * 64},
+            ):
+                with self.subTest(altered=altered):
+                    identity.write_text(
+                        json.dumps(altered, separators=(",", ":"), sort_keys=True),
+                        encoding="utf-8",
+                    )
+                    with self.assertRaises(helper.BlockError):
+                        helper.validate_runtime_identity(
+                            identity,
+                            selector_id="haskell/path-transform",
+                        )
+
+    def test_receipt_binds_runtime_executable_and_authoritative_ghc_identity(
+        self,
+    ) -> None:
+        source = MODULE_PATH.read_text(encoding="utf-8")
+        for field in (
+            "runtimeIdentityPath",
+            "runtimeIdentitySha256",
+            "executedBenchmarkPath",
+            "executedBenchmarkSha256",
+            "authoritativeGhcPath",
+            "authoritativeGhcSha256",
+        ):
+            with self.subTest(field=field):
+                self.assertIn(f'"{field}"', source)
+        self.assertIn('"S1_4X_BENCHMARK_RUNTIME_IDENTITY"', source)
+        self.assertIn('"S1_4X_AUTHORITATIVE_GHC_SHA256"', source)
 
 
 if __name__ == "__main__":
