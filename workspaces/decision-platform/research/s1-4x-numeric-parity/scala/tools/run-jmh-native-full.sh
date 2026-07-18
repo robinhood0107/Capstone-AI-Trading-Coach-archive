@@ -9,7 +9,7 @@ JVM_ALLOWLIST=""
 OUTPUT_DIR=""
 
 usage() {
-  printf 'usage: %s --plan <absolute-json> --profile A|B|C --case-id <id> --jvm-allowlist <absolute-json> --output-dir <new-absolute-block-directory/scala-jmh>\n' \
+  printf 'usage: %s --plan <absolute-json> --profile A|B|C --case-id <id> --jvm-allowlist <absolute-json> --output-dir <new-absolute-block-directory/scala-jmh/new-case-directory>\n' \
     "$0" >&2
   exit 64
 }
@@ -56,7 +56,7 @@ esac
 [[ "$JVM_ALLOWLIST" == /* && -f "$JVM_ALLOWLIST" && ! -L "$JVM_ALLOWLIST" ]] ||
   usage
 [[ "$OUTPUT_DIR" == /* && ! -e "$OUTPUT_DIR" && ! -L "$OUTPUT_DIR" ]] || usage
-[[ "$(basename -- "$OUTPUT_DIR")" == "scala-jmh" ]] || usage
+[[ "$(basename -- "$(dirname -- "$OUTPUT_DIR")")" == "scala-jmh" ]] || usage
 
 "$SCALA_ROOT/tools/assert-selected-profile.sh" --benchmark-subject
 selected_profile="$(
