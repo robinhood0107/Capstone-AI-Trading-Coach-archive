@@ -85,30 +85,55 @@ class BenchmarkWrapperContractTests(unittest.TestCase):
             "GIT_*",
         ):
             self.assertIn(forbidden_environment, source)
-        self.assertIn("/usr/bin/sha256sum", source)
-        self.assertIn("/usr/bin/awk", source)
+        self.assertIn("verify_pinned_object", source)
 
-    def test_outer_wrapper_requires_absolute_frozen_haskell_tool_paths(self) -> None:
+    def test_outer_wrapper_requires_shared_v3_path_sha_and_pinned_fd_triples(
+        self,
+    ) -> None:
         source = WRAPPER.read_text(encoding="utf-8")
-        for variable in (
-            "S1_4X_GHCUP_BIN",
-            "S1_4X_STACK_BIN",
+        for prefix in (
+            "S1_4X_GHCUP",
+            "S1_4X_STACK",
+            "S1_4X_AUTHORITATIVE_GHC",
+            "S1_4X_LATEST_GHC",
+            "S1_4X_HLINT",
+            "S1_4X_STYLISH",
         ):
-            with self.subTest(variable=variable):
-                self.assertIn(f"${{{variable}:?", source)
-        self.assertIn(
-            'export S1_4X_GHCUP_SHA256="'
-            '9ed5da5449b48043a0d17e767c05d2ef585e25a639bb934329496c6d2fad9cf8"',
-            source,
-        )
-        self.assertIn(
-            'export S1_4X_STACK_SHA256="'
-            '923dbd137756652c67b376e2447c655b87fcc373f4d104b5073bca913471ecbe"',
-            source,
-        )
+            with self.subTest(prefix=prefix):
+                for suffix in ("_BIN", "_SHA256", "_PINNED_FD_PATH"):
+                    self.assertIn(f"${{{prefix}{suffix}:?", source)
+                    self.assertIn(f'{prefix}{suffix}="', source)
+        self.assertNotIn("export S1_4X_GHCUP_SHA256=", source)
+        self.assertNotIn("export S1_4X_STACK_SHA256=", source)
         for forbidden_discovery in ("command -v", "which ", "type -P"):
             with self.subTest(forbidden_discovery=forbidden_discovery):
                 self.assertNotIn(forbidden_discovery, source)
+
+    def test_outer_wrapper_forwards_profile_evidence_fd_sha_source_triples(
+        self,
+    ) -> None:
+        source = WRAPPER.read_text(encoding="utf-8")
+        evidence = {
+            "S1_4X_HASKELL_BASELINE_CORRECTNESS": "BASELINE_CORRECTNESS",
+            "S1_4X_HASKELL_OPTIMIZED_CORRECTNESS": "OPTIMIZED_CORRECTNESS",
+            "S1_4X_HASKELL_QUALIFICATION_ARTIFACT": "QUALIFICATION_ARTIFACT",
+        }
+        for prefix, local_name in evidence.items():
+            with self.subTest(prefix=prefix):
+                self.assertIn(f"${{{prefix}:?", source)
+                self.assertIn(f"${{{prefix}_SHA256:?", source)
+                self.assertIn(f"${{{prefix}_SOURCE_PATH:?", source)
+                self.assertIn(f'{prefix}="${local_name}"', source)
+                self.assertIn(f'{prefix}_SHA256="', source)
+                self.assertIn(f'{prefix}_SOURCE_PATH="', source)
+
+    def test_original_tool_paths_are_layout_only_and_never_reopened(self) -> None:
+        source = WRAPPER.read_text(encoding="utf-8")
+        self.assertIn("verify_source_path_layout", source)
+        self.assertIn("verify_pinned_object", source)
+        self.assertNotIn("verify_executable", source)
+        self.assertNotIn('/usr/bin/realpath -e -- "$executable"', source)
+        self.assertNotIn('/usr/bin/sha256sum "$executable"', source)
 
     def test_wrapper_mode_is_regular_not_symlink(self) -> None:
         self.assertFalse(WRAPPER.is_symlink())
@@ -155,6 +180,11 @@ class BenchmarkWrapperContractTests(unittest.TestCase):
         source = WRAPPER.read_text(encoding="utf-8")
         self.assertIn(
             'S1_4X_AUTHORITATIVE_GHC_SHA256="$AUTHORITATIVE_GHC_SHA256"',
+            source,
+        )
+        self.assertIn(
+            'S1_4X_AUTHORITATIVE_GHC_PINNED_FD_PATH='
+            '"$AUTHORITATIVE_GHC_PINNED_FD_PATH"',
             source,
         )
 

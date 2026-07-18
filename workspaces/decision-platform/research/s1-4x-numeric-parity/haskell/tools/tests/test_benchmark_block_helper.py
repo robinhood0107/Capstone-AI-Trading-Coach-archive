@@ -11,6 +11,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 TOOLS_ROOT = Path(__file__).resolve().parents[1]
@@ -40,8 +41,12 @@ class BenchmarkBlockHelperTests(unittest.TestCase):
     def test_inner_command_is_exact_network_free_frozen_argv(self) -> None:
         helper = load_helper()
         command = helper.build_stack_benchmark_command(
-            ghcup_bin=Path("/tools/ghcup"),
-            stack_bin=Path("/tools/stack"),
+            ghcup_bin=Path("/proc/self/fd/70"),
+            stack_bin=Path("/proc/self/fd/71"),
+            tool_path=(
+                "/cache/stack-root-benchmark-abc/tool-bin:"
+                "/toolchain/ghc-9.10.3/bin:/usr/bin:/bin"
+            ),
             stack_yaml=Path("/repo/haskell/stack.yaml"),
             stack_root=Path("/cache/stack-root-benchmark-abc"),
             work_dir=Path("/cache/stack-root-benchmark-abc/work"),
@@ -53,7 +58,7 @@ class BenchmarkBlockHelperTests(unittest.TestCase):
         self.assertEqual(
             command,
             [
-                "/tools/ghcup",
+                "/proc/self/fd/70",
                 "--offline",
                 "run",
                 "--quick",
@@ -62,7 +67,12 @@ class BenchmarkBlockHelperTests(unittest.TestCase):
                 "--stack",
                 "3.11.1",
                 "--",
-                "/tools/stack",
+                "/usr/bin/env",
+                (
+                    "PATH=/cache/stack-root-benchmark-abc/tool-bin:"
+                    "/toolchain/ghc-9.10.3/bin:/usr/bin:/bin"
+                ),
+                "/proc/self/fd/71",
                 "--stack-root",
                 "/cache/stack-root-benchmark-abc",
                 "--work-dir",
@@ -84,7 +94,7 @@ class BenchmarkBlockHelperTests(unittest.TestCase):
                 ),
             ],
         )
-        self.assertNotIn("--offline", command[10:])
+        self.assertNotIn("--offline", command[12:])
 
     def test_shared_pipeline_owns_ledger_native_projection_and_block_result(
         self,
@@ -217,6 +227,221 @@ class BenchmarkBlockHelperTests(unittest.TestCase):
                     label="TEST_EVIDENCE",
                     max_bytes=1024,
                 )
+
+    def test_profile_evidence_is_parsed_and_hashed_from_the_supplied_fd(
+        self,
+    ) -> None:
+        helper = load_helper()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            payload = b'{"candidateSourceCommit":"' + b"a" * 40 + b'"}\n'
+            pinned_object = root / "opened-evidence.json"
+            pinned_object.write_bytes(payload)
+            descriptor = os.open(pinned_object, os.O_RDONLY)
+            try:
+                prefix = "S1_4X_HASKELL_BASELINE_CORRECTNESS"
+                environment = {
+                    prefix: f"/proc/self/fd/{descriptor}",
+                    f"{prefix}_SHA256": hashlib.sha256(payload).hexdigest(),
+                    f"{prefix}_SOURCE_PATH": (
+                        "/source/path/that/is-never-reopened/correctness.json"
+                    ),
+                }
+                with mock.patch.dict(os.environ, environment, clear=False):
+                    snapshot = helper.pinned_json_environment_evidence(
+                        prefix,
+                        label="BASELINE_CORRECTNESS",
+                        max_bytes=1024,
+                    )
+                self.assertEqual(snapshot.payload, payload)
+                self.assertEqual(
+                    snapshot.document,
+                    {"candidateSourceCommit": "a" * 40},
+                )
+                self.assertEqual(
+                    snapshot.source_path,
+                    Path(environment[f"{prefix}_SOURCE_PATH"]),
+                )
+                self.assertEqual(snapshot.fd_path, Path(environment[prefix]))
+
+                environment[f"{prefix}_SHA256"] = "0" * 64
+                with mock.patch.dict(os.environ, environment, clear=False):
+                    with self.assertRaisesRegex(
+                        helper.BlockError,
+                        "SHA256_MISMATCH",
+                    ):
+                        helper.pinned_json_environment_evidence(
+                            prefix,
+                            label="BASELINE_CORRECTNESS",
+                            max_bytes=1024,
+                        )
+            finally:
+                os.close(descriptor)
+
+    def test_pinned_tool_fd_inheritance_reaches_nested_stack_and_ghc(
+        self,
+    ) -> None:
+        helper = load_helper()
+
+        def write_executable(path: Path, source: str) -> None:
+            path.write_text(source, encoding="utf-8")
+            path.chmod(0o755)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            marker = root / "ghc-reached.txt"
+            ghcup_source = root / "ghcup"
+            stack_source = root / "stack"
+            ghc_source = root / "ghc"
+            shared_prelude = (
+                "#!/usr/bin/python3\n"
+                "import os\n"
+                "import subprocess\n"
+                "import sys\n"
+                "fds = tuple(int(value) for value in "
+                "os.environ['TEST_PASS_FDS'].split(','))\n"
+            )
+            write_executable(
+                ghcup_source,
+                shared_prelude
+                + "separator = sys.argv.index('--')\n"
+                + "completed = subprocess.run("
+                + "sys.argv[separator + 1:], check=False, pass_fds=fds)\n"
+                + "raise SystemExit(completed.returncode)\n",
+            )
+            write_executable(
+                stack_source,
+                shared_prelude
+                + "import shutil\n"
+                + "ghc = shutil.which('ghc')\n"
+                + "if ghc != os.environ['TEST_GHC_SHIM']:\n"
+                + "    raise SystemExit(91)\n"
+                + "completed = subprocess.run("
+                + "[ghc, '--nested-probe'], check=False, pass_fds=fds)\n"
+                + "raise SystemExit(completed.returncode)\n",
+            )
+            write_executable(
+                ghc_source,
+                "#!/usr/bin/python3\n"
+                "import os\n"
+                "from pathlib import Path\n"
+                "Path(os.environ['TEST_MARKER']).write_text("
+                "os.readlink(os.environ['TEST_GHC_SHIM']), encoding='utf-8')\n",
+            )
+            descriptors = [
+                os.open(path, os.O_RDONLY)
+                for path in (ghcup_source, stack_source, ghc_source)
+            ]
+            try:
+                pinned = []
+                for label, path, descriptor in zip(
+                    ("GHCUP", "STACK", "AUTHORITATIVE_GHC"),
+                    (ghcup_source, stack_source, ghc_source),
+                    descriptors,
+                    strict=True,
+                ):
+                    prefix = f"S1_4X_{label}"
+                    with mock.patch.dict(
+                        os.environ,
+                        {
+                            f"{prefix}_BIN": str(path),
+                            f"{prefix}_SHA256": hashlib.sha256(
+                                path.read_bytes()
+                            ).hexdigest(),
+                            f"{prefix}_PINNED_FD_PATH": (
+                                f"/proc/self/fd/{descriptor}"
+                            ),
+                        },
+                        clear=False,
+                    ):
+                        pinned.append(
+                            helper.pinned_executable_environment(
+                                prefix,
+                                label=label,
+                            )
+                        )
+                ghcup, stack, ghc = pinned
+                stack_root = root / "stack-root-benchmark-probe"
+                stack_root.mkdir(mode=0o700)
+                tool_path, ghc_shim = helper.prepare_authoritative_ghc_shim(
+                    stack_root=stack_root,
+                    authoritative_ghc=ghc,
+                )
+                self.assertEqual(
+                    sorted(path.name for path in ghc_shim.parent.iterdir()),
+                    ["ghc"],
+                )
+                self.assertEqual(os.readlink(ghc_shim), str(ghc.fd_path))
+                self.assertEqual(tool_path.split(":", 1)[0], str(ghc_shim.parent))
+                command = helper.build_stack_benchmark_command(
+                    ghcup_bin=ghcup.fd_path,
+                    stack_bin=stack.fd_path,
+                    tool_path=tool_path,
+                    stack_yaml=root / "stack.yaml",
+                    stack_root=stack_root,
+                    work_dir=stack_root / "work",
+                    profile_options=["-O0", "-fasm"],
+                    time_limit_seconds=5,
+                    native_report=root / "raw.json",
+                    criterion_prefix="probe/",
+                )
+                environment = dict(os.environ)
+                environment.update(
+                    {
+                        "TEST_PASS_FDS": ",".join(
+                            str(descriptor) for descriptor in descriptors
+                        ),
+                        "TEST_GHC_SHIM": str(ghc_shim),
+                        "TEST_MARKER": str(marker),
+                    }
+                )
+                completed = helper.run_pinned_subprocess(
+                    command,
+                    cwd=root,
+                    environment=environment,
+                    pinned_executables=pinned,
+                    capture_output=True,
+                )
+                self.assertEqual(
+                    completed.returncode,
+                    0,
+                    completed.stderr.decode("utf-8", errors="replace"),
+                )
+                self.assertEqual(marker.read_text(encoding="utf-8"), str(ghc.fd_path))
+            finally:
+                for descriptor in descriptors:
+                    os.close(descriptor)
+
+    def test_ghc_shim_directory_must_be_fresh_and_output_bound(self) -> None:
+        helper = load_helper()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            executable = root / "ghc"
+            executable.write_bytes(b"fake ghc")
+            executable.chmod(0o755)
+            descriptor = os.open(executable, os.O_RDONLY)
+            try:
+                pinned = helper.PinnedExecutable(
+                    label="AUTHORITATIVE_GHC",
+                    source_path=Path("/toolchain/ghc-9.10.3/bin/ghc"),
+                    fd_path=Path(f"/proc/self/fd/{descriptor}"),
+                    descriptor=descriptor,
+                    sha256=hashlib.sha256(executable.read_bytes()).hexdigest(),
+                    mode=executable.stat().st_mode,
+                )
+                stack_root = root / "stack-root"
+                stack_root.mkdir()
+                (stack_root / "tool-bin").mkdir()
+                with self.assertRaisesRegex(
+                    helper.BlockError,
+                    "TOOL_SHIM_ALREADY_EXISTS",
+                ):
+                    helper.prepare_authoritative_ghc_shim(
+                        stack_root=stack_root,
+                        authoritative_ghc=pinned,
+                    )
+            finally:
+                os.close(descriptor)
 
     def test_benchmark_subject_requires_clean_exact_head(self) -> None:
         helper = load_helper()
