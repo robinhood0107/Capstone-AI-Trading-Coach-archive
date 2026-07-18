@@ -3,7 +3,9 @@ set -euo pipefail
 
 SCALA_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 S1_ROOT="$(cd -- "$SCALA_ROOT/.." && pwd -P)"
-DOCKER_BIN="${S1_4X_DOCKER_BIN:?set exact Docker CLI binary path}"
+DOCKER_BIN="${S1_4X_DOCKER_BIN:?set validated absolute Docker CLI path}"
+DOCKER_SHA256="${S1_4X_DOCKER_SHA256:?set exact Docker CLI SHA-256}"
+CALLER_BASE_IMAGE="${S1_4X_SCALA_BASE_IMAGE_REF:?set caller-frozen base name@sha256:digest}"
 CANDIDATE=""
 BASE_IMAGE=""
 IMAGE_TAG=""
@@ -44,64 +46,28 @@ while (($# > 0)); do
 done
 
 [[ "$CANDIDATE" == /* && -f "$CANDIDATE" && ! -L "$CANDIDATE" ]] || usage
+[[ "$BASE_IMAGE" == "$CALLER_BASE_IMAGE" ]] || {
+  printf 'base image differs from caller-frozen digest reference\n' >&2
+  exit 69
+}
 [[ "$BASE_IMAGE" =~ @sha256:[0-9a-f]{64}$ ]] || usage
 [[ "$IMAGE_TAG" =~ ^[a-z0-9][a-z0-9._/-]*:[a-z0-9][a-z0-9._-]*$ ]] || usage
 [[ "$OUTPUT" == /* && ! -e "$OUTPUT" && ! -L "$OUTPUT" ]] || usage
-[[ -x "$DOCKER_BIN" && "$DOCKER_BIN" == /* && ! -L "$DOCKER_BIN" ]] || usage
+[[ "$DOCKER_BIN" == /* && -f "$DOCKER_BIN" && -x "$DOCKER_BIN" \
+  && ! -L "$DOCKER_BIN" ]] || usage
+[[ "$DOCKER_SHA256" =~ ^[0-9a-f]{64}$ ]] || usage
 
 CACHE_ROOT="${S1_4X_CACHE_ROOT:-$HOME/.cache/s1-4x}"
 mkdir -p "$CACHE_ROOT/scratch" "$(dirname -- "$OUTPUT")"
-context="$(mktemp -d -p "$CACHE_ROOT/scratch" s1-4x-scala-oci-build.XXXXXXXX)"
-cleanup() {
-  [[ "$context" == "$CACHE_ROOT"/scratch/s1-4x-scala-oci-build.* ]] || {
-    printf 'refusing unsafe OCI context cleanup: %s\n' "$context" >&2
-    exit 1
-  }
-  rm -rf -- "$context"
-}
-trap cleanup EXIT
+[[ "$CACHE_ROOT" == /* && -d "$CACHE_ROOT" && ! -L "$CACHE_ROOT" ]] || usage
 
-mkdir -p "$context/fixture-bundle"
-cp -- "$CANDIDATE" "$context/candidate.jar"
-cp -a -- "$S1_ROOT/contract/fixtures/." "$context/fixture-bundle/"
-cp -- "$SCALA_ROOT/Containerfile" "$context/Containerfile"
-candidate_sha="$(sha256sum "$CANDIDATE" | awk '{print $1}')"
-
-"$DOCKER_BIN" build \
-  --network=none \
-  --pull=false \
-  --build-arg "S1_4X_SCALA_BASE_IMAGE=$BASE_IMAGE" \
-  --build-arg "S1_4X_CANDIDATE_SHA256=$candidate_sha" \
-  --tag "$IMAGE_TAG" \
-  --file "$context/Containerfile" \
-  "$context"
-
-image_id="$("$DOCKER_BIN" image inspect --format '{{.Id}}' "$IMAGE_TAG")"
-[[ "$image_id" =~ ^sha256:[0-9a-f]{64}$ ]] || {
-  printf 'built image ID is not immutable\n' >&2
-  exit 1
-}
-python3 - "$OUTPUT" "$BASE_IMAGE" "$IMAGE_TAG" "$image_id" "$candidate_sha" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-output, base_image, image_tag, image_id, candidate_sha = sys.argv[1:]
-result = {
-    "schemaVersion": "s1.4x-scala-oci-build-result-v1",
-    "baseImage": base_image,
-    "localTag": image_tag,
-    "imageId": image_id,
-    "candidateSha256": candidate_sha,
-    "buildNetwork": "none",
-    "pull": False,
-    "aggregateStatus": "PASS",
-}
-with Path(output).open("x", encoding="utf-8", newline="\n") as stream:
-    stream.write(
-        json.dumps(result, separators=(",", ":"), sort_keys=True) + "\n"
-    )
-PY
-
-printf 'SCALA_OCI_BUILD_PASS imageId=%s candidateSha256=%s\n' \
-  "$image_id" "$candidate_sha"
+exec python3 "$SCALA_ROOT/tools/oci_evidence.py" build \
+  --docker "$DOCKER_BIN" \
+  --docker-sha256 "$DOCKER_SHA256" \
+  --candidate "$CANDIDATE" \
+  --base-image "$BASE_IMAGE" \
+  --image-tag "$IMAGE_TAG" \
+  --containerfile "$SCALA_ROOT/Containerfile" \
+  --fixture-root "$S1_ROOT/contract/fixtures" \
+  --cache-root "$CACHE_ROOT" \
+  --output "$OUTPUT"
