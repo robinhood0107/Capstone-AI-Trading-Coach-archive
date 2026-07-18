@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -19,6 +20,9 @@ from source_input_manifest import validated_source_files
 
 class ScalafmtEvidenceError(ValueError):
     """Scalafmt evidence를 완전하게 만들 수 없음을 나타낸다."""
+
+
+DOWNLOAD_LINE = re.compile(r"(?i)\b(?:downloading|downloaded)\s+https?://")
 
 
 def sha256_file(path: Path) -> str:
@@ -67,6 +71,7 @@ def strict_json(path: Path) -> dict[str, Any]:
 def format_command(
     *,
     scala_cli: Path,
+    scalafmt_launcher: Path,
     config: Path,
     sources: list[Path],
     check: bool,
@@ -81,6 +86,9 @@ def format_command(
         "3.11.4",
         "--scalafmt-conf",
         str(config),
+        "--scalafmt-launcher",
+        str(scalafmt_launcher),
+        "--offline",
     ]
     if check:
         command.append("--check")
@@ -111,11 +119,17 @@ def process_evidence(
     command: list[str],
     completed: subprocess.CompletedProcess[bytes],
 ) -> dict[str, Any]:
+    combined = (completed.stdout + b"\n" + completed.stderr).decode(
+        "utf-8", errors="replace"
+    )
     value = {
         "commandArgvSha256": canonical_sha256(command),
         "exitCode": completed.returncode,
         "stdoutSha256": hashlib.sha256(completed.stdout).hexdigest(),
         "stderrSha256": hashlib.sha256(completed.stderr).hexdigest(),
+        "downloadLineCount": sum(
+            1 for line in combined.splitlines() if DOWNLOAD_LINE.search(line)
+        ),
     }
     return {**value, "evidenceSha256": canonical_sha256(value)}
 
@@ -148,6 +162,8 @@ def parser() -> argparse.ArgumentParser:
     value.add_argument("--policy", type=Path, required=True)
     value.add_argument("--manifest", type=Path, required=True)
     value.add_argument("--scala-cli", type=Path, required=True)
+    value.add_argument("--scalafmt-archive", type=Path, required=True)
+    value.add_argument("--scalafmt-launcher", type=Path, required=True)
     value.add_argument("--toolchain-lock", type=Path, required=True)
     value.add_argument("--output-dir", type=Path, required=True)
     return value
@@ -159,6 +175,8 @@ def run(arguments: argparse.Namespace) -> Path:
         "policy",
         "manifest",
         "scala_cli",
+        "scalafmt_archive",
+        "scalafmt_launcher",
         "toolchain_lock",
     ):
         path = getattr(arguments, name)
@@ -169,6 +187,9 @@ def run(arguments: argparse.Namespace) -> Path:
         or not arguments.policy.is_file()
         or not arguments.manifest.is_file()
         or not arguments.scala_cli.is_file()
+        or not arguments.scalafmt_archive.is_file()
+        or not arguments.scalafmt_launcher.is_file()
+        or not os.access(arguments.scalafmt_launcher, os.X_OK)
         or not arguments.toolchain_lock.is_file()
     ):
         raise ScalafmtEvidenceError("INPUT_PATH_MISSING")
@@ -182,6 +203,58 @@ def run(arguments: argparse.Namespace) -> Path:
     scala_root = arguments.scala_root.resolve(strict=True)
     policy = strict_json(arguments.policy)
     manifest = strict_json(arguments.manifest)
+    toolchain_lock = strict_json(arguments.toolchain_lock)
+    scalafmt_lock = toolchain_lock.get("scalafmt")
+    if not isinstance(scalafmt_lock, dict):
+        raise ScalafmtEvidenceError("SCALAFMT_ARTIFACT_LOCK_MISSING")
+    expected_artifact = {
+        "archiveUri": (
+            "https://github.com/scalameta/scalafmt/releases/download/"
+            "v3.11.4/scalafmt-x86_64-pc-linux.zip"
+        ),
+        "archivePathId": (
+            "S1_4X_CACHE_ROOT/coursier/https/github.com/scalameta/scalafmt/"
+            "releases/download/v3.11.4/scalafmt-x86_64-pc-linux.zip"
+        ),
+        "archiveSha256": (
+            "e7d43a5621074a63a46d5b287d0b0bb0650033deeb836af2b27515b2127476f2"
+        ),
+        "executablePathId": (
+            "COURSIER_ARCHIVE_CACHE/https/github.com/scalameta/scalafmt/"
+            "releases/download/v3.11.4/"
+            "scalafmt-x86_64-pc-linux.zip/scalafmt"
+        ),
+        "executableSha256": (
+            "88526f9f4d64c2fb023d54578812419f49e2ec09e30e4fb77443a05f1a59cac0"
+        ),
+        "resolvedVersionOutput": "scalafmt 3.11.4",
+        "resolutionLogUri": (
+            "evidence://s1-4x-scala-scalafmt-evidence-9c3cb8f-01/"
+            "logs/first-apply.stderr"
+        ),
+        "resolutionLogSha256": (
+            "1cc7516d57c230f10242f43884f12f3d26cbd6d681dbaed317262148c136b781"
+        ),
+        "networkPolicy": "OFFLINE_PINNED_LAUNCHER",
+    }
+    if any(scalafmt_lock.get(key) != value for key, value in expected_artifact.items()):
+        raise ScalafmtEvidenceError("SCALAFMT_ARTIFACT_LOCK_MISMATCH")
+    if (
+        sha256_file(arguments.scalafmt_archive)
+        != expected_artifact["archiveSha256"]
+        or sha256_file(arguments.scalafmt_launcher)
+        != expected_artifact["executableSha256"]
+    ):
+        raise ScalafmtEvidenceError("SCALAFMT_RESOLVED_ARTIFACT_SHA_MISMATCH")
+    version = subprocess.run(
+        [str(arguments.scalafmt_launcher), "--version"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    resolved_version_output = (version.stdout + version.stderr).strip()
+    if version.returncode != 0 or resolved_version_output != "scalafmt 3.11.4":
+        raise ScalafmtEvidenceError("SCALAFMT_RESOLVED_VERSION_MISMATCH")
     sources = validated_source_files(
         scala_root,
         manifest,
@@ -228,6 +301,7 @@ def run(arguments: argparse.Namespace) -> Path:
 
         first_command = format_command(
             scala_cli=arguments.scala_cli,
+            scalafmt_launcher=arguments.scalafmt_launcher,
             config=temporary_config,
             sources=temporary_sources,
             check=False,
@@ -241,10 +315,13 @@ def run(arguments: argparse.Namespace) -> Path:
         )
         if first.returncode != 0:
             raise ScalafmtEvidenceError("FIRST_SCALAFMT_APPLY_FAILED")
+        if process_evidence(first_command, first)["downloadLineCount"] != 0:
+            raise ScalafmtEvidenceError("FIRST_SCALAFMT_NETWORK_ACCESS_DETECTED")
         first_hash = source_tree_sha256(temporary, temporary_sources)
 
         second_command = format_command(
             scala_cli=arguments.scala_cli,
+            scalafmt_launcher=arguments.scalafmt_launcher,
             config=temporary_config,
             sources=temporary_sources,
             check=False,
@@ -258,12 +335,15 @@ def run(arguments: argparse.Namespace) -> Path:
         )
         if second.returncode != 0:
             raise ScalafmtEvidenceError("SECOND_SCALAFMT_APPLY_FAILED")
+        if process_evidence(second_command, second)["downloadLineCount"] != 0:
+            raise ScalafmtEvidenceError("SECOND_SCALAFMT_NETWORK_ACCESS_DETECTED")
         second_hash = source_tree_sha256(temporary, temporary_sources)
         if first_hash != second_hash:
             raise ScalafmtEvidenceError("SCALAFMT_NOT_BYTE_IDEMPOTENT")
 
         copied_check_command = format_command(
             scala_cli=arguments.scala_cli,
+            scalafmt_launcher=arguments.scalafmt_launcher,
             config=temporary_config,
             sources=temporary_sources,
             check=True,
@@ -277,9 +357,12 @@ def run(arguments: argparse.Namespace) -> Path:
         )
         if copied_check.returncode != 0:
             raise ScalafmtEvidenceError("FORMATTED_COPY_CHECK_FAILED")
+        if process_evidence(copied_check_command, copied_check)["downloadLineCount"] != 0:
+            raise ScalafmtEvidenceError("COPIED_CHECK_NETWORK_ACCESS_DETECTED")
 
         real_check_command = format_command(
             scala_cli=arguments.scala_cli,
+            scalafmt_launcher=arguments.scalafmt_launcher,
             config=config,
             sources=sources,
             check=True,
@@ -293,6 +376,8 @@ def run(arguments: argparse.Namespace) -> Path:
         )
         if real_check.returncode != 0:
             raise ScalafmtEvidenceError("REAL_SOURCE_NOT_FORMATTED")
+        if process_evidence(real_check_command, real_check)["downloadLineCount"] != 0:
+            raise ScalafmtEvidenceError("REAL_CHECK_NETWORK_ACCESS_DETECTED")
         if source_tree_sha256(scala_root, sources) != source_before:
             raise ScalafmtEvidenceError("REAL_SOURCE_MUTATED_BY_CHECK")
 
@@ -304,6 +389,7 @@ def run(arguments: argparse.Namespace) -> Path:
         )
         negative_command = format_command(
             scala_cli=arguments.scala_cli,
+            scalafmt_launcher=arguments.scalafmt_launcher,
             config=temporary_config,
             sources=[negative],
             check=True,
@@ -317,10 +403,20 @@ def run(arguments: argparse.Namespace) -> Path:
         )
         if negative_result.returncode == 0:
             raise ScalafmtEvidenceError("MISFORMATTED_NEGATIVE_UNEXPECTEDLY_PASSED")
+        if process_evidence(negative_command, negative_result)["downloadLineCount"] != 0:
+            raise ScalafmtEvidenceError("NEGATIVE_CHECK_NETWORK_ACCESS_DETECTED")
 
         result = {
             "schemaVersion": "s1.4x-scala-scalafmt-idempotence-result-v1",
             "scalafmtVersion": "3.11.4",
+            "scalafmtArtifact": {
+                **expected_artifact,
+                "resolvedVersionOutput": resolved_version_output,
+                "versionOutputSha256": hashlib.sha256(
+                    resolved_version_output.encode("utf-8")
+                ).hexdigest(),
+            },
+            "networkPolicy": "OFFLINE_PINNED_LAUNCHER",
             "configPath": ".scalafmt.conf",
             "configSha256": sha256_file(config),
             "sourceInputManifestSha256": sha256_file(arguments.manifest),

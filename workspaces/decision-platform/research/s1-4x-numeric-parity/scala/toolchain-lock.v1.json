@@ -25,7 +25,16 @@
     "version": "3.11.4",
     "configPath": "workspaces/decision-platform/research/s1-4x-numeric-parity/scala/.scalafmt.conf",
     "configSha256": "9cbddb969dff159726ee5d170992e4eebfe7047d9c7f327e8ea02331ae65dea7",
-    "runnerPathId": "SCALA_CLI_1_15_0"
+    "runnerPathId": "SCALA_CLI_1_15_0",
+    "archiveUri": "https://github.com/scalameta/scalafmt/releases/download/v3.11.4/scalafmt-x86_64-pc-linux.zip",
+    "archivePathId": "S1_4X_CACHE_ROOT/coursier/https/github.com/scalameta/scalafmt/releases/download/v3.11.4/scalafmt-x86_64-pc-linux.zip",
+    "archiveSha256": "e7d43a5621074a63a46d5b287d0b0bb0650033deeb836af2b27515b2127476f2",
+    "executablePathId": "COURSIER_ARCHIVE_CACHE/https/github.com/scalameta/scalafmt/releases/download/v3.11.4/scalafmt-x86_64-pc-linux.zip/scalafmt",
+    "executableSha256": "88526f9f4d64c2fb023d54578812419f49e2ec09e30e4fb77443a05f1a59cac0",
+    "resolvedVersionOutput": "scalafmt 3.11.4",
+    "resolutionLogUri": "evidence://s1-4x-scala-scalafmt-evidence-9c3cb8f-01/logs/first-apply.stderr",
+    "resolutionLogSha256": "1cc7516d57c230f10242f43884f12f3d26cbd6d681dbaed317262148c136b781",
+    "networkPolicy": "OFFLINE_PINNED_LAUNCHER"
   },
   "scalafix": {
     "pathId": "SCALAFIX_0_14_7",

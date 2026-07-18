@@ -26,19 +26,26 @@ done
 
 [[ "$OUTPUT_DIR" == /* && ! -e "$OUTPUT_DIR" && ! -L "$OUTPUT_DIR" ]] || usage
 
-"$SCALA_ROOT/tools/assert-toolchain.sh"
-
 CACHE_ROOT="${S1_4X_CACHE_ROOT:-$HOME/.cache/s1-4x}"
+COURSIER_ARCHIVE_CACHE="${S1_4X_COURSIER_ARCHIVE_CACHE:-$HOME/.cache/coursier/arc}"
+SCALAFMT_RELATIVE="https/github.com/scalameta/scalafmt/releases/download/v3.11.4/scalafmt-x86_64-pc-linux.zip"
+SCALAFMT_ARCHIVE="${S1_4X_SCALAFMT_ARCHIVE:-$CACHE_ROOT/coursier/$SCALAFMT_RELATIVE}"
+SCALAFMT_EXECUTABLE="${S1_4X_SCALAFMT_BIN:-$COURSIER_ARCHIVE_CACHE/$SCALAFMT_RELATIVE/scalafmt}"
 mkdir -p "$CACHE_ROOT/tmp" "$CACHE_ROOT/coursier"
 export TMPDIR="$CACHE_ROOT/tmp"
 export TEMP="$TMPDIR"
 export TMP="$TMPDIR"
 export COURSIER_CACHE="$CACHE_ROOT/coursier"
+export COURSIER_MODE=offline
+
+"$SCALA_ROOT/tools/assert-toolchain.sh"
 
 python3 "$SCALA_ROOT/tools/run_scalafmt.py" \
   --scala-root "$SCALA_ROOT" \
   --policy "$S1_ROOT/contract/scala-source-policy.v1.json" \
   --manifest "$SCALA_ROOT/source-inputs.v1.json" \
   --scala-cli "$(readlink -f -- "$SCALA_CLI")" \
+  --scalafmt-archive "$(readlink -f -- "$SCALAFMT_ARCHIVE")" \
+  --scalafmt-launcher "$(readlink -f -- "$SCALAFMT_EXECUTABLE")" \
   --toolchain-lock "$SCALA_ROOT/toolchain-lock.v1.json" \
   --output-dir "$OUTPUT_DIR"

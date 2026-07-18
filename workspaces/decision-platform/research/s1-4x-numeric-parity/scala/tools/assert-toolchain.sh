@@ -7,6 +7,11 @@ LOCK="$SCALA_ROOT/toolchain-lock.v1.json"
 PROVENANCE="$S1_ROOT/contract/toolchain-provenance.v1.json"
 SCALA_CLI="${S1_4X_SCALA_CLI_BIN:-/home/pjjpj/.local/bin/scala-cli}"
 SCALAFIX="${S1_4X_SCALAFIX_BIN:-/home/pjjpj/.local/share/s1-4x/scalafix-0.14.7/bin/scalafix}"
+CACHE_ROOT="${S1_4X_CACHE_ROOT:-$HOME/.cache/s1-4x}"
+COURSIER_ARCHIVE_CACHE="${S1_4X_COURSIER_ARCHIVE_CACHE:-$HOME/.cache/coursier/arc}"
+SCALAFMT_RELATIVE="https/github.com/scalameta/scalafmt/releases/download/v3.11.4/scalafmt-x86_64-pc-linux.zip"
+SCALAFMT_ARCHIVE="${S1_4X_SCALAFMT_ARCHIVE:-$CACHE_ROOT/coursier/$SCALAFMT_RELATIVE}"
+SCALAFMT_EXECUTABLE="${S1_4X_SCALAFMT_BIN:-$COURSIER_ARCHIVE_CACHE/$SCALAFMT_RELATIVE/scalafmt}"
 
 fail() {
   printf 'SCALA_TOOLCHAIN_FAIL %s\n' "$1" >&2
@@ -47,6 +52,10 @@ done
   fail "scala-cli executable missing or unsafe"
 [[ -x "$SCALAFIX" && "$SCALAFIX" == /* && ! -L "$SCALAFIX" ]] ||
   fail "scalafix executable missing or unsafe"
+[[ -f "$SCALAFMT_ARCHIVE" && "$SCALAFMT_ARCHIVE" == /* && ! -L "$SCALAFMT_ARCHIVE" ]] ||
+  fail "Scalafmt archive missing or unsafe"
+[[ -x "$SCALAFMT_EXECUTABLE" && "$SCALAFMT_EXECUTABLE" == /* && ! -L "$SCALAFMT_EXECUTABLE" ]] ||
+  fail "Scalafmt executable missing or unsafe"
 [[ -n "${JAVA_HOME:-}" && "$JAVA_HOME" == /* && -d "$JAVA_HOME" && ! -L "$JAVA_HOME" ]] ||
   fail "JAVA_HOME missing or unsafe"
 [[ -x "$JAVA_HOME/bin/java" && -f "$JAVA_HOME/release" ]] ||
@@ -101,6 +110,8 @@ java_spec_actual="$(
 java_sha="$(sha256sum "$java_path" | awk '{print $1}')"
 scala_cli_sha="$(sha256sum "$SCALA_CLI" | awk '{print $1}')"
 scalafix_sha="$(sha256sum "$SCALAFIX" | awk '{print $1}')"
+scalafmt_archive_sha="$(sha256sum "$SCALAFMT_ARCHIVE" | awk '{print $1}')"
+scalafmt_executable_sha="$(sha256sum "$SCALAFMT_EXECUTABLE" | awk '{print $1}')"
 project_sha="$(sha256sum "$SCALA_ROOT/project.scala" | awk '{print $1}')"
 scalafmt_config_sha="$(sha256sum "$SCALA_ROOT/.scalafmt.conf" | awk '{print $1}')"
 provenance_sha="$(sha256sum "$PROVENANCE" | awk '{print $1}')"
@@ -109,6 +120,10 @@ provenance_sha="$(sha256sum "$PROVENANCE" | awk '{print $1}')"
   fail "scala-cli SHA-256 mismatch"
 [[ "$scalafix_sha" == "9db6db7359e580de8f4b72cd7c104d70023cf32a278db0c30aefb79c939eb0f3" ]] ||
   fail "scalafix SHA-256 mismatch"
+[[ "$scalafmt_archive_sha" == "e7d43a5621074a63a46d5b287d0b0bb0650033deeb836af2b27515b2127476f2" ]] ||
+  fail "Scalafmt archive SHA-256 mismatch"
+[[ "$scalafmt_executable_sha" == "88526f9f4d64c2fb023d54578812419f49e2ec09e30e4fb77443a05f1a59cac0" ]] ||
+  fail "Scalafmt executable SHA-256 mismatch"
 [[ "$provenance_sha" == "cd9e29a22473fba6203daa4f3a0cbaa57b8b6e5c5fc22de05ca0801c404ffa98" ]] ||
   fail "merged provenance SHA-256 mismatch"
 
@@ -119,6 +134,9 @@ grep -Fq "Scala version (default): 3.8.4" <<<"$scala_version" ||
   fail "default Scala version mismatch"
 "$SCALAFIX" --version 2>&1 | grep -Fxq "0.14.7" ||
   fail "scalafix numeric version mismatch"
+scalafmt_version="$("$SCALAFMT_EXECUTABLE" --version 2>&1)"
+[[ "$scalafmt_version" == "scalafmt 3.11.4" ]] ||
+  fail "Scalafmt numeric version mismatch"
 
 grep -Fxq '//> using scala 3.8.4' "$SCALA_ROOT/project.scala" ||
   fail "project Scala pin mismatch"
@@ -137,6 +155,8 @@ jq -e \
   --arg java_sha "$java_sha" \
   --arg scala_cli_sha "$scala_cli_sha" \
   --arg scalafix_sha "$scalafix_sha" \
+  --arg scalafmt_archive_sha "$scalafmt_archive_sha" \
+  --arg scalafmt_executable_sha "$scalafmt_executable_sha" \
   --arg project_sha "$project_sha" \
   --arg scalafmt_config_sha "$scalafmt_config_sha" \
   --arg provenance_sha "$provenance_sha" \
@@ -182,7 +202,21 @@ jq -e \
       configPath:
         "workspaces/decision-platform/research/s1-4x-numeric-parity/scala/.scalafmt.conf",
       configSha256: $scalafmt_config_sha,
-      runnerPathId: "SCALA_CLI_1_15_0"
+      runnerPathId: "SCALA_CLI_1_15_0",
+      archiveUri:
+        "https://github.com/scalameta/scalafmt/releases/download/v3.11.4/scalafmt-x86_64-pc-linux.zip",
+      archivePathId:
+        "S1_4X_CACHE_ROOT/coursier/https/github.com/scalameta/scalafmt/releases/download/v3.11.4/scalafmt-x86_64-pc-linux.zip",
+      archiveSha256: $scalafmt_archive_sha,
+      executablePathId:
+        "COURSIER_ARCHIVE_CACHE/https/github.com/scalameta/scalafmt/releases/download/v3.11.4/scalafmt-x86_64-pc-linux.zip/scalafmt",
+      executableSha256: $scalafmt_executable_sha,
+      resolvedVersionOutput: "scalafmt 3.11.4",
+      resolutionLogUri:
+        "evidence://s1-4x-scala-scalafmt-evidence-9c3cb8f-01/logs/first-apply.stderr",
+      resolutionLogSha256:
+        "1cc7516d57c230f10242f43884f12f3d26cbd6d681dbaed317262148c136b781",
+      networkPolicy: "OFFLINE_PINNED_LAUNCHER"
     } and
     .scalafix == {
       pathId: "SCALAFIX_0_14_7",
@@ -212,9 +246,10 @@ jq -e \
   ' "$LOCK" >/dev/null ||
   fail "toolchain lock or structured provenance mismatch"
 
-printf 'SCALA_TOOLCHAIN_PASS lockSha256=%s provenanceSha256=%s scalaCliSha256=%s scalafixSha256=%s jdk=%s\n' \
+printf 'SCALA_TOOLCHAIN_PASS lockSha256=%s provenanceSha256=%s scalaCliSha256=%s scalafixSha256=%s scalafmtSha256=%s jdk=%s\n' \
   "$(sha256sum "$LOCK" | awk '{print $1}')" \
   "$provenance_sha" \
   "$scala_cli_sha" \
   "$scalafix_sha" \
+  "$scalafmt_executable_sha" \
   "$java_spec_actual"
