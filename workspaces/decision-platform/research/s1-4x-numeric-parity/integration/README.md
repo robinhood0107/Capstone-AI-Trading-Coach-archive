@@ -112,7 +112,7 @@ SCALA_BLOCK_WRAPPER="${SCALA_BLOCK_WRAPPER:?set the absolute Scala block wrapper
 HASKELL_BLOCK_WRAPPER="${HASKELL_BLOCK_WRAPPER:?set the absolute Haskell block wrapper path}"
 
 TMPDIR=/tmp TEMP=/tmp TMP=/tmp \
-  uv run --frozen --project "$ORACLE" \
+  /home/pjjpj/.local/bin/uv run --frozen --no-config --project "$ORACLE" \
   python "$S1_4X/integration/prepare_benchmark_commands.py" \
   --repo-root "$ROOT" \
   --benchmark-subject-commit "$SUBJECT" \
@@ -120,6 +120,7 @@ TMPDIR=/tmp TEMP=/tmp TMP=/tmp \
   --python-wrapper "$S1_4X/integration/tools/run-python-benchmark-block.sh" \
   --scala-wrapper "$SCALA_BLOCK_WRAPPER" \
   --haskell-wrapper "$HASKELL_BLOCK_WRAPPER" \
+  --uv /home/pjjpj/.local/bin/uv \
   --output "$BENCH_PARENT/commands.json" \
   --sidecar "$BENCH_PARENT/commands.sha256"
 ```
