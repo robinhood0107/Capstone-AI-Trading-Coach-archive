@@ -130,6 +130,29 @@ def main() -> int:
     )
     assert failed_probe["status"] == "FAIL"
 
+    test_dependencies = compiler_tool.project_test_dependencies(
+        SCALA_ROOT / "project.scala"
+    )
+    assert test_dependencies == [
+        "org.scalameta::munit:1.3.0",
+        "org.scalameta::munit-scalacheck:1.3.0",
+        "org.scalacheck::scalacheck:1.19.0",
+    ]
+    project_compile = compiler_tool.project_compiler_arguments(
+        Path("/tool/scala-cli"),
+        [SCALA_ROOT / "project.scala", SCALA_ROOT / "selected-profile.scala"],
+        profile_arguments=["--scalac-option=-opt"],
+        test_dependencies=test_dependencies,
+    )
+    assert "--test" not in project_compile
+    assert project_compile.count("--dependency") == len(test_dependencies)
+    for dependency in test_dependencies:
+        offset = project_compile.index(dependency)
+        assert project_compile[offset - 1 : offset + 1] == [
+            "--dependency",
+            dependency,
+        ]
+
     project = (SCALA_ROOT / "project.scala").read_text(encoding="utf-8")
     flattened = [option for group in BASE_OPTIONS for option in group]
     directive_options = []
