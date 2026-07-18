@@ -161,6 +161,73 @@ value = Maybe.fromJust
             ):
                 haskell_evidence.build_source_manifest(root)
 
+    def test_source_manifest_rejects_a_stale_tracked_entry(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paths = {
+                "src/Risk.hs": "module Risk (value) where\nvalue = 1\n",
+                "app/Main.hs": "module Main (main) where\nmain = pure ()\n",
+                "test/TestMain.hs": "module TestMain (main) where\nmain = pure ()\n",
+                "benchmark/BenchMain.hs": "module BenchMain (main) where\nmain = pure ()\n",
+                "package.yaml": "name: sample\n",
+                "selected-profile.v1.json": "{}\n",
+            }
+            for relative, content in paths.items():
+                destination = root / relative
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_text(content, encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                haskell_evidence.EvidenceError,
+                "tracked source input set mismatch",
+            ):
+                haskell_evidence.build_source_manifest(
+                    root,
+                    tracked_paths={*paths, "src/Stale.hs"},
+                )
+
+    def test_source_manifest_rejects_an_intermediate_directory_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "candidate"
+            outside = Path(temporary) / "outside"
+            for relative in ("src", "app", "test", "benchmark"):
+                (root / relative).mkdir(parents=True, exist_ok=True)
+            outside.mkdir()
+            (outside / "Escape.hs").write_text(
+                "module Escape (value) where\nvalue = 1\n",
+                encoding="utf-8",
+            )
+            (root / "src" / "Nested").symlink_to(outside, target_is_directory=True)
+            (root / "app" / "Main.hs").write_text(
+                "module Main (main) where\nmain = pure ()\n",
+                encoding="utf-8",
+            )
+            (root / "test" / "TestMain.hs").write_text(
+                "module TestMain (main) where\nmain = pure ()\n",
+                encoding="utf-8",
+            )
+            (root / "benchmark" / "BenchMain.hs").write_text(
+                "module BenchMain (main) where\nmain = pure ()\n",
+                encoding="utf-8",
+            )
+            (root / "package.yaml").write_text("name: sample\n", encoding="utf-8")
+            (root / "selected-profile.v1.json").write_text("{}\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                haskell_evidence.EvidenceError,
+                "candidate source symlink is forbidden",
+            ):
+                haskell_evidence.build_source_manifest(
+                    root,
+                    tracked_paths={
+                        "app/Main.hs",
+                        "test/TestMain.hs",
+                        "benchmark/BenchMain.hs",
+                        "package.yaml",
+                        "selected-profile.v1.json",
+                    },
+                )
+
     def test_profile_selector_uses_all_twenty_eight_paired_ratios(self) -> None:
         cases = [f"case-{index}" for index in range(7)]
         qualifying = [

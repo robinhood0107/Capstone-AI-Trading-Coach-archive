@@ -34,6 +34,7 @@ import S14X.Core.NumericPrimitives
   ( meanVector,
     normalCdf,
     normalInverseCdf,
+    pureSort,
     sumVector,
   )
 import S14X.Core.ProductionMetrics
@@ -58,6 +59,7 @@ tests =
       testCase "advanced hand fixtures" advancedHandFixtures,
       testCase "AS241 inverse and erfc CDF preserve extreme tails" normalDistributionPrimitives,
       testCase "compensated sum preserves cancellation residuals" compensatedSummation,
+      testCase "pure sort midpoint division is total on every guarded length" pureSortTotality,
       testCase "stable validation precedence" stableErrors,
       testCase "backtest records preserve exact integer fields" backtestRecords
     ]
@@ -131,6 +133,13 @@ compensatedSummation = do
   meanVector cancellation @?= (1.0 / 3.0)
   sumVector scaleAware @?= 1.0
   sumVector maximumFiniteCancellation @?= 1.0
+
+pureSortTotality :: IO ()
+pureSortTotality = do
+  U.toList (pureSort U.empty) @?= []
+  U.toList (pureSort (U.fromList [2.0])) @?= [2.0]
+  U.toList (pureSort (U.fromList [4.0, 1.0, 3.0, 2.0])) @?= [1.0, 2.0, 3.0, 4.0]
+  U.toList (pureSort (U.fromList [3.0, 1.0, 2.0])) @?= [1.0, 2.0, 3.0]
 
 stableErrors :: IO ()
 stableErrors = do

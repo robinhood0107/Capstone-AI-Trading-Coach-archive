@@ -1,6 +1,7 @@
 module S14X.ContractSpec (tests) where
 
 import Data.ByteString (ByteString)
+import Data.Foldable (traverse_)
 import Data.Version (showVersion)
 import System.Info (compilerName, fullCompilerVersion)
 import Test.Tasty (TestTree, testGroup)
@@ -19,7 +20,7 @@ import S14X.Contract.Process
 import S14X.Contract.Types
   ( RequestBatch (RequestBatch),
     ResultBatch (ResultBatch),
-    TransportCode (RequestInvalid),
+    TransportCode (ManifestInvalid, RequestInvalid),
     transportCode,
   )
 
@@ -29,6 +30,7 @@ tests =
     "process-contract"
     [ testCase "strict parser rejects duplicate decoded keys" duplicateKeys,
       testCase "exact integer token kind is preserved" integerTokenKind,
+      testCase "Unicode digits cannot enter SHA or path contracts" unicodeDigitsRejected,
       testCase "canonical request executes in order" canonicalRequest,
       testCase "result implementation follows the active compiler" compilerIdentity,
       testCase "recursive result encoding normalizes negative zero" negativeZero,
@@ -53,6 +55,19 @@ integerTokenKind =
           assertBool
             "decimal periods_per_year must remain a semantic integer-kind error"
             ("periods_per_year_invalid" `BS8.isInfixOf` encodeResultBatch batch)
+
+unicodeDigitsRejected :: IO ()
+unicodeDigitsRejected =
+  traverse_ rejectsManifest [unicodeDigitShaRequest, unicodeDigitPathRequest]
+  where
+    rejectsManifest payload =
+      case parseRequest payload of
+        Left transport -> assertFailure ("unexpected request error: " <> show transport)
+        Right request -> do
+          result <- runRequest "tools/fixtures/process" request
+          case result of
+            Left transport -> transportCode transport @?= ManifestInvalid
+            Right _ -> assertFailure "Unicode digit manifest must fail closed"
 
 canonicalRequest :: IO ()
 canonicalRequest =
@@ -122,3 +137,21 @@ negativeZeroRequest =
   "{\"schemaVersion\":\"s1.4x-request-v1\",\"requestId\":\"negative-zero\","
     <> "\"cases\":[{\"fixtureId\":\"zero\",\"functionId\":\"log_returns\","
     <> "\"arguments\":{\"prices\":[100,100]}}]}"
+
+unicodeDigitShaRequest :: ByteString
+unicodeDigitShaRequest =
+  binaryManifestRequest "unicode-digit-sha" "unicode-digit-sha.manifest.json"
+
+unicodeDigitPathRequest :: ByteString
+unicodeDigitPathRequest =
+  binaryManifestRequest "unicode-digit-path" "unicode-digit-path.manifest.json"
+
+binaryManifestRequest :: ByteString -> ByteString -> ByteString
+binaryManifestRequest fixtureId manifestFile =
+  "{\"schemaVersion\":\"s1.4x-request-v1\",\"requestId\":\"unicode-digit-contract\","
+    <> "\"cases\":[{\"fixtureId\":\""
+    <> fixtureId
+    <> "\",\"functionId\":\"simple_returns\",\"arguments\":{\"prices\":"
+    <> "{\"kind\":\"binaryFloat64\",\"manifestFile\":\""
+    <> manifestFile
+    <> "\"}}}]}"
