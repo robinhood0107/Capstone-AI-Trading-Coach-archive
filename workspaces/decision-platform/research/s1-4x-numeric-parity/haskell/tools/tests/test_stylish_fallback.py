@@ -15,6 +15,7 @@ MODULE_PATH = TOOLS_ROOT / "stylish_fallback.py"
 CONTRACT_PATH = HASKELL_ROOT / "stylish-ghc2024-fallback.v1.json"
 MANDATED_CONFIG_PATH = HASKELL_ROOT / ".stylish-haskell.yaml"
 DERIVED_CONFIG_PATH = HASKELL_ROOT / ".stylish-haskell-ghc2024-expanded.yaml"
+BENCHMARK_PATH = HASKELL_ROOT / "benchmark" / "Main.hs"
 
 SPEC = importlib.util.spec_from_file_location("stylish_fallback", MODULE_PATH)
 if SPEC is None or SPEC.loader is None:
@@ -177,6 +178,16 @@ class StylishFallbackTests(unittest.TestCase):
         self.assertNotIn(
             '"--config=$MANDATED_CONFIGURATION"',
             script,
+        )
+
+    def test_benchmark_aeson_import_matches_frozen_formatter_layout(self) -> None:
+        source = BENCHMARK_PATH.read_text(encoding="utf-8")
+
+        self.assertIn(
+            "import           Data.Aeson (FromJSON (parseJSON), Value, "
+            "eitherDecodeFileStrict', encode, object,\n"
+            "                             withObject, (.:), (.=))",
+            source,
         )
 
 
