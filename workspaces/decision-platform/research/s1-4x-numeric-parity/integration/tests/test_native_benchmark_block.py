@@ -361,6 +361,36 @@ class NativeBenchmarkBlockTests(TestCase):
                 self.assertEqual(document, original)
                 self.assertEqual(strict_json_load(source), swapped)
 
+    def test_sealed_snapshot_uses_the_explicit_benchmark_temp_root(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            temporary_root = root / "cache/tmp"
+            temporary_root.mkdir(parents=True)
+            source = root / "source.json"
+            source.write_bytes(b'{"value":1}')
+            snapshot = inspect_regular_file_path(source, role="snapshotSource")
+            real_mkstemp = tempfile.mkstemp
+            observed_directories: list[str | None] = []
+
+            def recording_mkstemp(*args: Any, **kwargs: Any) -> tuple[int, str]:
+                observed_directories.append(kwargs.get("dir"))
+                return real_mkstemp(*args, **kwargs)
+
+            with patch.dict(
+                os.environ,
+                {"TMPDIR": str(temporary_root)},
+                clear=False,
+            ), patch(
+                "native_benchmark_block.tempfile.mkstemp",
+                side_effect=recording_mkstemp,
+            ), native_block_module._sealed_snapshot_path(
+                snapshot,
+                error="SNAPSHOT_INVALID",
+            ) as sealed:
+                self.assertEqual(sealed.read_bytes(), snapshot.payload)
+
+            self.assertEqual(observed_directories, [str(temporary_root)])
+
     def test_plan_snapshot_validation_rejects_path_substitution_and_symlinks(
         self,
     ) -> None:

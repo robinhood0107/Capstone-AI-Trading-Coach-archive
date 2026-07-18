@@ -91,6 +91,13 @@ def test_official_full_rotation_uses_integration_runtime_only() -> None:
     assert 'python "$S1_4X/benchmarks/run_rotated_blocks.py" run \\' not in documentation
 
 
+def test_integration_runbook_has_no_local_user_or_global_tmp_path() -> None:
+    documentation = INTEGRATION_README.read_text(encoding="utf-8")
+    assert "/home/pjjpj" not in documentation
+    assert "TMPDIR=/tmp" not in documentation
+    assert 'CACHE_ROOT="${S1_4X_CACHE_ROOT:-$HOME/.cache/s1-4x}"' in documentation
+
+
 def test_official_runtime_keeps_the_internal_compatibility_surface() -> None:
     # 통합 runtime과 frozen runner의 동명 모듈 충돌이 있어도 기존 호출자는 같은 경계를 본다.
     script = (

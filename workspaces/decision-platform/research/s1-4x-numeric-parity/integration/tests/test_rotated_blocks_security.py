@@ -445,6 +445,9 @@ def test_benchmark_environment_drops_ambient_code_and_tool_overrides(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    cache_root = tmp_path / ".cache/s1-4x"
+    for directory in ("tmp", "uv", "coursier", "stack-root"):
+        (cache_root / directory).mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("BASH_ENV", str(tmp_path / "inject.sh"))
     monkeypatch.setenv("ENV", str(tmp_path / "inject-posix.sh"))
@@ -456,7 +459,7 @@ def test_benchmark_environment_drops_ambient_code_and_tool_overrides(
     monkeypatch.setenv("GIT_CONFIG_VALUE_0", str(tmp_path / "hook"))
 
     runtime = runner.PinnedExecutable(
-        binding={"path": "/home/pjjpj/.local/bin/uv", "sha256": "a" * 64},
+        binding={"path": "/opt/s1-4x/uv", "sha256": "a" * 64},
         descriptor=42,
         required_seals=runner.F_SEAL_SEAL,
     )
@@ -467,9 +470,12 @@ def test_benchmark_environment_drops_ambient_code_and_tool_overrides(
         "LANG": "C.UTF-8",
         "LC_ALL": "C.UTF-8",
         "PATH": "/usr/bin:/bin",
-        "TMP": "/tmp",
-        "TMPDIR": "/tmp",
-        "TEMP": "/tmp",
+        "TMP": str(cache_root / "tmp"),
+        "TMPDIR": str(cache_root / "tmp"),
+        "TEMP": str(cache_root / "tmp"),
+        "UV_CACHE_DIR": str(cache_root / "uv"),
+        "COURSIER_CACHE": str(cache_root / "coursier"),
+        "STACK_ROOT": str(cache_root / "stack-root"),
         **runner.THREAD_ENVIRONMENT,
         "S1_4X_THREAD_COUNT": "1",
         "S1_4X_UV_BIN": "/proc/self/fd/42",

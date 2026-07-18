@@ -266,6 +266,13 @@ class BenchmarkCommandManifestTests(TestCase):
                 self.assertIn("S1_4X_UV_BIN", source)
                 self.assertIn("/proc/self/fd/", source)
 
+    def test_prepare_command_does_not_embed_a_local_user_home(self) -> None:
+        source = (INTEGRATION / "prepare_benchmark_commands.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertNotIn("/home/pjjpj", source)
+        self.assertIn('os.environ.get("HOME")', source)
+
     def test_manifest_requires_exact_uv_runtime_dependency(self) -> None:
         executable = Path(sys.executable).resolve()
         identity = {
