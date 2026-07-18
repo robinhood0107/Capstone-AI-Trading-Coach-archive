@@ -88,7 +88,7 @@ class OciCorrectnessContractTests(unittest.TestCase):
         )
         run = helper.build_oci_run_command(
             docker=Path("/tools/docker"),
-            image_tag="local/s1-4x-haskell:abc",
+            image_id=f"sha256:{'2' * 64}",
             output_directory=Path("/evidence/runtime"),
             output_name="canonical.actual.json",
             request_path="/opt/s1-4x/fixtures/small/canonical-inputs.v1.json",
@@ -106,10 +106,51 @@ class OciCorrectnessContractTests(unittest.TestCase):
             run[run.index("--mount") + 1],
             "type=bind,src=/evidence/runtime,dst=/out",
         )
+        self.assertIn(f"sha256:{'2' * 64}", run)
+        self.assertNotIn("local/s1-4x-haskell:abc", run)
         rendered = " ".join(run)
         self.assertNotIn("/" + "home/", rendered)
         self.assertNotIn("/repo/", rendered)
         self.assertNotIn("docker.sock", rendered)
+
+    def test_inspected_tag_binding_rejects_retag_or_substitution(self) -> None:
+        helper = load_helper()
+        image_tag = "local/s1-4x-haskell:abc"
+        image_id = f"sha256:{'2' * 64}"
+        inspection = {
+            "Id": image_id,
+            "RepoTags": [image_tag],
+        }
+
+        self.assertEqual(
+            helper.validate_oci_image_inspection(
+                inspection,
+                image_tag=image_tag,
+                expected_image_id=image_id,
+            ),
+            image_id,
+        )
+        for altered in (
+            {**inspection, "Id": f"sha256:{'3' * 64}"},
+            {**inspection, "RepoTags": ["local/s1-4x-haskell:retagged"]},
+        ):
+            with self.subTest(altered=altered):
+                with self.assertRaises(helper.WorkflowError):
+                    helper.validate_oci_image_inspection(
+                        altered,
+                        image_tag=image_tag,
+                        expected_image_id=image_id,
+                    )
+
+    def test_receipt_records_the_immutable_runtime_subject_and_tag_checks(
+        self,
+    ) -> None:
+        source = HELPER_PATH.read_text(encoding="utf-8")
+
+        self.assertIn('"runtimeImageSubject"', source)
+        self.assertIn('"referenceType": "immutable-image-id"', source)
+        self.assertIn('"imageTagBindingChecks"', source)
+        self.assertIn("validate_oci_image_inspection", source)
 
     def test_wrapper_requires_selected_profile_and_pinned_docker_identity(
         self,
