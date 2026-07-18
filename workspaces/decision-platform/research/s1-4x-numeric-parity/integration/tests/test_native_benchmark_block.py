@@ -49,6 +49,30 @@ def _canonical_sha256(value: Any) -> str:
 
 
 class NativeBenchmarkBlockTests(TestCase):
+    def test_scala_runtime_receipt_binds_sealed_tools_and_workspace(self) -> None:
+        self.assertTrue(
+            {
+                "scalaCliExecutionPathId",
+                "commandToolClosure",
+                "commandToolClosureSha256",
+                "environmentValuesSha256",
+                "scalaWorkspacePathId",
+            }.issubset(native_block_module.SCALA_JMH_RUN_RESULT_FIELDS)
+        )
+        argv = native_block_module._scala_full_runtime_argv(
+            scala_cli=Path("/proc/self/fd/41"),
+            scala_root=Path("/repo/scala"),
+            source_paths=list(native_block_module.SCALA_RUNTIME_SOURCE_PATHS),
+            scala_cli_arguments=["--scala", "3.8.4"],
+            scala_workspace=Path("/cache/scala-workspace"),
+            raw_path=Path("/evidence/native.json"),
+            jmh_include_regex="^benchmark$",
+        )
+        workspace_index = argv.index("--workspace")
+        self.assertEqual(argv[0], "/proc/self/fd/41")
+        self.assertEqual(argv[workspace_index + 1], "/cache/scala-workspace")
+        self.assertEqual(argv[workspace_index + 2], "--server=false")
+
     def test_scala_effective_runtime_identity_binds_actual_case_receipts_in_order(
         self,
     ) -> None:
