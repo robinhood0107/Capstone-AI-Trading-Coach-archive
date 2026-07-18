@@ -212,6 +212,8 @@ def main() -> int:
         "semantic-comparison.json",
         "scala-profile-unit-test-result.v1.json",
         "--require-tests",
+        "test_dependencies",
+        '"--dependency"',
         "assemble_profile_correctness.py",
     ):
         assert marker in correctness
