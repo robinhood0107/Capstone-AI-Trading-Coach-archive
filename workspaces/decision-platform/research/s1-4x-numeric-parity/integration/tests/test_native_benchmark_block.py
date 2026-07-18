@@ -5,6 +5,8 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import math
+import statistics
 import sys
 import tempfile
 from pathlib import Path
@@ -13,6 +15,7 @@ from unittest import TestCase
 
 INTEGRATION = Path(__file__).resolve().parents[1]
 BENCHMARKS = INTEGRATION.parent / "benchmarks"
+FIXTURES = INTEGRATION.parent / "contract/fixtures"
 sys.path.insert(0, str(INTEGRATION))
 sys.path.insert(0, str(BENCHMARKS))
 
@@ -24,6 +27,19 @@ from native_benchmark_block import (  # noqa: E402
 )
 
 PLAN = BENCHMARKS / "benchmark-plan.v1.json"
+EFFECTIVE_RUNTIME_ARGUMENTS_SHA256 = "e" * 64
+
+
+def _canonical_sha256(value: Any) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            value,
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
 
 
 class NativeBenchmarkBlockTests(TestCase):
@@ -124,10 +140,56 @@ class NativeBenchmarkBlockTests(TestCase):
         self,
     ) -> None:
         temporary = Path(self.enterContext(tempfile.TemporaryDirectory()))
-        raw = temporary / "raw/criterion.json"
-        raw.parent.mkdir()
-        raw.write_text('{"criterion":"raw"}\n', encoding="utf-8")
-        raw_sha = hashlib.sha256(raw.read_bytes()).hexdigest()
+        (temporary / "raw").mkdir()
+        input_ledger = temporary / "input-ledger.json"
+        input_ledger.write_text('{"status":"fixture"}', encoding="utf-8")
+        benchmark_executable = temporary / "criterion-benchmark"
+        benchmark_executable.write_bytes(b"criterion executable fixture")
+        selected_profile = temporary / "haskell-selected-profile.json"
+        selected_profile.write_text(
+            json.dumps(
+                {
+                    "schemaVersion": "s1.4x-haskell-selected-profile-v1",
+                    "profileId": "baseline-o0-fasm",
+                    "optionsSha256": EFFECTIVE_RUNTIME_ARGUMENTS_SHA256,
+                },
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
+        plan = strict_json_load(PLAN)
+        receipt_provenance = {
+            "planPath": str(PLAN.resolve()),
+            "planSha256": hashlib.sha256(PLAN.read_bytes()).hexdigest(),
+            "fixtureRootPath": str(FIXTURES.resolve()),
+            "fixtureFreezeIdentitySha256": _canonical_sha256(
+                plan["fixtureFreezeIdentity"]
+            ),
+            "inputLedgerPath": str(input_ledger.resolve()),
+            "inputLedgerSha256": hashlib.sha256(
+                input_ledger.read_bytes()
+            ).hexdigest(),
+            "selectorId": "haskell/test",
+            "caseId": None,
+            "benchmarkExecutablePath": str(benchmark_executable.resolve()),
+            "benchmarkExecutableSha256": hashlib.sha256(
+                benchmark_executable.read_bytes()
+            ).hexdigest(),
+            "effectiveRuntimeArgumentsSha256": (
+                EFFECTIVE_RUNTIME_ARGUMENTS_SHA256
+            ),
+            "candidateProvenance": {
+                "kind": "haskell",
+                "selectedProfilePath": str(selected_profile.resolve()),
+                "selectedProfileSha256": hashlib.sha256(
+                    selected_profile.read_bytes()
+                ).hexdigest(),
+                "selectedProfileId": "baseline-o0-fasm",
+                "effectiveCompilerFlagsSha256": (
+                    EFFECTIVE_RUNTIME_ARGUMENTS_SHA256
+                ),
+            },
+        }
         cases: list[dict[str, Any]] = [
             {
                 "caseId": "case-a",
@@ -162,7 +224,115 @@ class NativeBenchmarkBlockTests(TestCase):
         }
         receipts = temporary / "receipts"
         receipts.mkdir()
-        for case in cases:
+        statistics_cases = []
+        raw_documents: dict[str, list[Any]] = {}
+        for case_index, case in enumerate(cases):
+            raw = temporary / f"raw/{case_index:03d}.json"
+            samples = [
+                case["nativeValue"] * (0.9 if index % 2 == 0 else 1.1)
+                for index in range(100)
+            ]
+            mean = statistics.fmean(samples)
+            standard_deviation = statistics.stdev(samples)
+            estimate = {
+                "estPoint": mean,
+                "estError": {
+                    "confIntLDX": mean * 0.1,
+                    "confIntUDX": mean * 0.2,
+                    "confIntCL": 0.05,
+                },
+            }
+            raw_document: list[Any] = [
+                "criterion",
+                "1.6.4.0",
+                [
+                    {
+                        "reportNumber": 0,
+                        "reportName": case["caseId"],
+                        "reportKeys": [
+                            "time",
+                            "cpuTime",
+                            "cycles",
+                            "iters",
+                            "allocated",
+                            "peakMbAllocated",
+                            "numGcs",
+                            "bytesCopied",
+                            "mutatorWallSeconds",
+                            "mutatorCpuSeconds",
+                            "gcWallSeconds",
+                            "gcCpuSeconds",
+                        ],
+                        "reportMeasured": [
+                            [
+                                sample,
+                                sample,
+                                100,
+                                1,
+                                None,
+                                None,
+                                None,
+                                None,
+                                None,
+                                None,
+                                None,
+                                None,
+                            ]
+                            for sample in samples
+                        ],
+                        "reportAnalysis": {
+                            "anRegress": [
+                                {
+                                    "regResponder": "time",
+                                    "regCoeffs": {
+                                        "iters": estimate,
+                                        "y": estimate,
+                                    },
+                                    "regRSquare": {
+                                        "estPoint": 1.0,
+                                        "estError": {
+                                            "confIntLDX": 0.0,
+                                            "confIntUDX": 0.0,
+                                            "confIntCL": 0.05,
+                                        },
+                                    },
+                                }
+                            ],
+                            "anMean": estimate,
+                            "anStdDev": {
+                                "estPoint": standard_deviation,
+                                "estError": {
+                                    "confIntLDX": standard_deviation * 0.1,
+                                    "confIntUDX": standard_deviation * 0.2,
+                                    "confIntCL": 0.05,
+                                },
+                            },
+                            "anOutlierVar": {
+                                "ovEffect": "Unaffected",
+                                "ovDesc": "no",
+                                "ovFraction": 0.0,
+                            },
+                        },
+                        "reportOutliers": {
+                            "samplesSeen": 100,
+                            "lowSevere": 0,
+                            "lowMild": 0,
+                            "highMild": 0,
+                            "highSevere": 0,
+                        },
+                        "reportKDEs": [
+                            {
+                                "kdeType": "time",
+                                "kdeValues": [min(samples), max(samples)],
+                                "kdePDF": [1.0, 1.0],
+                            }
+                        ],
+                    }
+                ],
+            ]
+            raw_documents[case["caseId"]] = raw_document
+            raw.write_text(json.dumps(raw_document), encoding="utf-8")
+            raw_sha = hashlib.sha256(raw.read_bytes()).hexdigest()
             receipt_relative = f"receipts/{case['caseId']}.json"
             receipt = receipts / f"{case['caseId']}.json"
             receipt.write_text(
@@ -175,19 +345,25 @@ class NativeBenchmarkBlockTests(TestCase):
                         "selectorId": "haskell/test",
                         "caseId": case["caseId"],
                         "commandArgv": [
-                            "stack",
-                            "bench",
-                            (
-                                "--benchmark-arguments=--time-limit 5 "
-                                f"--json {raw} +RTS -N1 -RTS"
-                            ),
+                            str(benchmark_executable.resolve()),
+                            "--time-limit",
+                            "5",
+                            "--json",
+                            str(raw),
+                            "+RTS",
+                            "-N1",
+                            "-RTS",
                         ],
                         "environment": {
                             "S1_4X_BENCHMARK_CASE_ID": case["caseId"]
                         },
                         "exitCode": 0,
-                        "rawEvidencePath": "raw/criterion.json",
+                        "rawEvidencePath": f"raw/{case_index:03d}.json",
                         "rawEvidenceSha256": raw_sha,
+                        "provenance": {
+                            **receipt_provenance,
+                            "caseId": case["caseId"],
+                        },
                         "status": "PASS",
                     },
                     sort_keys=True,
@@ -198,7 +374,7 @@ class NativeBenchmarkBlockTests(TestCase):
                 {
                     "caseId": case["caseId"],
                     "nativeSampleCount": 100,
-                    "rawEvidencePath": "raw/criterion.json",
+                    "rawEvidencePath": f"raw/{case_index:03d}.json",
                     "rawEvidenceSha256": raw_sha,
                     "executionReceiptPath": receipt_relative,
                     "executionReceiptSha256": hashlib.sha256(
@@ -207,12 +383,68 @@ class NativeBenchmarkBlockTests(TestCase):
                     "status": "PASS",
                 }
             )
+            statistics_cases.append(
+                {
+                    "caseId": case["caseId"],
+                    "nativeSampleCount": 100,
+                    "nativeP95": max(samples),
+                    "confidenceLevel": 0.95,
+                    "confidenceLow": mean * 0.9,
+                    "confidenceHigh": mean * 1.2,
+                    "dispersionMetric": (
+                        "criterion-bootstrap-standard-deviation-"
+                        "seconds-per-invocation"
+                    ),
+                    "dispersionValue": standard_deviation,
+                    "nativeUnit": "s",
+                    "logicalOperationsPerInvocation": 1,
+                    "normalizedP95NsPerLogicalOperation": max(samples) * 1e9,
+                    "normalizedConfidenceLowNsPerLogicalOperation": (
+                        mean * 0.9 * 1e9
+                    ),
+                    "normalizedConfidenceHighNsPerLogicalOperation": (
+                        mean * 1.2 * 1e9
+                    ),
+                    "normalizedDispersionNsPerLogicalOperation": (
+                        standard_deviation * 1e9
+                    ),
+                }
+            )
+
+        def install_case_a_raw(document: list[Any]) -> None:
+            raw_path = temporary / "raw/000.json"
+            raw_path.write_text(json.dumps(document), encoding="utf-8")
+            raw_sha = hashlib.sha256(raw_path.read_bytes()).hexdigest()
+            evidence["cases"][0]["rawEvidenceSha256"] = raw_sha
+            receipt_path = (
+                temporary / evidence["cases"][0]["executionReceiptPath"]
+            )
+            receipt_document = json.loads(
+                receipt_path.read_text(encoding="utf-8")
+            )
+            receipt_document["rawEvidenceSha256"] = raw_sha
+            receipt_path.write_text(
+                json.dumps(receipt_document, sort_keys=True),
+                encoding="utf-8",
+            )
+            evidence["cases"][0]["executionReceiptSha256"] = hashlib.sha256(
+                receipt_path.read_bytes()
+            ).hexdigest()
+
         validate_native_contract_evidence(
             evidence,
             boundary_id="haskell",
             selector_id="haskell/test",
             block_directory=temporary,
             native_cases=cases,
+            native_statistics_cases=statistics_cases,
+            plan_path=PLAN,
+            fixture_root_path=FIXTURES,
+            input_ledger_path=input_ledger,
+            effective_runtime_arguments_sha256=(
+                EFFECTIVE_RUNTIME_ARGUMENTS_SHA256
+            ),
+            profile="baseline-o0-fasm",
         )
 
         invalid = copy.deepcopy(evidence)
@@ -224,6 +456,80 @@ class NativeBenchmarkBlockTests(TestCase):
                 selector_id="haskell/test",
                 block_directory=temporary,
                 native_cases=cases,
+                native_statistics_cases=statistics_cases,
+                plan_path=PLAN,
+                fixture_root_path=FIXTURES,
+                input_ledger_path=input_ledger,
+                effective_runtime_arguments_sha256=(
+                    EFFECTIVE_RUNTIME_ARGUMENTS_SHA256
+                ),
+                profile="baseline-o0-fasm",
+            )
+
+        wrong_case = copy.deepcopy(raw_documents["case-a"])
+        wrong_case[2][0]["reportName"] = "case-forged"
+        install_case_a_raw(wrong_case)
+        with self.assertRaisesRegex(GateError, "CRITERION_RAW_CONTRACT_INVALID"):
+            validate_native_contract_evidence(
+                evidence,
+                boundary_id="haskell",
+                selector_id="haskell/test",
+                block_directory=temporary,
+                native_cases=cases,
+                native_statistics_cases=statistics_cases,
+                plan_path=PLAN,
+                fixture_root_path=FIXTURES,
+                input_ledger_path=input_ledger,
+                effective_runtime_arguments_sha256=(
+                    EFFECTIVE_RUNTIME_ARGUMENTS_SHA256
+                ),
+                profile="baseline-o0-fasm",
+            )
+
+        missing_bootstrap = copy.deepcopy(raw_documents["case-a"])
+        missing_bootstrap[2][0]["reportAnalysis"]["anRegress"] = []
+        install_case_a_raw(missing_bootstrap)
+        with self.assertRaisesRegex(GateError, "CRITERION_RAW_CONTRACT_INVALID"):
+            validate_native_contract_evidence(
+                evidence,
+                boundary_id="haskell",
+                selector_id="haskell/test",
+                block_directory=temporary,
+                native_cases=cases,
+                native_statistics_cases=statistics_cases,
+                plan_path=PLAN,
+                fixture_root_path=FIXTURES,
+                input_ledger_path=input_ledger,
+                effective_runtime_arguments_sha256=(
+                    EFFECTIVE_RUNTIME_ARGUMENTS_SHA256
+                ),
+                profile="baseline-o0-fasm",
+            )
+
+        install_case_a_raw(raw_documents["case-a"])
+        forged_statistics = copy.deepcopy(statistics_cases)
+        forged_statistics[0]["dispersionValue"] = math.nextafter(
+            forged_statistics[0]["dispersionValue"],
+            math.inf,
+        ) * 2
+        with self.assertRaisesRegex(
+            GateError,
+            "CRITERION_NATIVE_STATISTICS_MISMATCH",
+        ):
+            validate_native_contract_evidence(
+                evidence,
+                boundary_id="haskell",
+                selector_id="haskell/test",
+                block_directory=temporary,
+                native_cases=cases,
+                native_statistics_cases=forged_statistics,
+                plan_path=PLAN,
+                fixture_root_path=FIXTURES,
+                input_ledger_path=input_ledger,
+                effective_runtime_arguments_sha256=(
+                    EFFECTIVE_RUNTIME_ARGUMENTS_SHA256
+                ),
+                profile="baseline-o0-fasm",
             )
 
     def test_scala_contract_parses_jmh_forks_iterations_and_score(self) -> None:
@@ -232,6 +538,16 @@ class NativeBenchmarkBlockTests(TestCase):
         receipt = temporary / "receipts/000.json"
         raw.parent.mkdir()
         receipt.parent.mkdir()
+        input_ledger = temporary / "input-ledger.json"
+        input_ledger.write_text('{"status":"fixture"}', encoding="utf-8")
+        benchmark_executable = temporary / "benchmark.jar"
+        benchmark_executable.write_bytes(b"JMH executable fixture")
+        jvm_capability = temporary / "effective-jvm-arguments.json"
+        jvm_capability.write_text(
+            '{"schemaVersion":"test-effective-jvm-arguments-v1"}',
+            encoding="utf-8",
+        )
+        plan = strict_json_load(PLAN)
         native_cases: list[dict[str, Any]] = [
             {
                 "caseId": "case-a",
@@ -239,6 +555,24 @@ class NativeBenchmarkBlockTests(TestCase):
                 "samples": 30,
                 "warmupIterations": 5,
                 "measurementIterations": 10,
+            }
+        ]
+        statistics_cases: list[dict[str, Any]] = [
+            {
+                "caseId": "case-a",
+                "nativeSampleCount": 30,
+                "nativeP95": 12.0,
+                "confidenceLevel": None,
+                "confidenceLow": 11.0,
+                "confidenceHigh": 13.0,
+                "dispersionMetric": "p95-minus-median-ns-per-invocation",
+                "dispersionValue": 0.0,
+                "nativeUnit": "ns",
+                "logicalOperationsPerInvocation": 1,
+                "normalizedP95NsPerLogicalOperation": 12.0,
+                "normalizedConfidenceLowNsPerLogicalOperation": 11.0,
+                "normalizedConfidenceHighNsPerLogicalOperation": 13.0,
+                "normalizedDispersionNsPerLogicalOperation": 0.0,
             }
         ]
         raw_document: list[dict[str, Any]] = [
@@ -254,6 +588,7 @@ class NativeBenchmarkBlockTests(TestCase):
                 "measurementTime": "1 s",
                 "primaryMetric": {
                     "score": 12.0,
+                    "scoreConfidence": [11.0, 13.0],
                     "scoreUnit": "ns/op",
                     "rawData": [[12.0] * 10 for _ in range(3)],
                 },
@@ -273,7 +608,9 @@ class NativeBenchmarkBlockTests(TestCase):
                         "selectorId": "scala/test",
                         "caseId": "case-a",
                         "commandArgv": [
-                            "scala-cli",
+                            "java",
+                            "-jar",
+                            str(benchmark_executable.resolve()),
                             "-bm",
                             "avgt",
                             "-tu",
@@ -301,6 +638,42 @@ class NativeBenchmarkBlockTests(TestCase):
                         "exitCode": 0,
                         "rawEvidencePath": "raw/000.json",
                         "rawEvidenceSha256": raw_sha,
+                        "provenance": {
+                            "planPath": str(PLAN.resolve()),
+                            "planSha256": hashlib.sha256(
+                                PLAN.read_bytes()
+                            ).hexdigest(),
+                            "fixtureRootPath": str(FIXTURES.resolve()),
+                            "fixtureFreezeIdentitySha256": _canonical_sha256(
+                                plan["fixtureFreezeIdentity"]
+                            ),
+                            "inputLedgerPath": str(input_ledger.resolve()),
+                            "inputLedgerSha256": hashlib.sha256(
+                                input_ledger.read_bytes()
+                            ).hexdigest(),
+                            "selectorId": "scala/test",
+                            "caseId": "case-a",
+                            "benchmarkExecutablePath": str(
+                                benchmark_executable.resolve()
+                            ),
+                            "benchmarkExecutableSha256": hashlib.sha256(
+                                benchmark_executable.read_bytes()
+                            ).hexdigest(),
+                            "effectiveRuntimeArgumentsSha256": (
+                                EFFECTIVE_RUNTIME_ARGUMENTS_SHA256
+                            ),
+                            "candidateProvenance": {
+                                "kind": "scala",
+                                "effectiveJvmArgumentsCapabilityPath": str(
+                                    jvm_capability.resolve()
+                                ),
+                                "effectiveJvmArgumentsCapabilitySha256": (
+                                    hashlib.sha256(
+                                        jvm_capability.read_bytes()
+                                    ).hexdigest()
+                                ),
+                            },
+                        },
                         "status": "PASS",
                     },
                     sort_keys=True,
@@ -345,7 +718,45 @@ class NativeBenchmarkBlockTests(TestCase):
             selector_id="scala/test",
             block_directory=temporary,
             native_cases=native_cases,
+            native_statistics_cases=statistics_cases,
+            plan_path=PLAN,
+            fixture_root_path=FIXTURES,
+            input_ledger_path=input_ledger,
+            effective_runtime_arguments_sha256=(
+                EFFECTIVE_RUNTIME_ARGUMENTS_SHA256
+            ),
+            profile="baseline",
         )
+
+        forged_provenance = evidence_for(raw_document)
+        receipt_document = json.loads(receipt.read_text(encoding="utf-8"))
+        receipt_document["provenance"]["inputLedgerSha256"] = "0" * 64
+        receipt.write_text(
+            json.dumps(receipt_document, sort_keys=True),
+            encoding="utf-8",
+        )
+        forged_provenance["cases"][0]["executionReceiptSha256"] = (
+            hashlib.sha256(receipt.read_bytes()).hexdigest()
+        )
+        with self.assertRaisesRegex(
+            GateError,
+            "NATIVE_EXECUTION_RECEIPT_INVALID",
+        ):
+            validate_native_contract_evidence(
+                forged_provenance,
+                boundary_id="scala",
+                selector_id="scala/test",
+                block_directory=temporary,
+                native_cases=native_cases,
+                native_statistics_cases=statistics_cases,
+                plan_path=PLAN,
+                fixture_root_path=FIXTURES,
+                input_ledger_path=input_ledger,
+                effective_runtime_arguments_sha256=(
+                    EFFECTIVE_RUNTIME_ARGUMENTS_SHA256
+                ),
+                profile="baseline",
+            )
 
         wrong_shape = copy.deepcopy(raw_document)
         wrong_shape[0]["primaryMetric"]["rawData"] = [[12.0] * 10] * 2
@@ -356,6 +767,14 @@ class NativeBenchmarkBlockTests(TestCase):
                 selector_id="scala/test",
                 block_directory=temporary,
                 native_cases=native_cases,
+                native_statistics_cases=statistics_cases,
+                plan_path=PLAN,
+                fixture_root_path=FIXTURES,
+                input_ledger_path=input_ledger,
+                effective_runtime_arguments_sha256=(
+                    EFFECTIVE_RUNTIME_ARGUMENTS_SHA256
+                ),
+                profile="baseline",
             )
 
         wrong_score = copy.deepcopy(raw_document)
@@ -367,6 +786,14 @@ class NativeBenchmarkBlockTests(TestCase):
                 selector_id="scala/test",
                 block_directory=temporary,
                 native_cases=native_cases,
+                native_statistics_cases=statistics_cases,
+                plan_path=PLAN,
+                fixture_root_path=FIXTURES,
+                input_ledger_path=input_ledger,
+                effective_runtime_arguments_sha256=(
+                    EFFECTIVE_RUNTIME_ARGUMENTS_SHA256
+                ),
+                profile="baseline",
             )
 
         wrong_version = copy.deepcopy(raw_document)
@@ -378,6 +805,14 @@ class NativeBenchmarkBlockTests(TestCase):
                 selector_id="scala/test",
                 block_directory=temporary,
                 native_cases=native_cases,
+                native_statistics_cases=statistics_cases,
+                plan_path=PLAN,
+                fixture_root_path=FIXTURES,
+                input_ledger_path=input_ledger,
+                effective_runtime_arguments_sha256=(
+                    EFFECTIVE_RUNTIME_ARGUMENTS_SHA256
+                ),
+                profile="baseline",
             )
 
         tampered_receipt_evidence = evidence_for(raw_document)
@@ -395,6 +830,14 @@ class NativeBenchmarkBlockTests(TestCase):
                 selector_id="scala/test",
                 block_directory=temporary,
                 native_cases=native_cases,
+                native_statistics_cases=statistics_cases,
+                plan_path=PLAN,
+                fixture_root_path=FIXTURES,
+                input_ledger_path=input_ledger,
+                effective_runtime_arguments_sha256=(
+                    EFFECTIVE_RUNTIME_ARGUMENTS_SHA256
+                ),
+                profile="baseline",
             )
 
     def test_marker_cli_performs_only_pre_run_to_measurement_transition(self) -> None:
