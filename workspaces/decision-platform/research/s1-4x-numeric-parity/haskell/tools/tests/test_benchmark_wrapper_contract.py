@@ -88,6 +88,28 @@ class BenchmarkWrapperContractTests(unittest.TestCase):
         self.assertIn("/usr/bin/sha256sum", source)
         self.assertIn("/usr/bin/awk", source)
 
+    def test_outer_wrapper_requires_absolute_frozen_haskell_tool_paths(self) -> None:
+        source = WRAPPER.read_text(encoding="utf-8")
+        for variable in (
+            "S1_4X_GHCUP_BIN",
+            "S1_4X_STACK_BIN",
+        ):
+            with self.subTest(variable=variable):
+                self.assertIn(f"${{{variable}:?", source)
+        self.assertIn(
+            'export S1_4X_GHCUP_SHA256="'
+            '9ed5da5449b48043a0d17e767c05d2ef585e25a639bb934329496c6d2fad9cf8"',
+            source,
+        )
+        self.assertIn(
+            'export S1_4X_STACK_SHA256="'
+            '923dbd137756652c67b376e2447c655b87fcc373f4d104b5073bca913471ecbe"',
+            source,
+        )
+        for forbidden_discovery in ("command -v", "which ", "type -P"):
+            with self.subTest(forbidden_discovery=forbidden_discovery):
+                self.assertNotIn(forbidden_discovery, source)
+
     def test_wrapper_mode_is_regular_not_symlink(self) -> None:
         self.assertFalse(WRAPPER.is_symlink())
         self.assertTrue(os.path.isfile(WRAPPER))
