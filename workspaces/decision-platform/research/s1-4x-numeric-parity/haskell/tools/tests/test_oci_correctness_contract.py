@@ -107,7 +107,7 @@ class OciCorrectnessContractTests(unittest.TestCase):
             "type=bind,src=/evidence/runtime,dst=/out",
         )
         rendered = " ".join(run)
-        self.assertNotIn("/home/", rendered)
+        self.assertNotIn("/" + "home/", rendered)
         self.assertNotIn("/repo/", rendered)
         self.assertNotIn("docker.sock", rendered)
 
