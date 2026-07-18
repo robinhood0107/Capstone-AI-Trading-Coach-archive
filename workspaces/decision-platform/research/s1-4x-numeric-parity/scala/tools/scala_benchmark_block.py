@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 from collections.abc import Mapping, Sequence
@@ -66,12 +67,24 @@ RECORDED_ENVIRONMENT_NAMES = (
     "S1_4X_FIXTURE_ROOT",
     "S1_4X_EFFECTIVE_JVM_EVIDENCE_DIR",
     "S1_4X_MEASUREMENT_READY_MARKER",
+    "S1_4X_SCALA_WORKSPACE",
+    "COURSIER_CACHE",
+    "COURSIER_CONFIG_DIR",
+    "SCALA_CLI_HOME",
+    "SCALA_CLI_CONFIG",
+    "XDG_CONFIG_HOME",
     "JAVA_HOME",
 )
 FORBIDDEN_AMBIENT_JVM_VARIABLES = (
     "JAVA_TOOL_OPTIONS",
     "_JAVA_OPTIONS",
     "JDK_JAVA_OPTIONS",
+)
+FORBIDDEN_AMBIENT_SCALA_VARIABLES = (
+    "COURSIER_CONFIG_DIR",
+    "COURSIER_REPOSITORIES",
+    "SCALA_CLI_CONFIG",
+    "SCALA_CLI_HOME",
 )
 SHARED_PRODUCER_RESULT_FIELDS = {
     "boundaryId",
@@ -193,6 +206,175 @@ def _verified_environment_executable(
     ):
         raise BlockError(f"{label}_EXECUTABLE_IDENTITY_MISMATCH")
     return path, expected_sha256
+
+
+class PinnedExecutable:
+    """실행 pathname의 inode를 열린 FD와 expected SHA에 결속한다."""
+
+    def __init__(
+        self,
+        path: Path,
+        *,
+        expected_sha256: str,
+        label: str,
+    ) -> None:
+        self.path = _require_absolute_regular(path, label=label)
+        self.expected_sha256 = expected_sha256
+        self.label = label
+        self.fd = -1
+        self._identity: tuple[int, int, int, int, int, int] | None = None
+
+    @staticmethod
+    def _metadata_identity(
+        metadata: os.stat_result,
+    ) -> tuple[int, int, int, int, int, int]:
+        return (
+            metadata.st_dev,
+            metadata.st_ino,
+            metadata.st_mode,
+            metadata.st_size,
+            metadata.st_mtime_ns,
+            metadata.st_ctime_ns,
+        )
+
+    def __enter__(self) -> PinnedExecutable:
+        if SHA256_PATTERN.fullmatch(self.expected_sha256) is None:
+            raise BlockError(f"{self.label}_EXPECTED_SHA256_INVALID")
+        self.fd = os.open(self.path, os.O_RDONLY | os.O_NOFOLLOW)
+        metadata = os.fstat(self.fd)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_nlink != 1
+            or metadata.st_mode & 0o111 == 0
+        ):
+            os.close(self.fd)
+            self.fd = -1
+            raise BlockError(f"{self.label}_PINNED_FILE_INVALID")
+        digest = hashlib.sha256()
+        offset = 0
+        while True:
+            chunk = os.pread(self.fd, 1024 * 1024, offset)
+            if not chunk:
+                break
+            offset += len(chunk)
+            digest.update(chunk)
+        if digest.hexdigest() != self.expected_sha256:
+            os.close(self.fd)
+            self.fd = -1
+            raise BlockError(f"{self.label}_PINNED_SHA256_MISMATCH")
+        self._identity = self._metadata_identity(metadata)
+        os.set_inheritable(self.fd, True)
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        if self.fd >= 0:
+            os.close(self.fd)
+            self.fd = -1
+
+    @property
+    def proc_path(self) -> Path:
+        if self.fd < 0:
+            raise BlockError(f"{self.label}_PIN_NOT_OPEN")
+        return Path(f"/proc/self/fd/{self.fd}")
+
+    @property
+    def pass_fds(self) -> tuple[int, ...]:
+        if self.fd < 0:
+            raise BlockError(f"{self.label}_PIN_NOT_OPEN")
+        return (self.fd,)
+
+    def verify_path_identity(self) -> None:
+        """실행 전후 pathname이 pinned inode/bytes로 계속 수렴하는지 확인한다."""
+
+        if self.fd < 0 or self._identity is None:
+            raise BlockError(f"{self.label}_PIN_NOT_OPEN")
+        try:
+            metadata = os.stat(self.path, follow_symlinks=False)
+        except OSError as error:
+            raise BlockError(f"{self.label}_PATH_SUBSTITUTED") from error
+        if (
+            self._metadata_identity(metadata) != self._identity
+            or sha256_file(self.path) != self.expected_sha256
+        ):
+            raise BlockError(f"{self.label}_PATH_SUBSTITUTED")
+
+
+def deterministic_scala_environment(
+    *,
+    cache_root: Path,
+    block_directory: Path,
+    java_home: Path,
+    base_environment: Mapping[str, str],
+) -> tuple[dict[str, str], dict[str, str]]:
+    """Timed Scala child가 ambient config/cache를 볼 수 없는 exact environment를 만든다."""
+
+    ambient_names = {
+        *FORBIDDEN_AMBIENT_JVM_VARIABLES,
+        *FORBIDDEN_AMBIENT_SCALA_VARIABLES,
+        "COURSIER_CACHE",
+        "S1_4X_SCALA_WORKSPACE",
+        "XDG_CONFIG_HOME",
+    }
+    present_ambient = sorted(
+        name for name in ambient_names if name in base_environment
+    )
+    if present_ambient:
+        raise BlockError(
+            f"AMBIENT_SCALA_CONFIGURATION_FORBIDDEN:{present_ambient[0]}"
+        )
+    for path, label in (
+        (cache_root, "CACHE_ROOT"),
+        (block_directory, "BLOCK_DIRECTORY"),
+    ):
+        _require_absolute_directory(path, label=label)
+    coursier_cache = cache_root / "coursier"
+    scala_cli_home = block_directory / "scala-cli-home"
+    coursier_config = block_directory / "coursier-config"
+    workspace_key = hashlib.sha256(
+        str(block_directory).encode("utf-8")
+    ).hexdigest()
+    scala_workspace = cache_root / "scala-workspaces" / workspace_key
+    xdg_config = block_directory / "xdg-config"
+    coursier_cache.mkdir(mode=0o700, parents=True, exist_ok=True)
+    _require_absolute_directory(
+        coursier_cache,
+        label="SCALA_COURSIER_CACHE",
+    )
+    for path in (
+        scala_cli_home,
+        coursier_config,
+        scala_workspace,
+        xdg_config,
+    ):
+        if path.exists() or path.is_symlink():
+            raise BlockError("AMBIENT_SCALA_ISOLATION_PATH_FOUND")
+        path.mkdir(mode=0o700, parents=True)
+        _require_absolute_directory(path, label="SCALA_ISOLATION_DIRECTORY")
+    environment = dict(base_environment)
+    environment.update(
+        {
+            "PATH": f"{java_home}/bin:/usr/bin:/bin",
+            "JAVA_HOME": str(java_home),
+            "COURSIER_CACHE": str(coursier_cache),
+            "COURSIER_CONFIG_DIR": str(coursier_config),
+            "SCALA_CLI_HOME": str(scala_cli_home),
+            "SCALA_CLI_CONFIG": str(scala_cli_home / "config.json"),
+            "S1_4X_SCALA_WORKSPACE": str(scala_workspace),
+            "XDG_CONFIG_HOME": str(xdg_config),
+            "PYTHONDONTWRITEBYTECODE": "1",
+        }
+    )
+    closure = {
+        "coursierCachePathId": "CACHE_ROOT/coursier",
+        "coursierConfigPathId": "BLOCK_ROOT/coursier-config",
+        "scalaCliConfigPathId": "BLOCK_ROOT/scala-cli-home/config.json",
+        "scalaCliHomePathId": "BLOCK_ROOT/scala-cli-home",
+        "scalaWorkspacePathId": (
+            f"CACHE_ROOT/scala-workspaces/{workspace_key}"
+        ),
+        "xdgConfigPathId": "BLOCK_ROOT/xdg-config",
+    }
+    return environment, closure
 
 
 def case_directory_name(index: int) -> str:
@@ -552,7 +734,12 @@ def _validate_measurement_qualification(
         raise BlockError("INVALID_MEASUREMENT_QUALIFICATION")
 
 
-def _verify_subject_commit(repo_root: Path, expected: str) -> None:
+def _verify_subject_commit(
+    repo_root: Path,
+    expected: str,
+    *,
+    scala_root: Path,
+) -> None:
     if COMMIT_PATTERN.fullmatch(expected) is None:
         raise BlockError("BENCHMARK_SUBJECT_COMMIT_INVALID")
     completed = subprocess.run(
@@ -564,6 +751,55 @@ def _verify_subject_commit(repo_root: Path, expected: str) -> None:
     )
     if completed.returncode != 0 or completed.stdout.strip() != expected:
         raise BlockError("BENCHMARK_SUBJECT_COMMIT_MISMATCH")
+    tracked_status = subprocess.run(
+        [
+            "/usr/bin/git",
+            "-C",
+            str(repo_root),
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=all",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+    if tracked_status.returncode != 0 or tracked_status.stdout:
+        raise BlockError("BENCHMARK_SUBJECT_WORKTREE_DIRTY")
+    ignored_status = subprocess.run(
+        [
+            "/usr/bin/git",
+            "-C",
+            str(repo_root),
+            "status",
+            "--porcelain=v1",
+            "--ignored=matching",
+            "--untracked-files=all",
+            "--",
+            str(scala_root.relative_to(repo_root)),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+    if ignored_status.returncode != 0:
+        raise BlockError("BENCHMARK_SUBJECT_IGNORED_AUDIT_FAILED")
+    forbidden_components = ("/.scala-build/", "/.bsp/")
+    ignored_paths = [
+        line[3:].rstrip("/")
+        for line in ignored_status.stdout.splitlines()
+        if line.startswith("!! ")
+    ]
+    if any(
+        any(
+            marker in f"/{path}/"
+            for marker in forbidden_components
+        )
+        for path in ignored_paths
+    ):
+        raise BlockError("BENCHMARK_SUBJECT_REPO_LOCAL_BUILD_OUTPUT_FOUND")
 
 
 def _run_json_command(
@@ -571,6 +807,8 @@ def _run_json_command(
     *,
     label: str,
     timeout: int = 300,
+    environment: Mapping[str, str] | None = None,
+    pass_fds: Sequence[int] = (),
 ) -> dict[str, Any]:
     completed = subprocess.run(
         list(command),
@@ -579,6 +817,8 @@ def _run_json_command(
         capture_output=True,
         text=True,
         timeout=timeout,
+        env=None if environment is None else dict(environment),
+        pass_fds=tuple(pass_fds),
     )
     if completed.returncode != 0:
         raise BlockError(f"{label}_FAILED:{completed.returncode}")
@@ -595,12 +835,16 @@ def _run_checked(
     *,
     label: str,
     cwd: Path,
+    environment: Mapping[str, str] | None = None,
+    pass_fds: Sequence[int] = (),
 ) -> None:
     completed = subprocess.run(
         list(command),
         cwd=cwd,
         check=False,
         stdin=subprocess.DEVNULL,
+        env=None if environment is None else dict(environment),
+        pass_fds=tuple(pass_fds),
     )
     if completed.returncode != 0:
         raise BlockError(f"{label}_FAILED:{completed.returncode}")
@@ -746,7 +990,11 @@ def run_block(arguments: argparse.Namespace) -> dict[str, Any]:
         != expected_tail.parts
     ):
         raise BlockError("BLOCK_DIRECTORY_LAYOUT_MISMATCH")
-    _verify_subject_commit(repo_root, arguments.benchmark_subject_commit)
+    _verify_subject_commit(
+        repo_root,
+        arguments.benchmark_subject_commit,
+        scala_root=scala_root,
+    )
 
     benchmark_python, _ = _verified_environment_executable(
         "S1_4X_BENCHMARK_PYTHON_BIN",
@@ -773,6 +1021,28 @@ def run_block(arguments: argparse.Namespace) -> dict[str, Any]:
         raise BlockError("JAVA_HOME_EXECUTABLE_MISMATCH")
     if any(name in os.environ for name in FORBIDDEN_AMBIENT_JVM_VARIABLES):
         raise BlockError("AMBIENT_JVM_OVERRIDE_FORBIDDEN")
+    benchmark_python_pin = PinnedExecutable(
+        benchmark_python,
+        expected_sha256=_required_environment(
+            "S1_4X_BENCHMARK_PYTHON_SHA256"
+        ),
+        label="BENCHMARK_PYTHON",
+    ).__enter__()
+    scala_cli_pin = PinnedExecutable(
+        scala_cli,
+        expected_sha256=_required_environment("S1_4X_SCALA_CLI_SHA256"),
+        label="SCALA_CLI",
+    ).__enter__()
+    java_pin = PinnedExecutable(
+        java_executable,
+        expected_sha256=_required_environment("S1_4X_SCALA_JAVA_SHA256"),
+        label="JAVA_EXECUTABLE",
+    ).__enter__()
+    pinned_fds = (
+        *benchmark_python_pin.pass_fds,
+        *scala_cli_pin.pass_fds,
+        *java_pin.pass_fds,
+    )
 
     selected_result_path = _require_absolute_regular(
         Path(_required_environment("S1_4X_SCALA_SELECTED_PROFILE_RESULT")),
@@ -816,16 +1086,6 @@ def run_block(arguments: argparse.Namespace) -> dict[str, Any]:
         jvm_allowlist_path=jvm_allowlist_path,
         scala_cli_path=scala_cli,
         java_executable_path=java_executable,
-    )
-
-    assert_selected = _require_absolute_regular(
-        scala_root / "tools/assert-selected-profile.sh",
-        label="SELECTED_PROFILE_ASSERTION",
-    )
-    _run_checked(
-        [str(assert_selected), "--benchmark-subject"],
-        label="SELECTED_PROFILE_ASSERTION",
-        cwd=scala_root,
     )
 
     for directory in (
@@ -872,9 +1132,44 @@ def run_block(arguments: argparse.Namespace) -> dict[str, Any]:
         block_directory / "native.json",
         block_directory / "native-statistics.json",
         block_directory / "block-result.json",
+        block_directory / "scala-cli-home",
+        block_directory / "coursier-config",
+        block_directory / "xdg-config",
     )
     if any(path.exists() or path.is_symlink() for path in reserved_outputs):
         raise BlockError("BENCHMARK_OUTPUT_ALREADY_EXISTS")
+    environment, environment_closure = deterministic_scala_environment(
+        cache_root=_require_absolute_directory(
+            Path(_required_environment("S1_4X_CACHE_ROOT")),
+            label="CACHE_ROOT",
+        ),
+        block_directory=block_directory,
+        java_home=java_home,
+        base_environment=os.environ,
+    )
+    environment["S1_4X_SCALA_CLI_EXEC_PATH"] = str(
+        scala_cli_pin.proc_path
+    )
+    environment["S1_4X_SCALA_JAVA_PINNED_FD_PATH"] = str(
+        java_pin.proc_path
+    )
+    environment["S1_4X_SCALA_ENVIRONMENT_VALUES_SHA256"] = (
+        canonical_sha256(environment_closure)
+    )
+
+    assert_selected = _require_absolute_regular(
+        scala_root / "tools/assert-selected-profile.sh",
+        label="SELECTED_PROFILE_ASSERTION",
+    )
+    _run_checked(
+        [str(assert_selected), "--benchmark-subject"],
+        label="SELECTED_PROFILE_ASSERTION",
+        cwd=scala_root,
+        environment=environment,
+        pass_fds=pinned_fds,
+    )
+    for pinned in (benchmark_python_pin, scala_cli_pin, java_pin):
+        pinned.verify_path_identity()
 
     ledger_script = _require_absolute_regular(
         integration_root / "benchmark_input_ledger.py",
@@ -904,6 +1199,8 @@ def run_block(arguments: argparse.Namespace) -> dict[str, Any]:
             str(input_ledger),
         ],
         label="BENCHMARK_INPUT_LEDGER",
+        environment=environment,
+        pass_fds=pinned_fds,
     )
     if ledger_result != {
         "boundaryId": "scala",
@@ -926,6 +1223,8 @@ def run_block(arguments: argparse.Namespace) -> dict[str, Any]:
         ),
         label="MEASUREMENT_MARKER",
         cwd=repo_root,
+        environment=environment,
+        pass_fds=pinned_fds,
     )
     _validate_measurement_qualification(qualification_path, qualification)
 
@@ -943,6 +1242,8 @@ def run_block(arguments: argparse.Namespace) -> dict[str, Any]:
             ),
             label=f"SCALA_FULL_JMH_CASE_{index:03d}",
             cwd=scala_root,
+            environment=environment,
+            pass_fds=pinned_fds,
         )
         _validate_raw_case_directory(
             case_directory,
@@ -974,6 +1275,8 @@ def run_block(arguments: argparse.Namespace) -> dict[str, Any]:
             finished_at=finished_at,
         ),
         label="SCALA_NATIVE_PRODUCER",
+        environment=environment,
+        pass_fds=pinned_fds,
     )
     if (
         set(producer_result) != SHARED_PRODUCER_RESULT_FIELDS
@@ -1008,6 +1311,8 @@ def run_block(arguments: argparse.Namespace) -> dict[str, Any]:
             benchmark_subject_commit=arguments.benchmark_subject_commit,
         ),
         label="NATIVE_BENCHMARK_BLOCK",
+        environment=environment,
+        pass_fds=pinned_fds,
     )
     if (
         set(block_result)
@@ -1025,6 +1330,8 @@ def run_block(arguments: argparse.Namespace) -> dict[str, Any]:
     )
     if sha256_file(result_path) != block_result["blockResultSha256"]:
         raise BlockError("BLOCK_RESULT_SHA256_MISMATCH")
+    for pinned in (benchmark_python_pin, scala_cli_pin, java_pin):
+        pinned.verify_path_identity()
     return {
         "status": "PASS",
         "selectorId": arguments.selector,

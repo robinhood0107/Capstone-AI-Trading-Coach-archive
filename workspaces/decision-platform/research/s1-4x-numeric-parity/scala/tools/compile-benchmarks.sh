@@ -4,6 +4,8 @@ set -euo pipefail
 SCALA_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 S1_ROOT="$(cd -- "$SCALA_ROOT/.." && pwd -P)"
 SCALA_CLI="${S1_4X_SCALA_CLI_BIN:?set exact Scala CLI 1.15.0 binary path from readiness packet}"
+SCALA_CLI_EXEC="${S1_4X_SCALA_CLI_EXEC_PATH:-$SCALA_CLI}"
+SCALA_WORKSPACE="${S1_4X_SCALA_WORKSPACE:?set external Scala CLI workspace}"
 PROFILE=""
 OUTPUT=""
 
@@ -35,6 +37,9 @@ case "$PROFILE" in
   *) usage ;;
 esac
 [[ "$OUTPUT" == /* && ! -e "$OUTPUT" && ! -L "$OUTPUT" ]] || usage
+[[ "$SCALA_CLI_EXEC" == /* && -x "$SCALA_CLI_EXEC" ]] || usage
+[[ "$SCALA_WORKSPACE" == /* && "$SCALA_WORKSPACE" != "$SCALA_ROOT"/* \
+  && -d "$SCALA_WORKSPACE" && ! -L "$SCALA_WORKSPACE" ]] || usage
 
 "$SCALA_ROOT/tools/assert-toolchain.sh"
 "$SCALA_ROOT/tools/assert-compiler-profiles.sh" >/dev/null
@@ -69,8 +74,9 @@ export TMP="$TMPDIR"
 export COURSIER_CACHE="$CACHE_ROOT/coursier"
 
 # Scala CLI + JDK 25 real JVM/JMH compile/list: --jmh --jmh-version 1.37.
-"$SCALA_CLI" --power run \
+"$SCALA_CLI_EXEC" --power run \
   "${benchmark_sources[@]}" \
+  --workspace "$S1_4X_SCALA_WORKSPACE" \
   --server=false \
   --jvm system \
   --coursier-validate-checksums \

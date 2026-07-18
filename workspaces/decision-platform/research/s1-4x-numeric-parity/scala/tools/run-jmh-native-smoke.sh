@@ -73,6 +73,87 @@ else
     usage
 fi
 
+CACHE_ROOT="${S1_4X_CACHE_ROOT:-$HOME/.cache/s1-4x}"
+[[ "$CACHE_ROOT" == /* && -d "$CACHE_ROOT" && ! -L "$CACHE_ROOT" ]] || usage
+expected_coursier_cache="$CACHE_ROOT/coursier"
+mkdir -p "$expected_coursier_cache" "$CACHE_ROOT/scala-isolation"
+[[ "${COURSIER_CACHE:-$expected_coursier_cache}" == "$expected_coursier_cache" ]] ||
+  {
+    printf 'ambient Coursier cache is forbidden\n' >&2
+    exit 69
+  }
+export COURSIER_CACHE="$expected_coursier_cache"
+export S1_4X_CACHE_ROOT="$CACHE_ROOT"
+
+isolation_key="$(
+  printf '%s' "$OUTPUT_DIR" | sha256sum | awk '{print $1}'
+)"
+default_isolation="$CACHE_ROOT/scala-isolation/$isolation_key"
+if [[ -n "${S1_4X_SCALA_ENVIRONMENT_VALUES_SHA256:-}" ]]; then
+  [[ "$S1_4X_SCALA_ENVIRONMENT_VALUES_SHA256" =~ ^[0-9a-f]{64}$ ]] || usage
+  scala_cli_home="${SCALA_CLI_HOME:?sealed Scala CLI home is required}"
+  coursier_config="${COURSIER_CONFIG_DIR:?sealed Coursier config is required}"
+  scala_workspace="${S1_4X_SCALA_WORKSPACE:?sealed Scala workspace is required}"
+  xdg_config="${XDG_CONFIG_HOME:?sealed XDG config is required}"
+  scala_cli_config="${SCALA_CLI_CONFIG:?sealed Scala CLI config is required}"
+  sealed_block_root="$(dirname -- "$(dirname -- "$OUTPUT_DIR")")"
+  sealed_workspace_key="$(
+    printf '%s' "$sealed_block_root" | sha256sum | awk '{print $1}'
+  )"
+  [[ "$scala_cli_home" == "$sealed_block_root/scala-cli-home" \
+    && "$coursier_config" == "$sealed_block_root/coursier-config" \
+    && "$scala_workspace" == \
+      "$CACHE_ROOT/scala-workspaces/$sealed_workspace_key" \
+    && "$xdg_config" == "$sealed_block_root/xdg-config" \
+    && "$scala_cli_config" == "$sealed_block_root/scala-cli-home/config.json" ]] ||
+    {
+      printf 'sealed Scala isolation closure differs from block identity\n' >&2
+      exit 69
+    }
+else
+  for ambient_name in \
+    COURSIER_CONFIG_DIR COURSIER_REPOSITORIES SCALA_CLI_CONFIG \
+    SCALA_CLI_HOME S1_4X_SCALA_WORKSPACE XDG_CONFIG_HOME; do
+    [[ -z "${!ambient_name+x}" ]] || {
+      printf 'ambient Scala configuration is forbidden: %s\n' \
+        "$ambient_name" >&2
+      exit 69
+    }
+  done
+  [[ ! -e "$default_isolation" && ! -L "$default_isolation" ]] || {
+    printf 'ambient Scala isolation directory already exists\n' >&2
+    exit 69
+  }
+  scala_cli_home="$default_isolation/scala-cli-home"
+  coursier_config="$default_isolation/coursier-config"
+  scala_workspace="$default_isolation/scala-workspace"
+  xdg_config="$default_isolation/xdg-config"
+  scala_cli_config="$scala_cli_home/config.json"
+fi
+for path in \
+  "$scala_cli_home" "$coursier_config" "$scala_workspace" "$xdg_config"; do
+  [[ "$path" == /* && "$path" != "$SCALA_ROOT"/* && ! -L "$path" ]] || {
+    printf 'unsafe Scala isolation path: %s\n' "$path" >&2
+    exit 69
+  }
+  mkdir -p "$path"
+done
+[[ "$scala_cli_config" == "$scala_cli_home/config.json" ]] || {
+  printf 'ambient Scala CLI config is forbidden\n' >&2
+  exit 69
+}
+export SCALA_CLI_HOME="$scala_cli_home"
+export COURSIER_CONFIG_DIR="$coursier_config"
+export S1_4X_SCALA_WORKSPACE="$scala_workspace"
+export XDG_CONFIG_HOME="$xdg_config"
+export SCALA_CLI_CONFIG="$scala_cli_config"
+unset COURSIER_REPOSITORIES
+SCALA_CLI_EXEC="${S1_4X_SCALA_CLI_EXEC_PATH:-$SCALA_CLI}"
+[[ "$SCALA_CLI_EXEC" == /* && -x "$SCALA_CLI_EXEC" ]] || {
+  printf 'Scala CLI execution path is invalid\n' >&2
+  exit 69
+}
+
 "$SCALA_ROOT/tools/assert-toolchain.sh"
 "$SCALA_ROOT/tools/assert-compiler-profiles.sh" >/dev/null
 "$SCALA_ROOT/tools/check-jmh-plan-integrity.sh" --plan "$PLAN"
@@ -175,8 +256,9 @@ fi
 
 native_json="$OUTPUT_DIR/native.json"
 command=(
-  "$SCALA_CLI" --power run
+  "$SCALA_CLI_EXEC" --power run
   "${benchmark_sources[@]}"
+  --workspace "$S1_4X_SCALA_WORKSPACE"
   --server=false
   --jvm system
   --coursier-validate-checksums
@@ -302,6 +384,7 @@ python3 - \
   "$PROFILE" "$CASE_ID" "$MODE" "$logical_operations" "${command[@]}" <<'PY'
 import hashlib
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -348,6 +431,7 @@ def strict_object(path: Path) -> dict:
 
 scala_root = manifest.parent
 output_root = output.parent
+scala_workspace = Path(os.environ["S1_4X_SCALA_WORKSPACE"])
 compiler_config = strict_object(compiler_profiles)
 source_manifest = strict_object(manifest)
 native_validation = strict_object(validation)
@@ -356,9 +440,16 @@ expected_inputs = [
     for path, metadata in source_manifest["files"].items()
     if metadata["role"] in {"configuration", "main", "benchmark"}
 ]
+workspace_index = runtime_argv.index("--workspace")
+if (
+    workspace_index < 3
+    or workspace_index + 2 >= len(runtime_argv)
+    or runtime_argv[workspace_index + 2] != "--server=false"
+):
+    raise SystemExit("JMH_RUNTIME_WORKSPACE_POSITION_DRIFT")
 actual_inputs = [
     item.removeprefix(f"{scala_root}/")
-    for item in runtime_argv[2:runtime_argv.index("--server=false")]
+    for item in runtime_argv[3:workspace_index]
 ]
 if actual_inputs != expected_inputs:
     raise SystemExit("JMH_RUNTIME_SOURCE_INPUT_DRIFT")
@@ -374,6 +465,8 @@ for item in runtime_argv:
         portable.append("EVIDENCE_ROOT")
     elif item.startswith(f"{output_root}/"):
         portable.append(f"EVIDENCE_ROOT/{item.removeprefix(f'{output_root}/')}")
+    elif item == str(scala_workspace):
+        portable.append("SCALA_WORKSPACE")
     else:
         portable.append(item)
 
@@ -386,6 +479,70 @@ def canonical(value: object) -> str:
         sort_keys=True,
     ).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()
+
+tool_paths = [
+    ("SCALA_CLI_1_15_0", scala_cli),
+    ("TEMURIN_25_0_3_9_LTS/bin/java", Path(os.environ["JAVA_HOME"]) / "bin/java"),
+]
+if mode == "full":
+    tool_paths.append(
+        (
+            "SCALA_ROOT/tools/run-jmh-native-full.sh",
+            scala_root / "tools/run-jmh-native-full.sh",
+        )
+    )
+tool_paths.extend(
+    [
+        (
+            "SCALA_ROOT/tools/run-jmh-native-smoke.sh",
+            scala_root / "tools/run-jmh-native-smoke.sh",
+        ),
+        (
+            "SCALA_ROOT/tools/compile-benchmarks.sh",
+            scala_root / "tools/compile-benchmarks.sh",
+        ),
+        (
+            "SCALA_ROOT/tools/assert-toolchain.sh",
+            scala_root / "tools/assert-toolchain.sh",
+        ),
+        (
+            "SCALA_ROOT/tools/assert-compiler-profiles.sh",
+            scala_root / "tools/assert-compiler-profiles.sh",
+        ),
+        (
+            "SCALA_ROOT/tools/check-jmh-plan-integrity.sh",
+            scala_root / "tools/check-jmh-plan-integrity.sh",
+        ),
+        (
+            "SCALA_ROOT/tools/source_input_manifest.py",
+            scala_root / "tools/source_input_manifest.py",
+        ),
+        (
+            "SCALA_ROOT/tools/t3_evidence.py",
+            scala_root / "tools/t3_evidence.py",
+        ),
+    ]
+)
+tool_closure = [
+    {"pathId": path_id, "sha256": digest(path)}
+    for path_id, path in tool_paths
+]
+cache_root = Path(os.environ["S1_4X_CACHE_ROOT"])
+if Path(os.environ["COURSIER_CACHE"]) != cache_root / "coursier":
+    raise SystemExit("COURSIER_CACHE_IDENTITY_DRIFT")
+environment_values = {
+    "COURSIER_CACHE": "CACHE_ROOT/coursier",
+    "COURSIER_CONFIG_DIR": "SCALA_ISOLATION/coursier-config",
+    "SCALA_CLI_CONFIG": "SCALA_ISOLATION/scala-cli-home/config.json",
+    "SCALA_CLI_HOME": "SCALA_ISOLATION/scala-cli-home",
+    "S1_4X_SCALA_WORKSPACE": "SCALA_WORKSPACE",
+    "XDG_CONFIG_HOME": "SCALA_ISOLATION/xdg-config",
+}
+execution_path_id = (
+    "PINNED_SCALA_CLI_FD"
+    if runtime_argv[0].startswith("/proc/self/fd/")
+    else "SCALA_CLI_1_15_0"
+)
 
 result = {
     "schemaVersion": "s1.4x-scala-jmh-run-result-v1",
@@ -402,6 +559,7 @@ result = {
     "benchmarkPlanSha256": digest(plan),
     "sourceInputManifestSha256": digest(manifest),
     "scalaCliBinarySha256": digest(scala_cli),
+    "scalaCliExecutionPathId": execution_path_id,
     "compilerProfilesSha256": digest(compiler_profiles),
     "profileOptionsSha256": canonical(
         compiler_config["profiles"][profile]["additionalOptions"]
@@ -410,6 +568,10 @@ result = {
     "portableArgv": portable,
     "portableArgvSha256": canonical(portable),
     "runtimeArgvSha256": canonical(runtime_argv),
+    "commandToolClosure": tool_closure,
+    "commandToolClosureSha256": canonical(tool_closure),
+    "environmentValuesSha256": canonical(environment_values),
+    "scalaWorkspacePathId": "SCALA_WORKSPACE",
     "rawNativeJsonSha256": digest(native),
     "effectiveJvmArgsSha256": digest(effective),
     "jvmArgumentAllowlistSha256": digest(allowlist),
