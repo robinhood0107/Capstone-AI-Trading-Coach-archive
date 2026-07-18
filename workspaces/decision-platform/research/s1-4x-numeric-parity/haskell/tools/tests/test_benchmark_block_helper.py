@@ -280,6 +280,44 @@ class BenchmarkBlockHelperTests(unittest.TestCase):
             finally:
                 os.close(descriptor)
 
+    def test_repo_marker_script_keeps_the_same_fd_bytes_after_path_swap(
+        self,
+    ) -> None:
+        helper = load_helper()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            script = root / "marker.py"
+            original = b"print('original marker')\n"
+            script.write_bytes(original)
+            pinned = helper.pin_regular_file(
+                script,
+                label="MARKER_SCRIPT",
+                max_bytes=1024,
+            )
+            try:
+                replacement = root / "replacement.py"
+                replacement.write_bytes(b"print('substituted marker')\n")
+                os.replace(replacement, script)
+                (
+                    descriptor,
+                    payload,
+                    digest,
+                    _,
+                    identity,
+                ) = helper._read_pinned_fd(
+                    fd_path=pinned.fd_path,
+                    label=pinned.label,
+                    max_bytes=1024,
+                    executable=False,
+                    capture_payload=True,
+                )
+                self.assertEqual(descriptor, pinned.descriptor)
+                self.assertEqual(payload, original)
+                self.assertEqual(digest, pinned.sha256)
+                self.assertEqual(identity, pinned.identity)
+            finally:
+                os.close(pinned.descriptor)
+
     def test_pinned_tool_fd_inheritance_reaches_nested_stack_and_ghc(
         self,
     ) -> None:

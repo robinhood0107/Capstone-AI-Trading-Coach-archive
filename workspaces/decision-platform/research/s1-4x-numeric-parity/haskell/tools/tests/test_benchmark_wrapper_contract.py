@@ -94,6 +94,7 @@ class BenchmarkWrapperContractTests(unittest.TestCase):
     ) -> None:
         source = WRAPPER.read_text(encoding="utf-8")
         for prefix in (
+            "S1_4X_BENCHMARK_PYTHON",
             "S1_4X_GHCUP",
             "S1_4X_STACK",
             "S1_4X_AUTHORITATIVE_GHC",
@@ -134,8 +135,35 @@ class BenchmarkWrapperContractTests(unittest.TestCase):
         self.assertIn("verify_source_path_layout", source)
         self.assertIn("verify_pinned_object", source)
         self.assertNotIn("verify_executable", source)
+        self.assertNotIn("verify_benchmark_python", source)
         self.assertNotIn('/usr/bin/realpath -e -- "$executable"', source)
         self.assertNotIn('/usr/bin/sha256sum "$executable"', source)
+        self.assertNotIn('/usr/bin/sha256sum "$BENCHMARK_PYTHON"', source)
+
+    def test_marker_python_and_script_execute_only_from_pinned_fd_paths(
+        self,
+    ) -> None:
+        helper = HELPER.read_text(encoding="utf-8")
+        benchmark = BENCHMARK_MAIN.read_text(encoding="utf-8")
+
+        self.assertIn(
+            'pinned_executable_environment(\n'
+            '        "S1_4X_BENCHMARK_PYTHON"',
+            helper,
+        )
+        self.assertNotIn(
+            '_verified_environment_executable(\n'
+            '        "S1_4X_BENCHMARK_PYTHON_BIN"',
+            helper,
+        )
+        self.assertIn('"markerPythonPinnedFdPath"', helper)
+        self.assertIn('"markerScriptPinnedFdPath"', helper)
+        self.assertIn("requiredPinnedFdPath", benchmark)
+        self.assertIn(
+            'verifiedMarkerInput\n'
+            '      "S1_4X_BENCHMARK_MARKER_PYTHON"',
+            benchmark,
+        )
 
     def test_wrapper_mode_is_regular_not_symlink(self) -> None:
         self.assertFalse(WRAPPER.is_symlink())
@@ -275,6 +303,9 @@ class BenchmarkWrapperContractTests(unittest.TestCase):
                 "import os\n"
                 "import sys\n"
                 "from pathlib import Path\n"
+                "if sys.argv[0] != "
+                "os.environ['S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH']:\n"
+                "    raise SystemExit(80)\n"
                 "helper_path = Path(sys.argv[1])\n"
                 "spec = importlib.util.spec_from_file_location("
                 "'outer_fd_probe_helper', helper_path)\n"
@@ -316,6 +347,10 @@ class BenchmarkWrapperContractTests(unittest.TestCase):
             )
             tool_paths = (ghcup, stack, ghc, passthrough, passthrough, passthrough)
             descriptors = [os.open(path, os.O_RDONLY) for path in tool_paths]
+            benchmark_python_descriptor = os.open(
+                fake_python,
+                os.O_RDONLY,
+            )
             evidence_paths = []
             evidence_descriptors = []
             for name in ("baseline", "optimized", "qualification"):
@@ -330,6 +365,9 @@ class BenchmarkWrapperContractTests(unittest.TestCase):
                     "S1_4X_BENCHMARK_PYTHON_SHA256": hashlib.sha256(
                         fake_python.read_bytes()
                     ).hexdigest(),
+                    "S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH": (
+                        f"/proc/self/fd/{benchmark_python_descriptor}"
+                    ),
                     "S1_4X_CACHE_ROOT": str(root),
                 }
                 for prefix, path, descriptor in zip(
@@ -403,7 +441,13 @@ class BenchmarkWrapperContractTests(unittest.TestCase):
                     env=environment,
                     check=False,
                     capture_output=True,
-                    pass_fds=tuple(descriptors + evidence_descriptors),
+                    pass_fds=tuple(
+                        [
+                            benchmark_python_descriptor,
+                            *descriptors,
+                            *evidence_descriptors,
+                        ]
+                    ),
                 )
                 self.assertEqual(
                     completed.returncode,
@@ -415,6 +459,7 @@ class BenchmarkWrapperContractTests(unittest.TestCase):
                     f"/proc/self/fd/{descriptors[2]}",
                 )
             finally:
+                os.close(benchmark_python_descriptor)
                 for descriptor in descriptors + evidence_descriptors:
                     os.close(descriptor)
 
