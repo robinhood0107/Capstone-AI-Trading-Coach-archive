@@ -66,6 +66,8 @@ import S14X.Core.Validation
     validateTransitionIdentifiability,
   )
 
+-- | 손실 벡터의 상위 꼬리를 confidence 경계에서 부분 가중해 historical expected shortfall을 계산한다.
+-- research 입력·confidence·가중 결과가 유효하지 않으면 닫힌 'StableError'를 반환한다.
 historicalExpectedShortfall ::
   U.Vector Double ->
   Double ->
@@ -81,16 +83,22 @@ historicalExpectedShortfall rawLosses confidence = do
           (\index -> max 0.0 (min 1.0 (tailMass - fromIntegral index)) / tailMass)
   stableWeightedMean ordered weights
 
+-- | intraday 수익률 제곱을 보상합으로 더해 realized variance를 반환한다.
+-- 최소 길이와 유한성은 research 경계에서 검증하고 비유한 출력은 거부한다.
 realizedVariance :: U.Vector Double -> Either StableError Double
 realizedVariance rawReturns = do
   returns <- validateResearchVector 1 rawReturns
   finiteResearchResult (sumVector (U.map (\value -> value * value) returns))
 
+-- | realized variance의 제곱근으로 intraday realized volatility를 계산한다.
+-- variance 검증 오류와 비유한 제곱근 결과를 그대로 stable 오류로 전달한다.
 realizedVolatilityIntraday :: U.Vector Double -> Either StableError Double
 realizedVolatilityIntraday rawReturns = do
   variance <- realizedVariance rawReturns
   finiteResearchResult (sqrt variance)
 
+-- | Lo의 자기상관 보정식을 수익률과 aggregation period에 적용한 Sharpe ratio를 반환한다.
+-- period는 @0 < q < n@이어야 하며 비양수 분산·보정분모는 moment 오류가 된다.
 loAdjustedSharpeRatio ::
   U.Vector Double ->
   Integer ->
@@ -123,6 +131,8 @@ loAdjustedSharpeRatio rawReturns aggregationPeriods riskFreeRate = do
                   finiteResearchResult
                     (mean / sqrt gammaZero * sqrt (periods / denominator))
 
+-- | 관측 Sharpe가 기준 Sharpe를 넘을 확률을 표본크기·왜도·Pearson kurtosis로 계산한다.
+-- Bailey와 López de Prado의 PSR 입력 제약과 Float64 확률 범위를 fail-closed로 검증한다.
 probabilisticSharpeRatio ::
   Double ->
   Double ->
@@ -138,6 +148,8 @@ probabilisticSharpeRatio observedSharpe benchmarkSharpe sampleSize skewness kurt
       ((observed - benchmark) * sqrt (observations - 1.0) / sqrt radicand)
   finiteProbabilityResult (normalCdf zScore)
 
+-- | frozen trial provenance와 Sharpe 추정분산으로 multiple-testing benchmark를 만든 뒤 DSR을 계산한다.
+-- trial count·분산·registry provenance가 일치하지 않으면 확률 계산 전에 stable 오류로 중단한다.
 deflatedSharpeRatio ::
   Double ->
   Integer ->
@@ -181,6 +193,8 @@ deflatedSharpeRatio
           skewness
           kurtosis
 
+-- | realized loss가 forecast VaR를 초과한 횟수로 Kupiec unconditional coverage LR 검정을 수행한다.
+-- 동일 길이·비음수 forecast·confidence·significance 계약을 검증해 typed likelihood 결과를 반환한다.
 kupiecUnconditionalCoverageTest ::
   U.Vector Double ->
   U.Vector Double ->
@@ -208,6 +222,8 @@ kupiecUnconditionalCoverageTest realizedLosses forecastVars confidence significa
         alpha
     )
 
+-- | 예외 indicator 전이를 사용해 Christoffersen independence LR 검정을 수행한다.
+-- 두 transition row를 식별할 표본이 없으면 'InsufficientSample'로 거부한다.
 christoffersenIndependenceTest ::
   U.Vector Double ->
   U.Vector Double ->
@@ -233,6 +249,8 @@ christoffersenIndependenceTest realizedLosses forecastVars significance = do
         counts
     )
 
+-- | conditional coverage 통계가 unconditional과 independence 성분의 합과 일치하는지 함께 검증한다.
+-- direct LR과 성분 합의 roundoff 차이가 허용치를 넘으면 likelihood 오류로 닫는다.
 christoffersenConditionalCoverageTest ::
   U.Vector Double ->
   U.Vector Double ->

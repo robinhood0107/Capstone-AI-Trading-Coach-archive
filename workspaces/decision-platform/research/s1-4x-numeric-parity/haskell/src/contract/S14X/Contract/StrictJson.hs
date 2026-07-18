@@ -49,8 +49,8 @@ import S14X.Contract.Types
       ),
   )
 
--- Aeson object materialization 전에 모든 object level의 decoded duplicate key를 검사한다.
--- 동시에 raw number token을 보존해 decimal/exponent를 Integer로 오인하지 않는다.
+-- | Aeson object materialization 전에 모든 object level의 decoded duplicate key를 검사한다.
+-- UTF-8·RFC 8259·유한 number만 허용하고 raw number token을 보존한다.
 parseStrictJson :: ByteString -> Either Text RawJson
 parseStrictJson bytes = do
   case decodeUtf8' bytes of
@@ -64,12 +64,16 @@ parseStrictJson bytes = do
   rejectForbiddenNumbers value
   Right value
 
+-- | strict JSON object의 pair를 key map으로 바꾸고 object가 아니면 @object@ 오류를 반환한다.
+-- duplicate key는 'parseStrictJson'에서 이미 거부된 값에만 적용해야 한다.
 objectMap :: RawJson -> Either Text (Map Text RawJson)
 objectMap rawJson =
   case rawJson of
     RawObject pairs -> Right (Map.fromList pairs)
     _ -> Left "object"
 
+-- | exponent나 decimal point가 없는 JSON number token만 arbitrary 'Integer'로 읽는다.
+-- Bool/string과 변환 잔여 문자가 있는 token은 'Nothing'으로 거부한다.
 rawInteger :: RawJson -> Maybe Integer
 rawInteger rawJson =
   case rawJson of
@@ -81,6 +85,8 @@ rawInteger rawJson =
             _ -> Nothing
     _ -> Nothing
 
+-- | JSON number를 finite Float64로 변환하고 overflow·NaN·infinity는 거부한다.
+-- 입력 token의 shape와 duplicate 검증은 앞선 strict parser가 소유한다.
 rawDouble :: RawJson -> Maybe Double
 rawDouble rawJson =
   case rawJson of

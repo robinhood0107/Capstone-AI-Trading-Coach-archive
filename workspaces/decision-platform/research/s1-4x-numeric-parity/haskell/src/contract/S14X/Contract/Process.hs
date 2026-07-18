@@ -144,6 +144,8 @@ import S14X.Core.ProductionMetrics
     sortinoRatio,
   )
 
+-- | UTF-8 JSON request를 strict duplicate/number grammar와 frozen 20-function 계약으로 검증한다.
+-- 실패 시 payload나 local path를 노출하지 않는 typed 'TransportError'만 반환한다.
 parseRequest :: ByteString -> Either TransportError RequestBatch
 parseRequest payload = do
   root <- mapRequestFailure (parseStrictJson payload)
@@ -216,6 +218,8 @@ validateOptionalCaseFields requestId fixtureId fields = do
       | value `elem` ["handPaper", "largeProperty"] -> Right ()
     _ -> Left (requestFailure (Just requestId) (Just fixtureId) (Just "toleranceClass"))
 
+-- | validated request를 trusted fixture root에서 순서대로 실행해 원자 publish 전 batch를 만든다.
+-- manifest·binary 경계 실패는 첫 transport 오류에서 중단하고 semantic 오류는 case 결과로 보존한다.
 runRequest :: FilePath -> RequestBatch -> IO (Either TransportError ResultBatch)
 runRequest fixtureRoot (RequestBatch _ requestId cases) = do
   evaluated <- traverse (runCase fixtureRoot) cases
@@ -233,6 +237,8 @@ runRequest fixtureRoot (RequestBatch _ requestId cases) = do
             )
     )
 
+-- | 현재 GHC compiler name과 full version을 result의 implementation identity로 만든다.
+-- authoritative와 compatibility replay를 report에서 혼동하지 않도록 runtime compiler에 결속한다.
 implementationLabel :: Text
 implementationLabel =
   Text.pack ("haskell-" <> compilerName <> "-" <> showVersion fullCompilerVersion)
@@ -736,6 +742,8 @@ provenanceInteger :: Map Text RawJson -> Text -> Either StableError Integer
 provenanceInteger fields name =
   maybe (Left TrialProvenanceInvalid) Right (Map.lookup name fields >>= rawInteger)
 
+-- | 결과 batch를 frozen schema의 compact JSON bytes로 인코딩한다.
+-- case 순서, stable error code, finite/negative-zero-normalized numeric shape를 그대로 보존한다.
 encodeResultBatch :: ResultBatch -> ByteString
 encodeResultBatch (ResultBatch requestId implementation results) =
   LBS.toStrict
@@ -846,6 +854,8 @@ encodeTransitions (TransitionCounts n00 n01 n10 n11) =
       "n11" .= n11
     ]
 
+-- | transport 오류를 허용된 context field만 포함한 frozen JSON envelope로 인코딩한다.
+-- exception text, host path, raw request와 binary payload는 절대 직렬화하지 않는다.
 encodeTransportError :: TransportError -> ByteString
 encodeTransportError
   (TransportError code requestId fixtureId field) =
@@ -863,6 +873,8 @@ encodeTransportError
       )
       <> "\n"
 
+-- | 입력 bytes의 SHA-256을 lowercase ASCII hexadecimal 64자로 반환한다.
+-- manifest 검증은 이 digest를 exact 비교하며 Unicode digit이나 대문자를 허용하지 않는다.
 sha256Hex :: ByteString -> ByteString
 sha256Hex = BS8.pack . showDigest . sha256 . LBS.fromStrict
 

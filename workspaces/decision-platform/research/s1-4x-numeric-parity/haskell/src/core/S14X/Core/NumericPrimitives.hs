@@ -36,6 +36,8 @@ import S14X.Core.Error
   )
 import S14X.Core.ScalarValidation (ensureFinite)
 
+-- | immutable vector를 Neumaier 보상합으로 축약해 cancellation residual을 보존한다.
+-- 호출자가 입력 유한성과 최종 결과 오류 매핑을 소유하는 내부 수치 primitive다.
 sumVector :: U.Vector Double -> Double
 sumVector values =
   let (total, compensation) =
@@ -54,15 +56,21 @@ compensatedStep (total, compensation) value =
           else (value - candidate) + total
    in (candidate, compensation + correction)
 
+-- | 비어 있지 않은 검증 완료 벡터의 보상합 산술평균을 반환한다.
+-- 빈 입력의 분모 0을 자체 복구하지 않으므로 public validation 경계 뒤에서만 호출한다.
 meanVector :: U.Vector Double -> Double
 meanVector values = sumVector values / fromIntegral (U.length values)
 
+-- | 길이 2 이상인 검증 완료 벡터의 불편 표본분산을 계산한다.
+-- 입력 길이와 비유한 결과의 stable 오류 변환은 상위 public API가 담당한다.
 sampleVariance :: U.Vector Double -> Double
 sampleVariance values =
   let mean = meanVector values
       squared = U.map (\value -> (value - mean) * (value - mean)) values
    in sumVector squared / fromIntegral (U.length values - 1)
 
+-- | 검증 완료 벡터를 정렬해 Hyndman-Fan type 7 quantile을 보간한다.
+-- 확률·길이 전제 위반이나 비유한 보간 결과는 'ResultNonFinite'로 닫는다.
 hf7Quantile :: U.Vector Double -> Double -> Either StableError Double
 hf7Quantile values probability =
   let ordered = pureSort values
@@ -75,8 +83,8 @@ hf7Quantile values probability =
           ensureFinite ResultNonFinite (lower + weight * (upper - lower))
         _ -> Left ResultNonFinite
 
--- 변경 가능한 vector나 ST를 쓰지 않는 baseline 정렬이다. 중앙 pivot과 immutable filter를
--- 사용해 조건부 mutable optimization을 qualification 전에 도입하지 않는다.
+-- | 변경 가능한 vector나 ST 없이 중앙 pivot과 immutable filter로 정렬한다.
+-- 조건부 mutable optimization을 qualification 전에 도입하지 않는 baseline primitive다.
 pureSort :: U.Vector Double -> U.Vector Double
 pureSort values
   | U.length values <= 1 = values
@@ -90,6 +98,8 @@ pureSort values
               pureSort (U.filter (> pivot) values)
             ]
 
+-- | 값과 정규화 가중치의 scale-aware 보상합으로 가중평균을 계산한다.
+-- 정규화 범위가 roundoff 허용치를 벗어나거나 결과가 비유한 경우 research 오류를 반환한다.
 stableWeightedMean :: U.Vector Double -> U.Vector Double -> Either StableError Double
 stableWeightedMean values normalizedWeights =
   let scale = U.foldl' (\current value -> max current (abs value)) 0.0 values
@@ -104,24 +114,32 @@ stableWeightedMean values normalizedWeights =
                 then Left ResearchResultNonFinite
                 else finiteResearchResult (max (-1.0) (min 1.0 normalized) * scale)
 
+-- | 성공 횟수와 확률의 @count * log(p)@ 항을 경계값 @count == 0@까지 안전하게 계산한다.
+-- 양의 count에서 확률이 @(0,1]@ 밖이면 likelihood 오류를 반환한다.
 xlogProbability :: Int -> Double -> Either StableError Double
 xlogProbability count probability
   | count == 0 = Right 0.0
   | probability <= 0.0 || probability > 1.0 = Left LikelihoodInvalid
   | otherwise = Right (fromIntegral count * log probability)
 
+-- | 비성공 횟수의 @count * log(1-p)@ 항을 'log1p'로 안정적으로 계산한다.
+-- 양의 count에서 확률이 @[0,1)@ 밖이면 likelihood 오류를 반환한다.
 xlogComplement :: Int -> Double -> Either StableError Double
 xlogComplement count probability
   | count == 0 = Right 0.0
   | probability < 0.0 || probability >= 1.0 = Left LikelihoodInvalid
   | otherwise = Right (fromIntegral count * log1p (-probability))
 
+-- | Bernoulli 관측 수·성공 수·확률로 두 로그항의 보상된 합을 반환한다.
+-- 입력 count의 조합 유효성은 호출자 검정 경계가 보장하고 확률 경계는 typed 오류로 검증한다.
 bernoulliLogLikelihood :: Int -> Int -> Double -> Either StableError Double
 bernoulliLogLikelihood observations successes probability = do
   complement <- xlogComplement (observations - successes) probability
   success <- xlogProbability successes probability
   Right (complement + success)
 
+-- | VaR confidence 관례에 맞춰 예외·비예외 binomial log likelihood를 계산한다.
+-- 입력은 검증된 관측 수와 열린 구간 confidence여야 하며 0-count 항은 정확히 0으로 둔다.
 confidenceExceptionLogLikelihood :: Int -> Int -> Double -> Double
 confidenceExceptionLogLikelihood observations exceptions confidence =
   let nonExceptions = observations - exceptions
@@ -135,10 +153,14 @@ confidenceExceptionLogLikelihood observations exceptions confidence =
           else fromIntegral exceptions * log1p (-confidence)
    in normalTerm + exceptionTerm
 
+-- | 두 log likelihood 크기에 비례한 Float64 roundoff 허용치를 반환한다.
+-- LR 성분 일치와 작은 음수 clamp에 동일 공식을 사용한다.
 likelihoodRoundoffTolerance :: Double -> Double -> Double
 likelihoodRoundoffTolerance nullLog alternativeLog =
   128.0 * encodeFloat 1 (-52) * max 1.0 (max (abs nullLog) (abs alternativeLog))
 
+-- | alternative와 null log likelihood의 두 배 차이를 LR 통계량으로 변환한다.
+-- 허용치 밖 음수와 비유한 입력은 각각 likelihood/research 오류로 거부한다.
 likelihoodRatio :: Double -> Double -> Either StableError Double
 likelihoodRatio nullLog alternativeLog
   | anyNonFinite [nullLog, alternativeLog] = Left ResearchResultNonFinite
@@ -149,6 +171,8 @@ likelihoodRatio nullLog alternativeLog
     statistic = 2.0 * (alternativeLog - nullLog)
     tolerance = likelihoodRoundoffTolerance nullLog alternativeLog
 
+-- | 네 Markov transition count에서 independent/Markov log likelihood와 LR을 함께 반환한다.
+-- 두 row와 전체 transition의 식별 가능성은 public caller가 먼저 검증해야 한다.
 independenceLikelihoodComponents ::
   Int ->
   Int ->
@@ -171,6 +195,8 @@ independenceLikelihoodComponents n00 n01 n10 n11 = do
   statistic <- likelihoodRatio independentLog markovLog
   Right (statistic, independentLog, markovLog)
 
+-- | 관측·예외 수와 confidence로 Kupiec null/maximum-likelihood log와 LR을 반환한다.
+-- 관측 수 양수와 confidence 범위는 public backtest 경계가 선행 보장한다.
 kupiecLikelihoodComponents ::
   Int ->
   Int ->
@@ -184,6 +210,8 @@ kupiecLikelihoodComponents observations exceptions confidence = do
   statistic <- likelihoodRatio nullLog alternativeLog
   Right (statistic, nullLog, alternativeLog)
 
+-- | roundoff 허용치를 포함해 Float64 값을 닫힌 확률 @[0,1]@로 검증·clamp한다.
+-- 범위 밖 또는 비유한 값은 'ResearchResultNonFinite'가 된다.
 finiteProbability :: Double -> Either StableError Double
 finiteProbability value
   | anyNonFinite [value] = Left ResearchResultNonFinite
@@ -192,14 +220,18 @@ finiteProbability value
   where
     tolerance = 64.0 * encodeFloat 1 (-52)
 
+-- | research kernel 결과가 유한한지 검사해 동일 값을 반환한다.
+-- NaN과 infinity는 'ResearchResultNonFinite'로만 노출한다.
 finiteResearchResult :: Double -> Either StableError Double
 finiteResearchResult = ensureFinite ResearchResultNonFinite
 
+-- | 'erfc' 기반 표준정규 누적분포함수를 계산해 큰 음수 tail의 cancellation을 줄인다.
+-- 유한성·확률 clamp는 확률을 공개하는 상위 API가 수행한다.
 normalCdf :: Double -> Double
 normalCdf value = 0.5 * erfc (-(value / sqrt 2.0))
 
--- CPython 3.12 NormalDist와 같은 Wichura AS241 branch/coefficient를 직접 보존한다.
--- statistics package 결과는 구현 입력이 아니라 cross-check에만 사용할 수 있다.
+-- | CPython 3.12 'NormalDist'와 같은 Wichura AS241 branch/coefficient로 역정규 CDF를 계산한다.
+-- statistics package는 구현 입력이 아닌 cross-check이며 @p <= 0@과 @p >= 1@은 무한 tail을 반환한다.
 normalInverseCdf :: Double -> Double
 normalInverseCdf probability
   | probability <= 0.0 = negate (1.0 / 0.0)
@@ -290,9 +322,13 @@ horner :: Double -> [Double] -> Double
 horner argument =
   foldl' (\accumulator coefficient -> accumulator * argument + coefficient) 0.0
 
+-- | 자유도 1인 chi-square 통계량의 survival probability를 'erfc'로 계산한다.
+-- 최종 확률은 finite/range gate를 통과해야 한다.
 chiSquareOneSurvival :: Double -> Either StableError Double
 chiSquareOneSurvival statistic = finiteProbability (erfc (sqrt (statistic / 2.0)))
 
+-- | 자유도 2인 chi-square 통계량의 survival probability를 지수식으로 계산한다.
+-- 최종 확률은 finite/range gate를 통과해야 한다.
 chiSquareTwoSurvival :: Double -> Either StableError Double
 chiSquareTwoSurvival statistic = finiteProbability (exp (-(statistic / 2.0)))
 

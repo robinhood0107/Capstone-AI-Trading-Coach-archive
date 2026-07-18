@@ -9,8 +9,8 @@ where
 
 import Control.DeepSeq (NFData (rnf))
 
--- 공개 오류 ADT는 Gate 1 registry의 19개 production 오류와 13개 research 오류를 닫힌
--- 집합으로 보존한다. shell은 이 생성자 외 임의 문자열을 numeric 오류로 내보낼 수 없다.
+-- | Gate 1 registry의 production 19개와 research 13개 오류를 닫힌 집합으로 보존한다.
+-- shell은 이 생성자 외 임의 문자열을 numeric 오류로 내보낼 수 없다.
 data StableError
   = InputTypeInvalid
   | InputShapeInvalid
@@ -49,9 +49,13 @@ data StableError
 instance NFData StableError where
   rnf stableError = stableError `seq` ()
 
+-- | registry 순서와 동일한 32개 stable 오류를 누락 없이 반환한다.
+-- 'Bounded'/'Enum' 순서가 transport registry 회귀 검사의 단일 열거 경계다.
 allStableErrors :: [StableError]
 allStableErrors = [minBound .. maxBound]
 
+-- | stable 오류 생성자를 Gate 1의 lowercase snake-case wire code로 변환한다.
+-- 반환 문자열은 result encoder가 그대로 전송하므로 임의 localization을 추가하지 않는다.
 stableErrorCode :: StableError -> String
 stableErrorCode stableError =
   case stableError of

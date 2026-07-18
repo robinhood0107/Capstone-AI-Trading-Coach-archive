@@ -17,6 +17,8 @@ import Data.Text (Text)
 import S14X.Core.Error (StableError)
 import S14X.Core.Models (NumericResult)
 
+-- | strict parser가 decoded duplicate key와 number 원문을 보존하는 JSON 표현이다.
+-- transport validation이 끝나기 전에는 Aeson object로 축약하지 않는다.
 data RawJson
   = RawObject [(Text, RawJson)]
   | RawArray [RawJson]
@@ -26,6 +28,8 @@ data RawJson
   | RawNull
   deriving stock (Eq, Show)
 
+-- | Gate 1 function registry의 20개 numeric kernel identity를 닫힌 순서로 표현한다.
+-- 'Enum' 순서는 property fixture identity에 사용되므로 registry 변경 없이 재배열하지 않는다.
 data FunctionId
   = SimpleReturns
   | LogReturns
@@ -49,6 +53,8 @@ data FunctionId
   | ChristoffersenConditionalCoverageTest
   deriving stock (Bounded, Enum, Eq, Ord, Show)
 
+-- | 한 fixture와 한 function, validated raw argument map을 결속한 실행 요청이다.
+-- fixture ID와 argument field 계약은 constructor 사용 전에 process parser가 검사한다.
 data CaseRequest = CaseRequest
   { caseFixtureId :: Text,
     caseFunctionId :: FunctionId,
@@ -56,6 +62,8 @@ data CaseRequest = CaseRequest
   }
   deriving stock (Eq, Show)
 
+-- | exact schema version·request ID와 최대 4096개 고유 fixture case를 담는다.
+-- 외부 JSON에서 직접 만들지 않고 'parseRequest' 성공 결과로만 실행한다.
 data RequestBatch = RequestBatch
   { requestSchemaVersion :: Text,
     requestIdentifier :: Text,
@@ -63,11 +71,15 @@ data RequestBatch = RequestBatch
   }
   deriving stock (Eq, Show)
 
+-- | case별 numeric success 또는 registry에 있는 stable semantic failure를 표현한다.
+-- transport failure는 batch 결과에 섞지 않고 별도 'TransportError'로 반환한다.
 data CaseResult
   = CaseSuccess Text FunctionId NumericResult
   | CaseFailure Text FunctionId StableError
   deriving stock (Eq, Show)
 
+-- | request ID, compiler 결속 implementation label, case 결과 순서를 보존한다.
+-- encoder는 입력 case 순서와 exact function identity를 변경하지 않는다.
 data ResultBatch = ResultBatch
   { resultRequestId :: Text,
     resultImplementation :: Text,
@@ -75,6 +87,8 @@ data ResultBatch = ResultBatch
   }
   deriving stock (Eq, Show)
 
+-- | request·manifest·binary·internal shell failure의 frozen transport 분류다.
+-- numeric 'StableError'와 분리돼 process exit code와 error envelope를 결정한다.
 data TransportCode
   = RequestInvalid
   | ManifestInvalid
@@ -82,6 +96,8 @@ data TransportCode
   | InternalError
   deriving stock (Eq, Ord, Show)
 
+-- | transport code와 허용된 request·fixture·field context만 담는 오류 envelope다.
+-- 원본 path, payload, exception, credential은 보안상 이 타입에 포함하지 않는다.
 data TransportError = TransportError
   { transportCode :: TransportCode,
     transportRequestId :: Maybe Text,
@@ -90,6 +106,8 @@ data TransportError = TransportError
   }
   deriving stock (Eq, Show)
 
+-- | 'FunctionId'를 Gate 1 registry의 lowercase snake-case wire identity로 변환한다.
+-- request parsing과 result encoding이 동일한 mapping을 공유한다.
 functionIdText :: FunctionId -> Text
 functionIdText functionId =
   case functionId of

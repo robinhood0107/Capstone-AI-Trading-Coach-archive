@@ -43,6 +43,8 @@ data Cli = Cli
   }
   deriving stock (Eq, Show)
 
+-- | absolute request·fixture·새 output path만 받아 process shell을 한 번 실행한다.
+-- 모든 예외는 raw detail 없이 frozen transport envelope와 안정된 exit code로 닫는다.
 main :: IO ()
 main = do
   arguments <- getArgs

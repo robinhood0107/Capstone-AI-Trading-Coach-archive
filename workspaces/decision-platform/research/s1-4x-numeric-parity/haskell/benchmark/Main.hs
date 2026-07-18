@@ -239,6 +239,8 @@ instance NFData PreparedCase where
             ()
             pairs
 
+-- | frozen benchmark plan·fixture root·output root를 검증한 뒤 Criterion case만 등록한다.
+-- correctness와 prepared-result shape gate를 통과하지 못한 입력은 timing 시작 전에 실패한다.
 main :: IO ()
 main = do
   planPath <- configuredPath "S1_4X_BENCHMARK_PLAN" "../benchmarks/benchmark-plan.v1.json"

@@ -13,8 +13,8 @@ import Data.Vector.Unboxed (Vector)
 
 import qualified Data.Vector.Unboxed as U
 
--- DSR은 effective trial count가 caller 주장과 같은지 검증할 수 있도록 provenance 전체를
--- 순수 core 경계에 전달한다.
+-- | DSR이 effective trial count의 caller 주장을 검증하도록 frozen provenance 전체를 전달한다.
+-- schema·method·frequency·registry SHA와 variance DoF를 누락 없이 검증해야 한다.
 data TrialProvenance = TrialProvenance
   { provenanceSchemaVersion :: String,
     provenanceMethod :: String,
@@ -26,6 +26,8 @@ data TrialProvenance = TrialProvenance
   }
   deriving stock (Eq, Show)
 
+-- | Christoffersen 인접 예외 상태의 @00,01,10,11@ 전이 횟수다.
+-- 모든 field는 validation 경계가 만든 비음수 count를 담는다.
 data TransitionCounts = TransitionCounts
   { transitionN00 :: Int,
     transitionN01 :: Int,
@@ -34,6 +36,8 @@ data TransitionCounts = TransitionCounts
   }
   deriving stock (Eq, Show)
 
+-- | Kupiec 단일 자유도 likelihood 결과와 관측 metadata를 결속한다.
+-- statistic·p-value·significance는 finite/negative-zero 결과 gate를 통과해야 한다.
 data LikelihoodResult = LikelihoodResult
   { likelihoodStatistic :: Double,
     likelihoodPValue :: Double,
@@ -45,6 +49,8 @@ data LikelihoodResult = LikelihoodResult
   }
   deriving stock (Eq, Show)
 
+-- | Christoffersen independence 결과와 사용한 전이 count를 함께 보존한다.
+-- conditioning 가능한 표본에서만 core가 이 값을 생성한다.
 data IndependenceResult = IndependenceResult
   { independenceStatistic :: Double,
     independencePValue :: Double,
@@ -57,6 +63,8 @@ data IndependenceResult = IndependenceResult
   }
   deriving stock (Eq, Show)
 
+-- | unconditional coverage와 independence 성분을 합친 conditional coverage 결과다.
+-- 두 성분과 conditioned 관측 수를 함께 내보내 comparator가 합성 근거를 감사할 수 있게 한다.
 data ConditionalCoverageResult = ConditionalCoverageResult
   { conditionalStatistic :: Double,
     conditionalPValue :: Double,
@@ -73,6 +81,8 @@ data ConditionalCoverageResult = ConditionalCoverageResult
   }
   deriving stock (Eq, Show)
 
+-- | 20개 kernel의 scalar, vector, 세 가지 likelihood record 출력을 닫힌 합으로 표현한다.
+-- transport와 benchmark는 이 shape를 검사한 뒤 frozen JSON 결과로 직렬화한다.
 data NumericResult
   = ScalarResult Double
   | VectorResult (Vector Double)

@@ -20,13 +20,15 @@ import System.Posix.Files (createLink)
 
 import qualified Data.ByteString as BS
 
+-- | 결과 파일을 새로 공개했는지 기존 winner 때문에 건너뛰었는지를 나타낸다.
+-- 기존 결과의 교체나 부분 덮어쓰기는 상태로 표현하지 않고 구현에서 금지한다.
 data PublishResult
   = Published
   | AlreadyExists
   deriving stock (Eq, Ord, Show)
 
--- 완성된 임시 inode를 hard-link로만 공개해 경합 시 기존 결과를 절대 교체하지 않는다.
--- 임시 파일과 결과 파일은 같은 디렉터리이므로 공개는 단일 파일시스템 안에서 원자적이다.
+-- | 완성된 임시 inode를 hard-link로만 공개해 경합 시 기존 결과를 절대 교체하지 않는다.
+-- 임시 파일과 결과 파일은 같은 디렉터리여야 하며 payload와 경로는 신뢰된 shell 경계가 제공한다.
 exclusiveAtomicWrite :: FilePath -> ByteString -> IO PublishResult
 exclusiveAtomicWrite output payload = do
   let parent = takeDirectory output

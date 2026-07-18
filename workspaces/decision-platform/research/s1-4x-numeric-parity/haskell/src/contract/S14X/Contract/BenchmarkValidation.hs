@@ -20,6 +20,8 @@ import S14X.Core.Models
       ),
   )
 
+-- | Criterion batch의 기대 result constructor, batch 수, vector 길이를 표현한다.
+-- timing 전에 실제 kernel output과 exact 일치하는지 검증하는 setup 계약이다.
 data BenchmarkResultShape
   = ScalarBatch Int
   | VectorBatch Int Int
@@ -28,8 +30,8 @@ data BenchmarkResultShape
   | ConditionalCoverageBatch Int
   deriving stock (Eq, Show)
 
--- Criterion setup은 같은 prepared input을 한 번 완전 평가해 빠른 Left/shape 오류가 timing에
--- 섞이지 않게 한다. 성공한 동일 kernel과 input만 뒤의 nf 측정에 전달된다.
+-- | Criterion setup에서 prepared output을 완전 평가해 Left·shape·비유한·negative-zero를 거부한다.
+-- 성공한 동일 kernel과 input만 뒤의 @nf@ timing에 전달된다.
 validateBenchmarkResults ::
   BenchmarkResultShape ->
   [Either StableError NumericResult] ->
