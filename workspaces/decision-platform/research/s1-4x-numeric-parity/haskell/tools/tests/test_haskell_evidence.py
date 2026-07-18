@@ -430,6 +430,36 @@ value = 1
                         policy=policy,
                     )
 
+    def test_core_environment_clock_random_and_network_uses_are_rejected(
+        self,
+    ) -> None:
+        policy = self._module_safety_policy()
+        for capability_use in (
+            'getEnv "TOKEN"',
+            "getCurrentTime",
+            "randomIO",
+            "socket",
+        ):
+            with self.subTest(capability_use=capability_use):
+                source = f"""\
+{{-# LANGUAGE Safe #-}}
+module Risk.Core (value) where
+value = {capability_use}
+""".encode()
+                parsed = haskell_evidence.parse_haskell_module(source)
+                with self.assertRaisesRegex(
+                    haskell_evidence.EvidenceError,
+                    "forbidden core capability",
+                ):
+                    haskell_evidence.audit_candidate_source(
+                        relative="src/core/Risk/Core.hs",
+                        parsed=parsed,
+                        payload=source,
+                        category="safe-scalar",
+                        default_extensions=tuple(policy["mandatoryCoreExtensions"]),
+                        policy=policy,
+                    )
+
     def test_non_stock_deriving_policy_applies_only_to_core_modules(self) -> None:
         policy = self._module_safety_policy()
         core_source = b"""\
