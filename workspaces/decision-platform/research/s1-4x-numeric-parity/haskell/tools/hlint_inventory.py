@@ -22,6 +22,7 @@ class ManagedIgnoreSummary:
 
     managed_diagnostic_count: int
     configured_pair_count: int
+    pinned_builtin_diagnostic_count: int
 
 
 @dataclass(frozen=True)
@@ -90,6 +91,10 @@ ENTRY_FIELDS = {
     "owner",
     "expiresWhen",
 }
+SOURCE_ROOTS = ("src", "app", "test", "benchmark")
+THROW_IO_NAMES = {"Control.Exception.throwIO", "throwIO"}
+# HLint 3.10의 --show가 내보내는 비활성 내장 정보성 hint는 suppression inventory와 분리한다.
+PINNED_BUILTIN_IGNORED_HINTS = {"Redundant bracket due to operator fixities"}
 
 
 def strict_json_load(path: Path) -> Any:
@@ -143,23 +148,220 @@ def _validate_entry(root: Path, entry: Mapping[str, object]) -> None:
         raise InventoryError(f"focused lint test name is stale: {entry['focusedTest']}")
 
 
+def _yaml_scalar(token: str) -> str:
+    """HLint inventory에 쓰는 단순 YAML scalar를 보수적으로 정규화한다."""
+
+    value = token.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+        value = value[1:-1]
+    if not value or any(character in value for character in "\r\n[]{}"):
+        raise InventoryError(f"unsupported HLint YAML scalar: {token!r}")
+    return value
+
+
+def _flow_parts(value: str) -> list[str]:
+    """따옴표와 중첩 flow collection을 보존하며 쉼표 단위로 나눈다."""
+
+    parts: list[str] = []
+    start = 0
+    depth = 0
+    quote: str | None = None
+    escaped = False
+    for index, character in enumerate(value):
+        if quote is not None:
+            if escaped:
+                escaped = False
+            elif character == "\\" and quote == '"':
+                escaped = True
+            elif character == quote:
+                quote = None
+            continue
+        if character in {"'", '"'}:
+            quote = character
+        elif character in "[{":
+            depth += 1
+        elif character in "]}":
+            depth -= 1
+            if depth < 0:
+                raise InventoryError("unbalanced HLint YAML flow collection")
+        elif character == "," and depth == 0:
+            parts.append(value[start:index].strip())
+            start = index + 1
+    if quote is not None or depth != 0:
+        raise InventoryError("unterminated HLint YAML flow collection")
+    parts.append(value[start:].strip())
+    return [part for part in parts if part]
+
+
+def _yaml_values(token: str) -> tuple[str, ...]:
+    value = token.strip()
+    if value.startswith("["):
+        if not value.endswith("]"):
+            raise InventoryError("unterminated HLint YAML flow sequence")
+        inner = value[1:-1].strip()
+        return tuple(_yaml_scalar(part) for part in _flow_parts(inner)) if inner else ()
+    return (_yaml_scalar(value),)
+
+
+def _flow_mapping(token: str) -> dict[str, str]:
+    value = token.strip()
+    if not (value.startswith("{") and value.endswith("}")):
+        raise InventoryError("HLint YAML flow mapping must use braces")
+    mapping: dict[str, str] = {}
+    for part in _flow_parts(value[1:-1]):
+        key, separator, item = part.partition(":")
+        if not separator:
+            raise InventoryError("HLint YAML flow mapping entry is missing a colon")
+        normalized_key = _yaml_scalar(key)
+        if normalized_key in mapping:
+            raise InventoryError(f"duplicate HLint YAML key: {normalized_key}")
+        mapping[normalized_key] = item.strip()
+    return mapping
+
+
+def _block_mapping(lines: Sequence[str]) -> dict[str, tuple[str, ...]]:
+    """ignore block의 name/within을 block/flow sequence 양쪽에서 읽는다."""
+
+    mapping: dict[str, tuple[str, ...]] = {}
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        matched = re.match(r"^\s+(name|within):\s*(.*?)\s*$", line)
+        if matched is None:
+            if line.strip() and not line.lstrip().startswith("#"):
+                raise InventoryError(f"unsupported HLint ignore YAML line: {line}")
+            index += 1
+            continue
+        key, inline = matched.groups()
+        if key in mapping:
+            raise InventoryError(f"duplicate HLint ignore key: {key}")
+        index += 1
+        if inline:
+            mapping[key] = _yaml_values(inline)
+            continue
+        values: list[str] = []
+        while index < len(lines):
+            item = re.match(r"^\s+-\s+(.+?)\s*$", lines[index])
+            if item is None:
+                break
+            values.append(_yaml_scalar(item.group(1)))
+            index += 1
+        mapping[key] = tuple(values)
+    return mapping
+
+
 def _ignore_pairs(configuration: str) -> set[tuple[str, str]]:
-    blocks = re.findall(
-        r"(?ms)^- ignore:\n"
-        r"\s+name:\s*([^\n]+)\n"
-        r"\s+within:\n"
-        r"((?:\s+-\s+[^\n]+\n)+)",
-        configuration,
+    """top-level ignore를 block/inline YAML 표기와 무관하게 exact pair로 읽는다."""
+
+    lines = configuration.splitlines()
+    pairs: set[tuple[str, str]] = set()
+    index = 0
+    while index < len(lines):
+        matched = re.match(r"^- ignore:\s*(.*?)\s*$", lines[index])
+        if matched is None:
+            index += 1
+            continue
+        inline = matched.group(1)
+        index += 1
+        end = index
+        while end < len(lines) and not re.match(r"^-\s+", lines[end]):
+            end += 1
+        if inline:
+            flow = _flow_mapping(inline)
+            if set(flow) != {"name", "within"}:
+                raise InventoryError("HLint inline ignore field drift")
+            names = _yaml_values(flow["name"])
+            within = _yaml_values(flow["within"])
+        else:
+            block = _block_mapping(lines[index:end])
+            if set(block) != {"name", "within"}:
+                raise InventoryError("HLint block ignore field drift")
+            names = block["name"]
+            within = block["within"]
+        if len(names) != 1 or not within:
+            raise InventoryError("HLint ignore must name one rule and at least one module")
+        for module in within:
+            pair = (names[0], module)
+            if pair in pairs:
+                raise InventoryError(f"duplicate HLint ignore pair: {pair}")
+            pairs.add(pair)
+        index = end
+    return pairs
+
+
+def _function_restrictions(configuration: str) -> list[tuple[tuple[str, ...], tuple[str, ...]]]:
+    """functions section의 name/within block을 읽어 전역 금지와 whitelist를 구분한다."""
+
+    lines = configuration.splitlines()
+    try:
+        start = lines.index("- functions:") + 1
+    except ValueError as exc:
+        raise InventoryError("HLint function restriction section drift") from exc
+    end = next(
+        (
+            index
+            for index in range(start, len(lines))
+            if re.match(r"^-\s+", lines[index])
+        ),
+        len(lines),
     )
-    return {
-        (name.strip(), module.strip())
-        for name, within_block in blocks
-        for module in re.findall(
-            r"^\s+-\s+([^\n]+)$",
-            within_block,
-            flags=re.MULTILINE,
-        )
-    }
+    restrictions: list[tuple[tuple[str, ...], tuple[str, ...]]] = []
+    index = start
+    while index < end:
+        flow_match = re.match(r"^\s{4}-\s*(\{.*\})\s*$", lines[index])
+        name_match = re.match(r"^\s{4}- name:\s*(.*?)\s*$", lines[index])
+        if flow_match is not None:
+            flow = _flow_mapping(flow_match.group(1))
+            if set(flow) != {"name", "within"}:
+                raise InventoryError("HLint function flow restriction field drift")
+            restrictions.append(
+                (_yaml_values(flow["name"]), _yaml_values(flow["within"]))
+            )
+            index += 1
+            continue
+        if name_match is None:
+            if lines[index].strip() and not lines[index].lstrip().startswith("#"):
+                raise InventoryError(
+                    f"unsupported HLint function restriction line: {lines[index]}"
+                )
+            index += 1
+            continue
+        inline_names = name_match.group(1)
+        index += 1
+        names: tuple[str, ...]
+        if inline_names:
+            names = _yaml_values(inline_names)
+        else:
+            collected_names: list[str] = []
+            while index < end:
+                item = re.match(r"^\s{8}-\s+(.+?)\s*$", lines[index])
+                if item is None:
+                    break
+                collected_names.append(_yaml_scalar(item.group(1)))
+                index += 1
+            names = tuple(collected_names)
+        if index >= end:
+            raise InventoryError("HLint function restriction is missing within")
+        within_match = re.match(r"^\s{6}within:\s*(.*?)\s*$", lines[index])
+        if within_match is None:
+            raise InventoryError("HLint function restriction within block drift")
+        inline_within = within_match.group(1)
+        index += 1
+        if inline_within:
+            within = _yaml_values(inline_within)
+        else:
+            collected_within: list[str] = []
+            while index < end:
+                item = re.match(r"^\s{8}-\s+(.+?)\s*$", lines[index])
+                if item is None:
+                    break
+                collected_within.append(_yaml_scalar(item.group(1)))
+                index += 1
+            within = tuple(collected_within)
+        if not names:
+            raise InventoryError("HLint function restriction name list is empty")
+        restrictions.append((names, within))
+    return restrictions
 
 
 def _module_within(configuration: str) -> dict[str, tuple[str, ...]]:
@@ -200,14 +402,49 @@ def _module_within(configuration: str) -> dict[str, tuple[str, ...]]:
     return mapping
 
 
-def validate_no_throw_io_allowance(configuration: str) -> None:
-    """현재 source에 없는 throwIO capability가 HLint allowlist에 없음을 검증한다."""
+def validate_throw_io_restrictions(configuration: str) -> None:
+    """qualified/unqualified throwIO가 모두 global ban이며 whitelist가 아님을 검증한다."""
 
-    forbidden = re.compile(
-        r"(?m)^\s+- (?:Control\.Exception\.)?throwIO\s*$"
-    )
-    if forbidden.search(configuration):
-        raise InventoryError("unused throwIO allowance is forbidden")
+    occurrences: dict[str, list[tuple[str, ...]]] = {
+        name: [] for name in THROW_IO_NAMES
+    }
+    for names, within in _function_restrictions(configuration):
+        for name in THROW_IO_NAMES.intersection(names):
+            occurrences[name].append(within)
+    if set(occurrences) != THROW_IO_NAMES or any(
+        values != [()] for values in occurrences.values()
+    ):
+        raise InventoryError(
+            f"throwIO restriction must be one global ban per name: {occurrences}"
+        )
+
+
+def validate_no_source_local_suppressions(root: Path) -> None:
+    """candidate 네 source root 안의 HLint comment/ANN 우회를 모두 거부한다."""
+
+    root = root.resolve(strict=True)
+    for relative_root in SOURCE_ROOTS:
+        directory = root / relative_root
+        if not directory.exists():
+            continue
+        if directory.is_symlink() or not directory.is_dir():
+            raise InventoryError(f"HLint source root is unsafe: {relative_root}")
+        for source in sorted(directory.rglob("*.hs"), key=lambda item: item.as_posix()):
+            if source.is_symlink() or not source.is_file():
+                raise InventoryError(
+                    f"HLint source input is unsafe: {source.relative_to(root)}"
+                )
+            text = source.read_text(encoding="utf-8")
+            has_directive = re.search(r"(?i)\bHLint\s*:", text) is not None
+            has_ann_suppression = (
+                re.search(r"(?is)\{\-\#\s*ANN\b.*?\bHLint\b.*?#-\}", text)
+                is not None
+            )
+            if has_directive or has_ann_suppression:
+                raise InventoryError(
+                    "source-local HLint suppression is forbidden: "
+                    f"{source.relative_to(root).as_posix()}"
+                )
 
 
 def _source_relative(root: Path, diagnostic_file: object) -> str:
@@ -259,15 +496,25 @@ def validate_managed_ignored_diagnostics(
     root = root.resolve(strict=True)
     configured_pairs = _ignore_pairs(configuration)
     managed: list[Mapping[str, object]] = []
+    pinned_builtin: list[Mapping[str, object]] = []
     for diagnostic in diagnostics:
         modules = diagnostic.get("module")
+        if diagnostic.get("severity") != "Ignore":
+            continue
+        identity = _diagnostic_identity(root, diagnostic)
         if (
-            diagnostic.get("severity") == "Ignore"
-            and isinstance(modules, list)
+            isinstance(modules, list)
             and len(modules) == 1
             and (diagnostic.get("hint"), modules[0]) in configured_pairs
         ):
             managed.append(diagnostic)
+        elif diagnostic.get("hint") in PINNED_BUILTIN_IGNORED_HINTS:
+            pinned_builtin.append(diagnostic)
+        else:
+            raise InventoryError(
+                "unknown ignored HLint diagnostic: "
+                f"{identity[0]}:{identity[1]}:{identity[2]}"
+            )
     managed_identities = [_diagnostic_identity(root, diagnostic) for diagnostic in managed]
     if len(managed_identities) != len(set(managed_identities)):
         raise InventoryError("duplicate managed ignored diagnostic identity")
@@ -320,6 +567,7 @@ def validate_managed_ignored_diagnostics(
     return ManagedIgnoreSummary(
         managed_diagnostic_count=len(managed_identities),
         configured_pair_count=len(configured_pairs),
+        pinned_builtin_diagnostic_count=len(pinned_builtin),
     )
 
 
@@ -434,7 +682,8 @@ def _validate_command(arguments: argparse.Namespace) -> None:
     ):
         raise InventoryError("HLint inventory input shape drift")
     entries = manifest["entries"]
-    validate_no_throw_io_allowance(configuration)
+    validate_throw_io_restrictions(configuration)
+    validate_no_source_local_suppressions(root)
     managed = validate_managed_ignored_diagnostics(
         root,
         configuration,
@@ -447,6 +696,9 @@ def _validate_command(arguments: argparse.Namespace) -> None:
             {
                 "configuredIgnorePairCount": managed.configured_pair_count,
                 "managedIgnoredDiagnosticCount": managed.managed_diagnostic_count,
+                "pinnedBuiltinIgnoredDiagnosticCount": (
+                    managed.pinned_builtin_diagnostic_count
+                ),
                 "restrictedModuleAllowanceCount": allowances.allowance_count,
                 "restrictedModuleImportedSymbolCount": allowances.imported_symbol_count,
                 "status": "PASS",

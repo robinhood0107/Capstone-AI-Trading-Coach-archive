@@ -54,6 +54,7 @@
     - name:
         - "!!"
         - Control.Exception.throw
+        - Control.Exception.throwIO
         - Data.Either.fromLeft
         - Data.Either.fromRight
         - Data.Maybe.fromJust
@@ -70,6 +71,7 @@
         - read
         - tail
         - throw
+        - throwIO
         - undefined
         - unsafeCoerce
         - unsafeDupablePerformIO
