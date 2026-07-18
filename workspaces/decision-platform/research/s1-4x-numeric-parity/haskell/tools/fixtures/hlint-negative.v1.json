@@ -1,0 +1,50 @@
+{
+  "schemaVersion": "s1.4x-haskell-hlint-negative-fixtures-v1",
+  "fixtures": [
+    {
+      "fixtureId": "qualified-from-just",
+      "path": "tools/fixtures/hlint/qualified-from-just.hs",
+      "expectedTokens": ["fromJust"]
+    },
+    {
+      "fixtureId": "aliased-from-left",
+      "path": "tools/fixtures/hlint/aliased-from-left.hs",
+      "expectedTokens": ["fromLeft"]
+    },
+    {
+      "fixtureId": "aliased-from-right",
+      "path": "tools/fixtures/hlint/aliased-from-right.hs",
+      "expectedTokens": ["fromRight"]
+    },
+    {
+      "fixtureId": "qualified-throw",
+      "path": "tools/fixtures/hlint/qualified-throw.hs",
+      "expectedTokens": ["throw"]
+    },
+    {
+      "fixtureId": "qualified-throw-io",
+      "path": "tools/fixtures/hlint/qualified-throw-io.hs",
+      "expectedTokens": ["throwIO"]
+    },
+    {
+      "fixtureId": "unchecked-folds",
+      "path": "tools/fixtures/hlint/unchecked-folds.hs",
+      "expectedTokens": ["foldl1", "maximum", "minimum"]
+    },
+    {
+      "fixtureId": "unsafe-module",
+      "path": "tools/fixtures/hlint/unsafe-module.hs",
+      "expectedTokens": ["System.IO.Unsafe"]
+    },
+    {
+      "fixtureId": "core-system-io",
+      "path": "tools/fixtures/hlint/core-system-io.hs",
+      "expectedTokens": ["System.IO"]
+    },
+    {
+      "fixtureId": "forbidden-extension",
+      "path": "tools/fixtures/hlint/forbidden-extension.hs",
+      "expectedTokens": ["GeneralizedNewtypeDeriving"]
+    }
+  ]
+}
