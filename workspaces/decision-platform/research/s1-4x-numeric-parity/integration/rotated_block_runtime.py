@@ -1703,17 +1703,53 @@ def _run_process(
         )
         with stdout_path.open("xb") as stdout, stderr_path.open("xb") as stderr:
             try:
-                process = subprocess.Popen(
-                    command,
-                    executable=f"/proc/self/fd/{executable.descriptor}",
-                    cwd=cwd,
-                    env=environment,
-                    stdin=subprocess.DEVNULL,
-                    stdout=stdout,
-                    stderr=stderr,
-                    start_new_session=True,
-                    pass_fds=descriptors,
-                )
+                with ExitStack() as launch_stack:
+                    launch_command = command
+                    launch_executable = (
+                        f"/proc/self/fd/{executable.descriptor}"
+                    )
+                    launch_descriptors = descriptors
+                    if os.pread(executable.descriptor, 2, 0) == b"#!":
+                        interpreter = launch_stack.enter_context(
+                            _pin_executable(
+                                FROZEN_BASH_IDENTITY,
+                                role="processInterpreter",
+                            )
+                        )
+                        actual_seals = fcntl.fcntl(
+                            interpreter.descriptor,
+                            F_GET_SEALS,
+                        )
+                        if (
+                            actual_seals & interpreter.required_seals
+                            != interpreter.required_seals
+                        ):
+                            raise ContractError(
+                                "PINNED_INTERPRETER_SEALS_CHANGED"
+                            )
+                        launch_command = [
+                            interpreter.binding["path"],
+                            f"/proc/self/fd/{executable.descriptor}",
+                            *command[1:],
+                        ]
+                        launch_executable = (
+                            f"/proc/self/fd/{interpreter.descriptor}"
+                        )
+                        launch_descriptors = (
+                            *descriptors,
+                            interpreter.descriptor,
+                        )
+                    process = subprocess.Popen(
+                        launch_command,
+                        executable=launch_executable,
+                        cwd=cwd,
+                        env=environment,
+                        stdin=subprocess.DEVNULL,
+                        stdout=stdout,
+                        stderr=stderr,
+                        start_new_session=True,
+                        pass_fds=launch_descriptors,
+                    )
             except OSError as exc:
                 raise ContractError("PINNED_EXECUTABLE_LAUNCH_FAILED") from exc
             leader_record = _read_launch_leader_record(process.pid)
