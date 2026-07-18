@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
-import os
 import subprocess
 import sys
 import tempfile
