@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sys
 import tempfile
 from pathlib import Path
@@ -22,6 +23,25 @@ from benchmark_commands import (  # noqa: E402
 
 
 class BenchmarkCommandManifestTests(TestCase):
+    def _manifest_for_identity(self, identity: dict[str, str]) -> dict[str, object]:
+        executable = identity["path"]
+        return {
+            "schemaVersion": "s1.4x-benchmark-command-manifest-v2",
+            "benchmarkSubjectCommit": "a" * 40,
+            "candidateSourceCommit": "a" * 40,
+            "hostValidatorCommand": [executable, "{host_report}"],
+            "boundaryCommands": {
+                boundary: [executable, "{qualification}"]
+                for boundary in BOUNDARY_IDS
+            },
+            "allowedExecutables": {
+                "hostValidator": identity,
+                "boundaries": {
+                    boundary: identity for boundary in BOUNDARY_IDS
+                },
+            },
+        }
+
     def test_manifest_covers_all_boundaries_and_binds_exact_commit(self) -> None:
         executable = Path(sys.executable).resolve()
         identity = {
@@ -127,3 +147,61 @@ class BenchmarkCommandManifestTests(TestCase):
             self.assertEqual(sidecar.read_text(encoding="ascii"), f"{written}  commands.json\n")
             with self.assertRaisesRegex(CommandManifestError, "OUTPUT_ALREADY_EXISTS"):
                 write_manifest_exclusive(output, sidecar, manifest)
+
+    def test_manifest_rejects_missing_directory_symlink_and_non_executable_identity(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            missing = root / "missing"
+            cases = [
+                (
+                    {
+                        "path": str(missing),
+                        "sha256": "1" * 64,
+                    },
+                    "COMMAND_EXECUTABLE_UNAVAILABLE",
+                ),
+                (
+                    {
+                        "path": str(root),
+                        "sha256": "2" * 64,
+                    },
+                    "COMMAND_EXECUTABLE_NOT_REGULAR",
+                ),
+            ]
+            regular = root / "wrapper"
+            regular.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            regular_digest = hashlib.sha256(regular.read_bytes()).hexdigest()
+            cases.append(
+                (
+                    {
+                        "path": str(regular),
+                        "sha256": regular_digest,
+                    },
+                    "COMMAND_EXECUTABLE_NOT_EXECUTABLE",
+                )
+            )
+            target = root / "target"
+            target.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            os.chmod(target, 0o700)
+            link = root / "wrapper-link"
+            link.symlink_to(target)
+            cases.append(
+                (
+                    {
+                        "path": str(link),
+                        "sha256": hashlib.sha256(target.read_bytes()).hexdigest(),
+                    },
+                    "COMMAND_EXECUTABLE_NOT_REGULAR",
+                )
+            )
+
+            for identity, expected_error in cases:
+                with self.subTest(
+                    expected_error=expected_error
+                ), self.assertRaisesRegex(
+                    CommandManifestError,
+                    expected_error,
+                ):
+                    validate_manifest(self._manifest_for_identity(identity))
