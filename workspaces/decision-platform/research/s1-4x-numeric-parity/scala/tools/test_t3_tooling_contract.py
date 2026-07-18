@@ -199,6 +199,18 @@ def main() -> int:
         "--expected-measurement-iterations",
     ):
         assert marker in native_smoke
+    assert "S1_4X_MEASUREMENT_READY_MARKER" in native_smoke
+    assert "measurementReadyMarkerSha256" in native_smoke
+    benchmark_invocation = (
+        SCALA_ROOT
+        / "benchmarks/scala/ai/trading/coach/s14x/benchmark"
+        / "BenchmarkInvocation.scala"
+    ).read_text(encoding="utf-8")
+    forced_evaluation = benchmark_invocation.index(
+        "runPrepared(value).isFinite"
+    )
+    ready_marker = benchmark_invocation.index("markMeasurementReady")
+    assert forced_evaluation < ready_marker
     for marker in (
         "assert-selected-profile.sh",
         "--mode full",

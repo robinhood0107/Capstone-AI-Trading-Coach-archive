@@ -472,6 +472,17 @@ def selector_fixture(
             stderr_path = case_root / "jmh.stderr"
             stdout_path.write_bytes(b"")
             stderr_path.write_bytes(b"")
+            marker = {
+                "schemaVersion": "s1.4x-scala-measurement-ready-v1",
+                "benchmarkPlanSha256": plan_sha,
+                "caseId": case_id,
+                "profileId": profile,
+                "runMode": "qualification",
+                "setupStatus": "PASS",
+                "markerCardinality": 1,
+            }
+            marker_path = case_root / "measurement-ready.v1.json"
+            write_json(marker_path, marker)
 
             common_tail = [
                 "--server=false",
@@ -550,6 +561,9 @@ def selector_fixture(
                 "jvmArgumentAllowlistSha256": allowlist_sha,
                 "nativeValidationSha256": module.sha256_file(
                     validation_path
+                ),
+                "measurementReadyMarkerSha256": module.sha256_file(
+                    marker_path
                 ),
                 "stdoutSha256": module.sha256_file(stdout_path),
                 "stderrSha256": module.sha256_file(stderr_path),
@@ -1029,6 +1043,37 @@ def main() -> int:
         module,
         lambda: module.select_scala_profile(**raw_tamper_inputs),
         "raw JMH byte tamper passed",
+    )
+
+    marker_path = (
+        selected_inputs["qualification_artifact_root"]
+        / "r1/A/case-01/measurement-ready.v1.json"
+    )
+    marker_sha = module.validate_measurement_ready_marker(
+        marker_path,
+        expected_benchmark_plan_sha256=selected_inputs[
+            "benchmark_plan_sha256"
+        ],
+        expected_case_id=case_order[0],
+        expected_profile="A",
+        expected_run_mode="qualification",
+    )
+    assert marker_sha == module.sha256_file(marker_path)
+    marker_tamper = json.loads(marker_path.read_text())
+    marker_tamper["profileId"] = "C"
+    write_json(marker_path, marker_tamper)
+    expect_t3_error(
+        module,
+        lambda: module.validate_measurement_ready_marker(
+            marker_path,
+            expected_benchmark_plan_sha256=selected_inputs[
+                "benchmark_plan_sha256"
+            ],
+            expected_case_id=case_order[0],
+            expected_profile="A",
+            expected_run_mode="qualification",
+        ),
+        "measurement-ready marker identity tamper passed",
     )
 
     capability_plan = json.loads(
