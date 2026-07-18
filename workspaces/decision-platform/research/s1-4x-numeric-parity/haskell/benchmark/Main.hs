@@ -3,8 +3,8 @@ module S14X.BenchmarkMain (main) where
 import           Control.DeepSeq (NFData (rnf))
 import           Control.Monad (unless)
 import           Criterion.Main (Benchmark, bench, bgroup, defaultMain, env, nf)
-import           Data.Aeson (FromJSON (parseJSON), Value, eitherDecodeFileStrict', encode,
-                             object, withObject, (.:), (.=))
+import           Data.Aeson (FromJSON (parseJSON), Value, eitherDecodeFileStrict', encode, object,
+                             withObject, (.:), (.=))
 import           Data.Binary.Get (getDoublele, runGet)
 import           Data.List (find)
 import           Data.Maybe (fromMaybe)
