@@ -227,6 +227,10 @@ class NumericParityCorrectnessWorkflowTests(unittest.TestCase):
             "haskell-authoritative-selection",
             "haskell-ghc-9-14-compatibility",
             "run-integration-correctness.sh",
+            "coverage_execution.py",
+            "coverage_gate.py",
+            "run-property-evidence.sh",
+            "integration-coverage.json",
             "compare_results.py",
             "mismatchCount",
         ):
