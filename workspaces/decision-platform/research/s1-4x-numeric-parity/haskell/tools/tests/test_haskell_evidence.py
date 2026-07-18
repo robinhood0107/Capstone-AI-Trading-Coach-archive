@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -80,7 +82,23 @@ value = Maybe.fromJust
         )
         self.assertEqual(
             manifest["canonicalManifestSha256"],
-            haskell_evidence.canonical_sha256(manifest["files"]),
+            haskell_evidence.canonical_source_manifest_sha256(manifest["files"]),
+        )
+
+    def test_source_manifest_hash_uses_byte_sorted_sha256sum_lines(self) -> None:
+        files = {
+            "src/Zeta.hs": {"role": "main", "sha256": "b" * 64},
+            "app/Alpha.hs": {"role": "main", "sha256": "a" * 64},
+        }
+        expected = hashlib.sha256(
+            (
+                f"{'a' * 64}  app/Alpha.hs\n"
+                f"{'b' * 64}  src/Zeta.hs\n"
+            ).encode()
+        ).hexdigest()
+        self.assertEqual(
+            haskell_evidence.canonical_source_manifest_sha256(files),
+            expected,
         )
 
     def test_source_manifest_rejects_untracked_or_non_hs_candidate_inputs(self) -> None:
@@ -111,6 +129,37 @@ value = Maybe.fromJust
                         "selected-profile.v1.json",
                     },
                 )
+
+    def test_git_enumerator_rejects_untracked_candidate_source_escape(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            (root / "src").mkdir()
+            (root / "app").mkdir()
+            (root / "test").mkdir()
+            (root / "benchmark").mkdir()
+            tracked = {
+                "src/Risk.hs": "module Risk (value) where\nvalue = 1\n",
+                "app/Main.hs": "module Main (main) where\nmain = pure ()\n",
+                "test/TestMain.hs": "module TestMain (main) where\nmain = pure ()\n",
+                "benchmark/BenchMain.hs": "module BenchMain (main) where\nmain = pure ()\n",
+                "package.yaml": "name: sample\n",
+                "selected-profile.v1.json": "{}\n",
+            }
+            for relative, content in tracked.items():
+                destination = root / relative
+                destination.write_text(content, encoding="utf-8")
+            subprocess.run(["git", "-C", str(root), "add", *tracked], check=True)
+            (root / "src" / "Untracked.hs").write_text(
+                "module Untracked (value) where\nvalue = 2\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                haskell_evidence.EvidenceError,
+                "untracked candidate input",
+            ):
+                haskell_evidence.build_source_manifest(root)
 
     def test_profile_selector_uses_all_twenty_eight_paired_ratios(self) -> None:
         cases = [f"case-{index}" for index in range(7)]
