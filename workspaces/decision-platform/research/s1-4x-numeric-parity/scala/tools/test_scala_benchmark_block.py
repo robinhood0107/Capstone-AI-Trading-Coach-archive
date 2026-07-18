@@ -263,6 +263,12 @@ def main() -> int:
         "S1_4X_FIXTURE_ROOT",
         "S1_4X_EFFECTIVE_JVM_EVIDENCE_DIR",
         "S1_4X_MEASUREMENT_READY_MARKER",
+        "S1_4X_SCALA_WORKSPACE",
+        "COURSIER_CACHE",
+        "COURSIER_CONFIG_DIR",
+        "SCALA_CLI_HOME",
+        "SCALA_CLI_CONFIG",
+        "XDG_CONFIG_HOME",
         "JAVA_HOME",
     )
     assert helper.FORBIDDEN_AMBIENT_JVM_VARIABLES == (
@@ -279,7 +285,7 @@ def main() -> int:
 
     print(
         "SCALA_BENCHMARK_BLOCK_CONTRACT_PASS "
-        "rawFiles=9 provenanceFields=20 environmentFields=8"
+        "rawFiles=9 provenanceFields=20 environmentFields=14"
     )
     return 0
 

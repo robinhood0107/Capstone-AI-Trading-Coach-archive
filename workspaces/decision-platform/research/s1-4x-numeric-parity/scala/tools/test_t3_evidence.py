@@ -271,7 +271,11 @@ def correctness(
             "profileRunInputPaths": inputs,
             "candidateSha256": f"{index + 10:064x}",
             "matrix": {
+                "candidateResultSha256": f"{index + 15:064x}",
+                "semanticResultSha256": f"{index + 16:064x}",
                 "unitTestResultSha256": f"{index + 20:064x}",
+                "unitStdoutSha256": f"{index + 21:064x}",
+                "unitStderrSha256": f"{index + 22:064x}",
                 "canonicalComparisonSha256": f"{index + 30:064x}",
                 "semanticComparisonSha256": f"{index + 40:064x}",
                 "propertyReportSha256": f"{index + 50:064x}",
@@ -485,6 +489,8 @@ def selector_fixture(
             write_json(marker_path, marker)
 
             common_tail = [
+                "--workspace",
+                "SCALA_WORKSPACE",
                 "--server=false",
                 "--jvm",
                 "system",
@@ -528,11 +534,21 @@ def selector_fixture(
                 "--power",
                 "run",
                 *[str(SCALA_ROOT / path) for path in jmh_inputs],
-                *common_tail,
+                "--workspace",
+                str(module.isolated_scala_workspace(case_root)),
+                *common_tail[2:],
                 "-rff",
                 str(native_path),
                 include_regex,
             ]
+            closure_snapshot = module.SealedEvidenceSnapshot()
+            command_tools = module.command_tool_closure(
+                scala_root=SCALA_ROOT,
+                scala_cli=scala_cli,
+                java_executable=Path(os.environ["JAVA_HOME"]) / "bin/java",
+                run_mode="qualification",
+                snapshot=closure_snapshot,
+            )
             run = {
                 "schemaVersion": "s1.4x-scala-jmh-run-result-v1",
                 "profileId": profile,
@@ -546,6 +562,7 @@ def selector_fixture(
                 "benchmarkPlanSha256": plan_sha,
                 "sourceInputManifestSha256": source_manifest_sha,
                 "scalaCliBinarySha256": scala_cli_sha,
+                "scalaCliExecutionPathId": "SCALA_CLI_1_15_0",
                 "compilerProfilesSha256": compiler_profiles_sha,
                 "profileOptionsSha256": canonical_sha256(
                     PROFILE_OPTIONS[profile]
@@ -554,6 +571,14 @@ def selector_fixture(
                 "portableArgv": portable,
                 "portableArgvSha256": canonical_sha256(portable),
                 "runtimeArgvSha256": canonical_sha256(runtime),
+                "commandToolClosure": command_tools,
+                "commandToolClosureSha256": canonical_sha256(
+                    command_tools
+                ),
+                "environmentValuesSha256": canonical_sha256(
+                    module.SCALA_BENCHMARK_ENVIRONMENT_VALUES
+                ),
+                "scalaWorkspacePathId": "SCALA_WORKSPACE",
                 "rawNativeJsonSha256": module.sha256_file(native_path),
                 "effectiveJvmArgsSha256": module.sha256_file(
                     effective_path
@@ -705,12 +730,104 @@ def selector_fixture(
     )
     correctness_sha = {}
     for profile, value in correctness_value.items():
-        path = (
-            root
-            / "correctness"
-            / profile
-            / "scala-profile-correctness-result.v1.json"
+        profile_root = root / "correctness" / profile
+        profile_root.mkdir(parents=True)
+        stdout_path = profile_root / "unit-test.stdout"
+        stderr_path = profile_root / "unit-test.stderr"
+        stdout_path.write_bytes(b"unit tests passed\n")
+        stderr_path.write_bytes(b"")
+        unit = {
+            "schemaVersion": "s1.4x-scala-profile-unit-test-result-v1",
+            "profileId": profile,
+            "exitCode": 0,
+            "stdoutSha256": module.sha256_file(stdout_path),
+            "stderrSha256": module.sha256_file(stderr_path),
+            "status": "PASS",
+        }
+        unit_path = (
+            profile_root / "scala-profile-unit-test-result.v1.json"
         )
+        write_json(unit_path, unit)
+        candidate_path = profile_root / "candidate.jar"
+        candidate_path.write_bytes(f"candidate-{profile}\n".encode())
+        canonical_path = profile_root / "canonical-results.json"
+        semantic_path = profile_root / "semantic-errors.json"
+        write_json(
+            canonical_path,
+            {
+                "implementation": "scala-3.8.4-jvm25",
+                "requestId": "s1.4x-canonical-small-v1",
+                "results": [],
+            },
+        )
+        write_json(
+            semantic_path,
+            {
+                "implementation": "scala-3.8.4-jvm25",
+                "requestId": "s1.4x-semantic-errors-v1",
+                "results": [],
+            },
+        )
+        comparison = {
+            "schemaVersion": "s1.4x-comparison-report-v1",
+            "mismatchCount": 0,
+            "status": "PASS",
+        }
+        canonical_comparison = profile_root / "canonical-comparison.json"
+        semantic_comparison = profile_root / "semantic-comparison.json"
+        write_json(canonical_comparison, comparison)
+        write_json(semantic_comparison, comparison)
+        property_root = profile_root / "property"
+        property_root.mkdir()
+        property_report = property_root / "scala-property-report.v1.json"
+        registry_report = property_root / "scala-registry-report.v1.json"
+        property_execution = (
+            property_root
+            / "scala-property-execution-evidence.v1.json"
+        )
+        write_json(property_report, {"status": "PASS"})
+        write_json(registry_report, {"status": "PASS"})
+        write_json(
+            property_execution,
+            {"status": "PASS", "toolchainProfile": profile},
+        )
+        value["candidateSha256"] = module.sha256_file(candidate_path)
+        value["matrix"].update(
+            {
+                "candidateResultSha256": module.sha256_file(
+                    canonical_path
+                ),
+                "semanticResultSha256": module.sha256_file(semantic_path),
+                "unitTestResultSha256": module.sha256_file(unit_path),
+                "unitStdoutSha256": module.sha256_file(stdout_path),
+                "unitStderrSha256": module.sha256_file(stderr_path),
+                "canonicalComparisonSha256": module.sha256_file(
+                    canonical_comparison
+                ),
+                "semanticComparisonSha256": module.sha256_file(
+                    semantic_comparison
+                ),
+                "propertyReportSha256": module.sha256_file(property_report),
+                "registryReportSha256": module.sha256_file(registry_report),
+                "propertyExecutionEvidenceSha256": module.sha256_file(
+                    property_execution
+                ),
+                "propertyPlanSha256": module.sha256_file(
+                    S1_ROOT / "contract/property-plan.v1.json"
+                ),
+                "propertySeedCorpusSha256": module.sha256_file(
+                    S1_ROOT
+                    / "contract/fixtures/property/property-seeds.v1.json"
+                ),
+                "functionRegistrySha256": module.sha256_file(
+                    S1_ROOT / "contract/function-registry.v1.json"
+                ),
+                "errorRegistrySha256": module.sha256_file(
+                    S1_ROOT / "contract/error-registry.v1.json"
+                ),
+            }
+        )
+        path = profile_root / "scala-profile-correctness-result.v1.json"
         write_json(path, value)
         correctness_sha[profile] = module.sha256_file(path)
 
@@ -724,6 +841,7 @@ def selector_fixture(
         ),
         "correctness": correctness_value,
         "correctness_sha256": correctness_sha,
+        "correctness_artifact_root": root / "correctness",
         "qualification": qualification_value,
         "qualification_sha256": module.sha256_file(qualification_path),
         "qualification_artifact_root": root,
@@ -740,6 +858,7 @@ def selector_fixture(
         "capability_smoke_plan_sha256": capability_plan_sha,
         "jvm_allowlist": allowlist,
         "jvm_allowlist_sha256": allowlist_sha,
+        "jvm_allowlist_path": allowlist_path,
     }
 
 
@@ -1031,6 +1150,21 @@ def main() -> int:
             message,
         )
 
+    raw_correctness = (
+        selected_inputs["correctness_artifact_root"]
+        / "A/property/scala-property-report.v1.json"
+    )
+    raw_correctness_bytes = raw_correctness.read_bytes()
+    raw_correctness_value = json.loads(raw_correctness_bytes)
+    raw_correctness_value["aggregateStatus"] = "FAIL"
+    write_json(raw_correctness, raw_correctness_value)
+    expect_t3_error(
+        module,
+        lambda: module.select_scala_profile(**selected_inputs),
+        "raw correctness byte tamper passed",
+    )
+    raw_correctness.write_bytes(raw_correctness_bytes)
+
     raw_tamper_inputs = selected_inputs
     raw_native = (
         raw_tamper_inputs["qualification_artifact_root"]
@@ -1230,15 +1364,7 @@ def main() -> int:
         "java.vendor": "Eclipse Adoptium",
         "java.vm.name": "OpenJDK 64-Bit Server VM",
     }
-    benchmark_environment = {
-        "S1_4X_BENCHMARK_CASE_ID": "SET",
-        "S1_4X_BENCHMARK_PLAN": "SET",
-        "S1_4X_BENCHMARK_PROFILE": "SET",
-        "S1_4X_BENCHMARK_RUN_MODE": "SET",
-        "S1_4X_EFFECTIVE_JVM_EVIDENCE_DIR": "SET",
-        "S1_4X_FIXTURE_ROOT": "SET",
-        "S1_4X_MEASUREMENT_READY_MARKER": "SET",
-    }
+    benchmark_environment = dict(module.EXPECTED_BENCHMARK_ENVIRONMENT)
     observed_jmh_arguments = ["-Djmh.separateClasspathJAR=true"]
     fork_evidence = [
         {

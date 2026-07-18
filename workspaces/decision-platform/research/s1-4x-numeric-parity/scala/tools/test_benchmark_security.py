@@ -150,7 +150,9 @@ def main() -> int:
         assert "COURSIER_REPOSITORIES" not in environment
         assert "JAVA_TOOL_OPTIONS" not in environment
         assert closure["coursierCachePathId"] == "CACHE_ROOT/coursier"
-        assert closure["scalaWorkspacePathId"] == "BLOCK_ROOT/scala-workspace"
+        assert closure["scalaWorkspacePathId"].startswith(
+            "CACHE_ROOT/scala-workspaces/"
+        )
 
     print(
         "SCALA_BENCHMARK_SECURITY_TEST_PASS "

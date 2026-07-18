@@ -198,6 +198,11 @@ def main() -> int:
         "create-jvm-allowlist",
         "--jvm-allowlist",
         "--expected-measurement-iterations",
+        "--workspace",
+        "COURSIER_CACHE",
+        "SCALA_CLI_HOME",
+        "commandToolClosureSha256",
+        "environmentValuesSha256",
     ):
         assert marker in native_smoke
     assert "S1_4X_MEASUREMENT_READY_MARKER" in native_smoke
@@ -357,12 +362,31 @@ def main() -> int:
     assert "ARG S1_4X_SCALA_BASE_IMAGE" in containerfile
     assert "ARG S1_4X_SCALA_BASE_IMAGE=" not in containerfile
     assert "FROM ${S1_4X_SCALA_BASE_IMAGE}" in containerfile
+    for marker in (
+        "S1_4X_BASE_IMAGE_ID",
+        "S1_4X_CANDIDATE_SHA256",
+        "S1_4X_CONTAINERFILE_SHA256",
+        "S1_4X_FIXTURE_TREE_SHA256",
+        "org.opencontainers.image.s1-4x.candidate-sha256",
+        "org.opencontainers.image.s1-4x.base-reference",
+        "org.opencontainers.image.s1-4x.base-image-id",
+    ):
+        assert marker in containerfile
     assert "USER 65532:65532" in containerfile
+    build_oci = script("build-oci-image.sh")
     oci = script("run-oci-correctness.sh")
+    oci_evidence = (TOOLS_ROOT / "oci_evidence.py").read_text(encoding="utf-8")
     assert "--network none" in oci
-    assert "S1_4X_SCALA_IMAGE_REF:?" in oci
+    assert "S1_4X_SCALA_IMAGE_REF" not in oci
+    assert "--build-result" in oci
+    assert "runtime-binding" in oci
+    assert "S1_4X_DOCKER_SHA256:?" in oci
+    assert '"$IMAGE_ID"' in oci
     assert "/workspace" not in oci
     assert "$HOME:" not in oci
+    assert "S1_4X_SCALA_BASE_IMAGE_REF:?" in build_oci
+    assert "--iidfile" in oci_evidence
+    assert "DOCKER_DAEMON_CHANGED_DURING_BUILD" in oci_evidence
 
     print(
         "SCALA_T3_TOOLING_CONTRACT_TEST_PASS "
