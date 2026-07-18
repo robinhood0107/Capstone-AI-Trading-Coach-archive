@@ -74,6 +74,7 @@ class BenchmarkCommandManifestTests(TestCase):
                 "boundaries": {
                     boundary: identity for boundary in BOUNDARY_IDS
                 },
+                "runtimeDependencies": {"uv": identity},
             },
         }
 
@@ -95,6 +96,7 @@ class BenchmarkCommandManifestTests(TestCase):
             allowed_executables={
                 "hostValidator": identity,
                 "boundaries": {boundary: identity for boundary in BOUNDARY_IDS},
+                "runtimeDependencies": {"uv": identity},
             },
         )
         self.assertEqual(validate_manifest(manifest)["benchmarkSubjectCommit"], commit)
@@ -119,6 +121,7 @@ class BenchmarkCommandManifestTests(TestCase):
                 allowed_executables={
                     "hostValidator": identity,
                     "boundaries": {boundary: identity for boundary in BOUNDARY_IDS},
+                    "runtimeDependencies": {"uv": identity},
                 },
             )
 
@@ -247,7 +250,7 @@ class BenchmarkCommandManifestTests(TestCase):
             self.assertEqual(validated, manifest)
             self.assertFalse(swapped)
 
-    def test_official_benchmark_wrappers_use_absolute_frozen_tools(self) -> None:
+    def test_official_benchmark_wrappers_require_fd_bound_uv(self) -> None:
         numeric_root = INTEGRATION.parent
         wrappers = [
             numeric_root / "integration/tools/run-host-validator.sh",
@@ -258,9 +261,32 @@ class BenchmarkCommandManifestTests(TestCase):
                 source = wrapper.read_text(encoding="utf-8")
                 self.assertTrue(source.startswith("#!/usr/bin/bash\n"))
                 self.assertIn("/usr/bin/git", source)
-                self.assertIn("/home/pjjpj/.local/bin/uv", source)
+                self.assertNotIn("/home/pjjpj/.local/bin/uv", source)
                 self.assertNotIn("command -v", source)
-                self.assertNotIn("S1_4X_UV_BIN", source)
+                self.assertIn("S1_4X_UV_BIN", source)
+                self.assertIn("/proc/self/fd/", source)
+
+    def test_manifest_requires_exact_uv_runtime_dependency(self) -> None:
+        executable = Path(sys.executable).resolve()
+        identity = {
+            "path": str(executable),
+            "sha256": hashlib.sha256(executable.read_bytes()).hexdigest(),
+        }
+        manifest = self._manifest_for_identity(identity)
+        runtime = cast(
+            dict[str, dict[str, str]],
+            cast(dict[str, object], manifest["allowedExecutables"])[
+                "runtimeDependencies"
+            ],
+        )
+        self.assertEqual(validate_manifest(manifest), manifest)
+
+        del runtime["uv"]
+        with self.assertRaisesRegex(
+            CommandManifestError,
+            "MANIFEST_COMMANDS_INVALID",
+        ):
+            validate_manifest(manifest)
 
     def test_manifest_rejects_duplicate_qualification_placeholder(self) -> None:
         executable = Path(sys.executable).resolve()
@@ -283,6 +309,7 @@ class BenchmarkCommandManifestTests(TestCase):
                 allowed_executables={
                     "hostValidator": identity,
                     "boundaries": {boundary: identity for boundary in BOUNDARY_IDS},
+                    "runtimeDependencies": {"uv": identity},
                 },
             )
 
@@ -301,6 +328,7 @@ class BenchmarkCommandManifestTests(TestCase):
             allowed_executables={
                 "hostValidator": identity,
                 "boundaries": {boundary: identity for boundary in BOUNDARY_IDS},
+                "runtimeDependencies": {"uv": identity},
             },
         )
         with tempfile.TemporaryDirectory() as directory:

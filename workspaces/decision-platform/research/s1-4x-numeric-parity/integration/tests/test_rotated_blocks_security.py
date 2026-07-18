@@ -101,6 +101,7 @@ def _command_manifest() -> dict[str, Any]:
             "boundaries": {
                 boundary_id: identity for boundary_id in runner.BOUNDARY_IDS
             },
+            "runtimeDependencies": {"uv": identity},
         },
     }
 
@@ -247,6 +248,62 @@ def test_runner_executes_sealed_verified_bytes_after_supplier_path_replacement(
             )
             assert stdout.read_text(encoding="utf-8") == "A\n"
             assert stderr.read_bytes() == b""
+
+
+def test_runner_executes_fd_bound_uv_dependency_after_path_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    wrapper = tmp_path / "wrapper"
+    wrapper.write_text(
+        "#!/usr/bin/bash\nexec \"$S1_4X_UV_BIN\"\n",
+        encoding="utf-8",
+    )
+    wrapper.chmod(0o700)
+    supplied_uv = tmp_path / "uv"
+    supplied_uv.write_text(
+        "#!/usr/bin/bash\nprintf 'UV_A\\n'\n",
+        encoding="utf-8",
+    )
+    supplied_uv.chmod(0o700)
+    wrapper_identity = {
+        "path": str(wrapper),
+        "sha256": sha256_file(wrapper),
+    }
+    uv_identity = {
+        "path": str(supplied_uv),
+        "sha256": sha256_file(supplied_uv),
+    }
+
+    with (
+        runner._pin_executable(wrapper_identity, role="wrapper") as pinned_wrapper,
+        runner._pin_executable(uv_identity, role="uv") as pinned_uv,
+    ):
+        replacement = tmp_path / "replacement-uv"
+        replacement.write_text(
+            "#!/usr/bin/bash\nprintf 'UV_B\\n'\n",
+            encoding="utf-8",
+        )
+        replacement.chmod(0o700)
+        replacement.replace(supplied_uv)
+        stdout = tmp_path / "uv.stdout"
+        stderr = tmp_path / "uv.stderr"
+        environment = runner._benchmark_environment({"uv": pinned_uv})
+
+        runner._run_process(
+            [str(wrapper)],
+            executable=pinned_wrapper,
+            inherited_executables=(pinned_uv,),
+            cwd=tmp_path,
+            timeout_seconds=5,
+            stdout_path=stdout,
+            stderr_path=stderr,
+            environment=environment,
+        )
+
+    assert stdout.read_text(encoding="utf-8") == "UV_A\n"
+    assert stderr.read_bytes() == b""
 
 
 def test_runner_rejects_path_resolved_script_interpreter(
@@ -398,7 +455,12 @@ def test_benchmark_environment_drops_ambient_code_and_tool_overrides(
     monkeypatch.setenv("GIT_CONFIG_KEY_0", "core.fsmonitor")
     monkeypatch.setenv("GIT_CONFIG_VALUE_0", str(tmp_path / "hook"))
 
-    environment = runner._benchmark_environment()
+    runtime = runner.PinnedExecutable(
+        binding={"path": "/home/pjjpj/.local/bin/uv", "sha256": "a" * 64},
+        descriptor=42,
+        required_seals=runner.F_SEAL_SEAL,
+    )
+    environment = runner._benchmark_environment({"uv": runtime})
 
     assert environment == {
         "HOME": str(tmp_path),
@@ -410,6 +472,7 @@ def test_benchmark_environment_drops_ambient_code_and_tool_overrides(
         "TEMP": "/tmp",
         **runner.THREAD_ENVIRONMENT,
         "S1_4X_THREAD_COUNT": "1",
+        "S1_4X_UV_BIN": "/proc/self/fd/42",
     }
 
 
@@ -706,13 +769,22 @@ def _install_execute_fakes(
         command: list[str],
         *,
         executable: runner.PinnedExecutable,
+        inherited_executables: tuple[runner.PinnedExecutable, ...] = (),
         cwd: Path,
         timeout_seconds: int,
         stdout_path: Path,
         stderr_path: Path,
         environment: dict[str, str],
     ) -> None:
-        del executable, cwd, timeout_seconds, stdout_path, stderr_path, environment
+        del (
+            executable,
+            inherited_executables,
+            cwd,
+            timeout_seconds,
+            stdout_path,
+            stderr_path,
+            environment,
+        )
         if "--allowed-process-root-pid" in command:
             if host_times_out:
                 raise ContractError("PERFORMANCE_DEADLINE_EXCEEDED")
