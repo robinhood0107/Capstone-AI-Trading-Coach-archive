@@ -1038,6 +1038,7 @@ def run_block(arguments: argparse.Namespace) -> dict[str, Any]:
         expected_sha256=_required_environment("S1_4X_SCALA_JAVA_SHA256"),
         label="JAVA_EXECUTABLE",
     ).__enter__()
+    benchmark_python_exec = benchmark_python_pin.proc_path
     pinned_fds = (
         *benchmark_python_pin.pass_fds,
         *scala_cli_pin.pass_fds,
@@ -1150,6 +1151,9 @@ def run_block(arguments: argparse.Namespace) -> dict[str, Any]:
     environment["S1_4X_SCALA_CLI_EXEC_PATH"] = str(
         scala_cli_pin.proc_path
     )
+    environment["S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH"] = str(
+        benchmark_python_exec
+    )
     environment["S1_4X_SCALA_JAVA_PINNED_FD_PATH"] = str(
         java_pin.proc_path
     )
@@ -1185,7 +1189,7 @@ def run_block(arguments: argparse.Namespace) -> dict[str, Any]:
     )
     ledger_result = _run_json_command(
         [
-            str(benchmark_python),
+            str(benchmark_python_exec),
             str(ledger_script),
             "--repo-root",
             str(repo_root),
@@ -1217,7 +1221,7 @@ def run_block(arguments: argparse.Namespace) -> dict[str, Any]:
     started_at = _utc_now()
     _run_checked(
         build_measurement_marker_command(
-            python=benchmark_python,
+            python=benchmark_python_exec,
             marker=marker_script,
             qualification=qualification_path,
         ),
@@ -1253,7 +1257,7 @@ def run_block(arguments: argparse.Namespace) -> dict[str, Any]:
 
     producer_result = _run_json_command(
         build_producer_command(
-            python=benchmark_python,
+            python=benchmark_python_exec,
             producer=producer_script,
             repo_root=repo_root,
             plan=plan_path,
@@ -1297,7 +1301,7 @@ def run_block(arguments: argparse.Namespace) -> dict[str, Any]:
 
     block_result = _run_json_command(
         build_block_result_command(
-            python=benchmark_python,
+            python=benchmark_python_exec,
             producer=producer_script,
             repo_root=repo_root,
             plan=plan_path,

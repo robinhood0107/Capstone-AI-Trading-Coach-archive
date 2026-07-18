@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -175,6 +176,25 @@ def main() -> int:
         if output_dir.exists() or output_dir.is_symlink():
             raise QualificationError("OUTPUT_DIRECTORY_MUST_BE_NEW")
         output_dir.mkdir(parents=True)
+        java_pin = os.environ.get("S1_4X_SCALA_JAVA_PINNED_FD_PATH")
+        if not java_pin:
+            raise QualificationError("JAVA_PINNED_FD_PATH_REQUIRED")
+        self_pin = re.fullmatch(r"/proc/self/fd/([0-9]+)", java_pin)
+        if self_pin is not None:
+            java_pin = f"/proc/{os.getpid()}/fd/{self_pin.group(1)}"
+            os.environ["S1_4X_SCALA_JAVA_PINNED_FD_PATH"] = java_pin
+        elif re.fullmatch(
+            r"/proc/[1-9][0-9]*/fd/[0-9]+",
+            java_pin,
+        ) is None:
+            raise QualificationError("JAVA_PINNED_FD_PATH_INVALID")
+        if (
+            not Path(java_pin).is_file()
+            or not os.access(java_pin, os.X_OK)
+            or sha256_file(Path(java_pin))
+            != allowlist["javaExecutableSha256"]
+        ):
+            raise QualificationError("JAVA_PINNED_FD_IDENTITY_MISMATCH")
         environment = os.environ.copy()
         oracle_root = arguments.scala_root.parent / "oracle"
         blocks = []

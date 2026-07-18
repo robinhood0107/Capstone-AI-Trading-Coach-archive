@@ -1274,6 +1274,8 @@ def validate_qualification_case_artifacts(
         "ns",
         "-t",
         "1",
+        "-jvm",
+        "PINNED_JAVA_FD",
         "-f",
         str(policy["forks"]),
         "-wi",
@@ -1297,6 +1299,22 @@ def validate_qualification_case_artifacts(
         "EVIDENCE_ROOT/native.json",
         include_regex,
     ]
+    java_pinned_fd_path = os.environ.get(
+        "S1_4X_SCALA_JAVA_PINNED_FD_PATH"
+    )
+    if (
+        not java_pinned_fd_path
+        or re.fullmatch(
+            r"/proc/(?:self|[1-9][0-9]*)/fd/[0-9]+",
+            java_pinned_fd_path,
+        )
+        is None
+    ):
+        raise T3EvidenceError("JAVA_PINNED_FD_PATH_REQUIRED")
+    runtime_tail = [
+        java_pinned_fd_path if item == "PINNED_JAVA_FD" else item
+        for item in common_tail
+    ]
     expected_runtime_argv = [
         str(scala_cli),
         "--power",
@@ -1304,7 +1322,7 @@ def validate_qualification_case_artifacts(
         *absolute_sources,
         "--workspace",
         str(runtime_workspace),
-        *common_tail[2:],
+        *runtime_tail[2:],
         "-rff",
         str(artifact_root / case_root / "native.json"),
         include_regex,

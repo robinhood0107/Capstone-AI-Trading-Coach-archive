@@ -73,6 +73,38 @@ else
     usage
 fi
 
+JAVA_EXECUTABLE="${JAVA_HOME:?JAVA_HOME is required}/bin/java"
+[[ "$JAVA_EXECUTABLE" == /* \
+  && -f "$JAVA_EXECUTABLE" \
+  && -x "$JAVA_EXECUTABLE" \
+  && ! -L "$JAVA_EXECUTABLE" ]] || usage
+java_sha="$(sha256sum "$JAVA_EXECUTABLE" | awk '{print $1}')"
+pinned_java_input="${S1_4X_SCALA_JAVA_PINNED_FD_PATH:-}"
+if [[ -z "$pinned_java_input" ]]; then
+  [[ "$MODE" == "smoke" ]] || {
+    printf 'qualification/full JMH requires a parent-sealed Java FD\n' >&2
+    exit 69
+  }
+  # Standalone smoke도 pathname 재개방 없이 같은 inode를 JMH fork까지 전달한다.
+  exec {java_pin_fd}<"$JAVA_EXECUTABLE"
+  JAVA_EXEC="/proc/$$/fd/$java_pin_fd"
+elif [[ "$pinned_java_input" =~ ^/proc/self/fd/([0-9]+)$ ]]; then
+  # JMH의 nested fork에서도 열 수 있도록 이 shell의 안정된 PID로 정규화한다.
+  JAVA_EXEC="/proc/$$/fd/${BASH_REMATCH[1]}"
+elif [[ "$pinned_java_input" =~ ^/proc/[1-9][0-9]*/fd/[0-9]+$ ]]; then
+  JAVA_EXEC="$pinned_java_input"
+else
+  printf 'Java pinned FD path is invalid\n' >&2
+  exit 69
+fi
+if [[ ! -f "$JAVA_EXEC" \
+  || ! -x "$JAVA_EXEC" \
+  || "$(sha256sum "$JAVA_EXEC" | awk '{print $1}')" != "$java_sha" ]]; then
+  printf 'Java pinned FD identity mismatch\n' >&2
+  exit 69
+fi
+export S1_4X_SCALA_JAVA_PINNED_FD_PATH="$JAVA_EXEC"
+
 CACHE_ROOT="${S1_4X_CACHE_ROOT:-$HOME/.cache/s1-4x}"
 [[ "$CACHE_ROOT" == /* && -d "$CACHE_ROOT" && ! -L "$CACHE_ROOT" ]] || usage
 expected_coursier_cache="$CACHE_ROOT/coursier"
@@ -265,6 +297,7 @@ command=(
   "${profile_options[@]}"
   --jmh --jmh-version 1.37 --
   -bm avgt -tu ns -t 1
+  -jvm "$JAVA_EXEC"
   -f "$forks"
   -wi "$warmup_iterations"
   -i "$measurement_iterations"
@@ -345,7 +378,6 @@ with output.open("x", encoding="utf-8", newline="\n") as stream:
     )
 PY
 
-java_sha="$(sha256sum "$JAVA_HOME/bin/java" | awk '{print $1}')"
 if [[ "$MODE" == "smoke" ]]; then
   JVM_ALLOWLIST="$OUTPUT_DIR/scala-jvm-argument-allowlist.v1.json"
   python3 "$SCALA_ROOT/tools/t3_evidence.py" create-jvm-allowlist \
@@ -432,6 +464,7 @@ def strict_object(path: Path) -> dict:
 scala_root = manifest.parent
 output_root = output.parent
 scala_workspace = Path(os.environ["S1_4X_SCALA_WORKSPACE"])
+java_exec = os.environ["S1_4X_SCALA_JAVA_PINNED_FD_PATH"]
 compiler_config = strict_object(compiler_profiles)
 source_manifest = strict_object(manifest)
 native_validation = strict_object(validation)
@@ -457,6 +490,8 @@ portable = []
 for item in runtime_argv:
     if item == runtime_argv[0]:
         portable.append("SCALA_CLI_1_15_0")
+    elif item == java_exec:
+        portable.append("PINNED_JAVA_FD")
     elif item.startswith(f"{scala_root}/"):
         portable.append(f"SCALA_ROOT/{item.removeprefix(f'{scala_root}/')}")
     elif item == str(plan):
@@ -469,6 +504,9 @@ for item in runtime_argv:
         portable.append("SCALA_WORKSPACE")
     else:
         portable.append(item)
+jvm_index = portable.index("-jvm")
+if portable[jvm_index : jvm_index + 2] != ["-jvm", "PINNED_JAVA_FD"]:
+    raise SystemExit("JMH_RUNTIME_JAVA_PIN_DRIFT")
 
 def canonical(value: object) -> str:
     payload = json.dumps(

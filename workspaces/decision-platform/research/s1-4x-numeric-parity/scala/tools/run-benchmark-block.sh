@@ -44,6 +44,7 @@ SCALA_ROOT="$REPO_ROOT/workspaces/decision-platform/research/s1-4x-numeric-parit
 HELPER="$SCALA_ROOT/tools/scala_benchmark_block.py"
 BENCHMARK_PYTHON="${S1_4X_BENCHMARK_PYTHON_BIN:?S1_4X_BENCHMARK_PYTHON_BIN is required}"
 BENCHMARK_PYTHON_SHA256="${S1_4X_BENCHMARK_PYTHON_SHA256:?S1_4X_BENCHMARK_PYTHON_SHA256 is required}"
+BENCHMARK_PYTHON_EXEC="${S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH:?S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH is required}"
 SCALA_CLI="${S1_4X_SCALA_CLI_BIN:?S1_4X_SCALA_CLI_BIN is required}"
 SCALAFIX="${S1_4X_SCALAFIX_BIN:?S1_4X_SCALAFIX_BIN is required}"
 SCALAFMT_ARCHIVE="${S1_4X_SCALAFMT_ARCHIVE:?S1_4X_SCALAFMT_ARCHIVE is required}"
@@ -81,6 +82,23 @@ verify_executable() {
   fi
 }
 
+verify_pinned_executable() {
+  local label="$1"
+  local executable="$2"
+  local expected_sha256="$3"
+  if [[ ! "$executable" =~ ^/proc/(self|[1-9][0-9]*)/fd/[0-9]+$ \
+    || ! -f "$executable" \
+    || ! -x "$executable" ]]; then
+    printf '%s pinned FD identity is unsafe\n' "$label" >&2
+    exit 69
+  fi
+  if [[ "$(/usr/bin/sha256sum "$executable" | /usr/bin/awk '{print $1}')" \
+    != "$expected_sha256" ]]; then
+    printf '%s pinned FD SHA-256 mismatch\n' "$label" >&2
+    exit 69
+  fi
+}
+
 verify_regular() {
   local label="$1"
   local path="$2"
@@ -106,6 +124,8 @@ verify_directory() {
 }
 
 verify_executable "benchmark Python" "$BENCHMARK_PYTHON" "$BENCHMARK_PYTHON_SHA256"
+verify_pinned_executable \
+  "benchmark Python" "$BENCHMARK_PYTHON_EXEC" "$BENCHMARK_PYTHON_SHA256"
 verify_executable "Scala CLI" "$SCALA_CLI" "$SCALA_CLI_SHA256"
 verify_executable "Scalafix" "$SCALAFIX" "$SCALAFIX_SHA256"
 verify_executable "Scalafmt" "$SCALAFMT" "$SCALAFMT_SHA256"
@@ -135,6 +155,7 @@ exec /usr/bin/env -i \
   S1_4X_CACHE_ROOT="$CACHE_ROOT" \
   S1_4X_BENCHMARK_PYTHON_BIN="$BENCHMARK_PYTHON" \
   S1_4X_BENCHMARK_PYTHON_SHA256="$BENCHMARK_PYTHON_SHA256" \
+  S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH="$BENCHMARK_PYTHON_EXEC" \
   S1_4X_SCALA_CLI_BIN="$SCALA_CLI" \
   S1_4X_SCALA_CLI_SHA256="$SCALA_CLI_SHA256" \
   S1_4X_SCALAFIX_BIN="$SCALAFIX" \
@@ -147,7 +168,7 @@ exec /usr/bin/env -i \
   S1_4X_SCALA_CORRECTNESS_ROOT="$CORRECTNESS_ROOT" \
   S1_4X_SCALA_JVM_ALLOWLIST_RESULT="$JVM_ALLOWLIST" \
   S1_4X_BENCHMARK_SUBJECT_COMMIT="${20}" \
-  "$BENCHMARK_PYTHON" "$HELPER" \
+  "$BENCHMARK_PYTHON_EXEC" "$HELPER" \
   --repo-root "$REPO_ROOT" \
   --plan "$2" \
   --block-dir "$4" \
