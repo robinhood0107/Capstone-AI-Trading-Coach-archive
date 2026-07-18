@@ -49,7 +49,9 @@ class BenchmarkBlockHelperTests(unittest.TestCase):
             ),
             stack_yaml=Path("/repo/haskell/stack.yaml"),
             stack_root=Path("/cache/stack-root-benchmark-abc"),
-            work_dir=Path("/cache/stack-root-benchmark-abc/work"),
+            work_dir=Path(
+                ".stack-work/s1-4x/stack-root-benchmark-abc"
+            ),
             profile_options=["-O2", "-fasm"],
             time_limit_seconds=5,
             native_report=Path("/out/raw/criterion-family.json"),
@@ -76,7 +78,7 @@ class BenchmarkBlockHelperTests(unittest.TestCase):
                 "--stack-root",
                 "/cache/stack-root-benchmark-abc",
                 "--work-dir",
-                "/cache/stack-root-benchmark-abc/work",
+                ".stack-work/s1-4x/stack-root-benchmark-abc",
                 "--stack-yaml",
                 "/repo/haskell/stack.yaml",
                 "--no-terminal",
@@ -313,9 +315,19 @@ class BenchmarkBlockHelperTests(unittest.TestCase):
                 stack_source,
                 shared_prelude
                 + "import shutil\n"
+                + "from pathlib import Path\n"
                 + "ghc = shutil.which('ghc')\n"
                 + "if ghc != os.environ['TEST_GHC_SHIM']:\n"
                 + "    raise SystemExit(91)\n"
+                + "for name in ('ghc-pkg', 'runghc', 'haddock'):\n"
+                + "    auxiliary = Path(ghc).with_name(name)\n"
+                + "    if not auxiliary.exists():\n"
+                + "        raise SystemExit(92)\n"
+                + "    probe = subprocess.run("
+                + "[str(auxiliary), '--nested-probe'], check=False, "
+                + "pass_fds=fds)\n"
+                + "    if probe.returncode != 0:\n"
+                + "        raise SystemExit(93)\n"
                 + "completed = subprocess.run("
                 + "[ghc, '--nested-probe'], check=False, pass_fds=fds)\n"
                 + "raise SystemExit(completed.returncode)\n",
@@ -328,6 +340,12 @@ class BenchmarkBlockHelperTests(unittest.TestCase):
                 "Path(os.environ['TEST_MARKER']).write_text("
                 "os.readlink(os.environ['TEST_GHC_SHIM']), encoding='utf-8')\n",
             )
+            for auxiliary_name in ("ghc-pkg", "runghc", "haddock"):
+                write_executable(
+                    root / auxiliary_name,
+                    "#!/usr/bin/python3\n"
+                    "raise SystemExit(0)\n",
+                )
             descriptors = [
                 os.open(path, os.O_RDONLY)
                 for path in (ghcup_source, stack_source, ghc_source)
@@ -369,9 +387,16 @@ class BenchmarkBlockHelperTests(unittest.TestCase):
                 )
                 self.assertEqual(
                     sorted(path.name for path in ghc_shim.parent.iterdir()),
-                    ["ghc"],
+                    ["ghc", "ghc-pkg", "haddock", "runghc"],
                 )
                 self.assertEqual(os.readlink(ghc_shim), str(ghc.fd_path))
+                for auxiliary_name in ("ghc-pkg", "runghc", "haddock"):
+                    auxiliary = ghc_shim.parent / auxiliary_name
+                    self.assertTrue(auxiliary.is_symlink())
+                    self.assertEqual(
+                        auxiliary.resolve(strict=True),
+                        root / auxiliary_name,
+                    )
                 self.assertEqual(tool_path.split(":", 1)[0], str(ghc_shim.parent))
                 command = helper.build_stack_benchmark_command(
                     ghcup_bin=ghcup.fd_path,
@@ -379,7 +404,9 @@ class BenchmarkBlockHelperTests(unittest.TestCase):
                     tool_path=tool_path,
                     stack_yaml=root / "stack.yaml",
                     stack_root=stack_root,
-                    work_dir=stack_root / "work",
+                    work_dir=Path(
+                        f".stack-work/s1-4x/{stack_root.name}"
+                    ),
                     profile_options=["-O0", "-fasm"],
                     time_limit_seconds=5,
                     native_report=root / "raw.json",
@@ -412,6 +439,110 @@ class BenchmarkBlockHelperTests(unittest.TestCase):
                 for descriptor in descriptors:
                     os.close(descriptor)
 
+    def test_final_profile_selects_same_fd_correctness_and_qualification(
+        self,
+    ) -> None:
+        helper = load_helper()
+        commit = "a" * 40
+        source_tree = "b" * 64
+        compiler = "c" * 64
+        plan = "d" * 64
+        baseline = {
+            "schemaVersion": "s1.4x-haskell-full-correctness-v1",
+            "status": "PASS",
+            "profileId": "baseline-o0-fasm",
+            "candidateSourceCommit": commit,
+            "sourceTreeSha256": source_tree,
+            "compilerSha256": compiler,
+            "mismatchCount": 0,
+        }
+        optimized = {
+            **baseline,
+            "profileId": "optimized-o2-fasm",
+        }
+        qualification = {
+            "schemaVersion": "s1.4x-haskell-profile-qualification-v1",
+            "status": "PASS",
+            "candidateSourceCommit": commit,
+            "sourceTreeSha256": source_tree,
+            "planSha256": plan,
+            "selection": {
+                "profileId": "baseline-o0-fasm",
+                "selectedBy": "proven-fallback",
+            },
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            descriptors: list[int] = []
+            environment: dict[str, str] = {}
+            for prefix, name, document in (
+                (
+                    "S1_4X_HASKELL_BASELINE_CORRECTNESS",
+                    "baseline",
+                    baseline,
+                ),
+                (
+                    "S1_4X_HASKELL_OPTIMIZED_CORRECTNESS",
+                    "optimized",
+                    optimized,
+                ),
+                (
+                    "S1_4X_HASKELL_QUALIFICATION_ARTIFACT",
+                    "qualification",
+                    qualification,
+                ),
+            ):
+                payload = helper._canonical_json_bytes(document)
+                path = root / f"{name}.json"
+                path.write_bytes(payload)
+                descriptor = os.open(path, os.O_RDONLY)
+                descriptors.append(descriptor)
+                environment.update(
+                    {
+                        prefix: f"/proc/self/fd/{descriptor}",
+                        f"{prefix}_SHA256": hashlib.sha256(payload).hexdigest(),
+                        f"{prefix}_SOURCE_PATH": f"/evidence/{name}.json",
+                    }
+                )
+            try:
+                with mock.patch.dict(os.environ, environment, clear=False):
+                    evidence = helper.load_pinned_profile_evidence()
+                profile = {
+                    "schemaVersion": "s1.4x-haskell-selected-profile-v1",
+                    "profileId": "baseline-o0-fasm",
+                    "selectedBy": "proven-fallback",
+                    "sourceTreeSha256": source_tree,
+                    "compilerSha256": compiler,
+                    "qualificationPlanSha256": plan,
+                    "qualificationArtifactSha256": evidence[
+                        "qualification"
+                    ].sha256,
+                    "fullCorrectnessSha256": evidence["baseline"].sha256,
+                }
+                closure = helper.validate_profile_evidence_closure(
+                    profile=profile,
+                    evidence=evidence,
+                    benchmark_subject_commit=commit,
+                )
+                self.assertEqual(
+                    closure["baselineCorrectnessSha256"],
+                    evidence["baseline"].sha256,
+                )
+                altered = dict(profile)
+                altered["fullCorrectnessSha256"] = evidence["optimized"].sha256
+                with self.assertRaisesRegex(
+                    helper.BlockError,
+                    "SELECTED_CORRECTNESS",
+                ):
+                    helper.validate_profile_evidence_closure(
+                        profile=altered,
+                        evidence=evidence,
+                        benchmark_subject_commit=commit,
+                    )
+            finally:
+                for descriptor in descriptors:
+                    os.close(descriptor)
+
     def test_ghc_shim_directory_must_be_fresh_and_output_bound(self) -> None:
         helper = load_helper()
         with tempfile.TemporaryDirectory() as temporary:
@@ -421,6 +552,7 @@ class BenchmarkBlockHelperTests(unittest.TestCase):
             executable.chmod(0o755)
             descriptor = os.open(executable, os.O_RDONLY)
             try:
+                opened = os.fstat(descriptor)
                 pinned = helper.PinnedExecutable(
                     label="AUTHORITATIVE_GHC",
                     source_path=Path("/toolchain/ghc-9.10.3/bin/ghc"),
@@ -428,6 +560,14 @@ class BenchmarkBlockHelperTests(unittest.TestCase):
                     descriptor=descriptor,
                     sha256=hashlib.sha256(executable.read_bytes()).hexdigest(),
                     mode=executable.stat().st_mode,
+                    identity=(
+                        opened.st_dev,
+                        opened.st_ino,
+                        opened.st_size,
+                        opened.st_mtime_ns,
+                        opened.st_ctime_ns,
+                        opened.st_nlink,
+                    ),
                 )
                 stack_root = root / "stack-root"
                 stack_root.mkdir()
@@ -493,11 +633,12 @@ class BenchmarkBlockHelperTests(unittest.TestCase):
             "executedBenchmarkSha256",
             "authoritativeGhcPath",
             "authoritativeGhcSha256",
+            "authoritativeGhcPinnedFdPath",
         ):
             with self.subTest(field=field):
                 self.assertIn(f'"{field}"', source)
         self.assertIn('"S1_4X_BENCHMARK_RUNTIME_IDENTITY"', source)
-        self.assertIn('"S1_4X_AUTHORITATIVE_GHC_SHA256"', source)
+        self.assertIn('"S1_4X_AUTHORITATIVE_GHC"', source)
 
 
 if __name__ == "__main__":

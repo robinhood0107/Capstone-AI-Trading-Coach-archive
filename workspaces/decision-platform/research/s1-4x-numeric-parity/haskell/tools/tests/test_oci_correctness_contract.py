@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -137,6 +139,8 @@ class OciCorrectnessContractTests(unittest.TestCase):
         inspection = {
             "Id": image_id,
             "RepoTags": [image_tag],
+            "Os": "linux",
+            "Architecture": "amd64",
         }
 
         self.assertEqual(
@@ -150,6 +154,8 @@ class OciCorrectnessContractTests(unittest.TestCase):
         for altered in (
             {**inspection, "Id": f"sha256:{'3' * 64}"},
             {**inspection, "RepoTags": ["local/s1-4x-haskell:retagged"]},
+            {**inspection, "Os": "windows"},
+            {**inspection, "Architecture": "arm64"},
         ):
             with self.subTest(altered=altered):
                 with self.assertRaises(helper.WorkflowError):
@@ -161,6 +167,16 @@ class OciCorrectnessContractTests(unittest.TestCase):
 
     def test_daemon_base_and_iid_are_exact_linux_amd64_objects(self) -> None:
         helper = load_helper()
+        expected_daemon = {
+            "contextName": "desktop-linux",
+            "daemonId": "daemon-id",
+            "serverVersion": "28.3.2",
+            "operatingSystem": "Docker Desktop",
+            "osType": "linux",
+            "architecture": "amd64",
+            "platform": "linux/amd64",
+        }
+        expected_daemon_sha256 = helper.canonical_sha256(expected_daemon)
         daemon = helper.validate_oci_daemon_identity(
             {
                 "ID": "daemon-id",
@@ -170,10 +186,11 @@ class OciCorrectnessContractTests(unittest.TestCase):
                 "OperatingSystem": "Docker Desktop",
             },
             context_name="desktop-linux",
+            expected_identity_sha256=expected_daemon_sha256,
         )
-        self.assertEqual(daemon["platform"], "linux/amd64")
-        with self.assertRaises(helper.WorkflowError):
-            helper.validate_oci_daemon_identity(
+        self.assertEqual(daemon, expected_daemon)
+        for document, context_name in (
+            (
                 {
                     "ID": "daemon-id",
                     "OSType": "windows",
@@ -181,37 +198,75 @@ class OciCorrectnessContractTests(unittest.TestCase):
                     "ServerVersion": "28.3.2",
                     "OperatingSystem": "Docker Desktop",
                 },
-                context_name="desktop-linux",
-            )
+                "desktop-linux",
+            ),
+            (
+                {
+                    "ID": "other-daemon",
+                    "OSType": "linux",
+                    "Architecture": "x86_64",
+                    "ServerVersion": "28.3.2",
+                    "OperatingSystem": "Docker Desktop",
+                },
+                "desktop-linux",
+            ),
+            (
+                {
+                    "ID": "daemon-id",
+                    "OSType": "linux",
+                    "Architecture": "x86_64",
+                    "ServerVersion": "28.3.2",
+                    "OperatingSystem": "Docker Desktop",
+                },
+                "other-context",
+            ),
+        ):
+            with self.subTest(document=document, context=context_name):
+                with self.assertRaises(helper.WorkflowError):
+                    helper.validate_oci_daemon_identity(
+                        document,
+                        context_name=context_name,
+                        expected_identity_sha256=expected_daemon_sha256,
+                    )
 
         base_reference = f"docker.io/library/haskell@{BASE_DIGEST}"
         base_id = f"sha256:{'5' * 64}"
+        base_inspection = {
+            "Id": base_id,
+            "RepoDigests": [base_reference],
+            "Os": "linux",
+            "Architecture": "amd64",
+        }
         self.assertEqual(
             helper.validate_oci_base_image_inspection(
-                {
-                    "Id": base_id,
-                    "RepoDigests": [base_reference],
-                },
+                base_inspection,
                 expected_reference=base_reference,
             ),
             base_id,
         )
-        with self.assertRaises(helper.WorkflowError):
-            helper.validate_oci_base_image_inspection(
-                {
-                    "Id": base_id,
-                    "RepoDigests": [],
-                },
-                expected_reference=base_reference,
-            )
+        for altered in (
+            {**base_inspection, "RepoDigests": []},
+            {**base_inspection, "Os": "windows"},
+            {**base_inspection, "Architecture": "arm64"},
+        ):
+            with self.subTest(altered=altered):
+                with self.assertRaises(helper.WorkflowError):
+                    helper.validate_oci_base_image_inspection(
+                        altered,
+                        expected_reference=base_reference,
+                    )
 
         self.assertEqual(
             helper.validate_oci_iid_bytes(
-                f"{base_id}\n".encode("ascii"),
+                base_id.encode("ascii"),
             ),
             base_id,
         )
-        for invalid in (base_id.encode("ascii"), b"sha256:not-a-digest\n"):
+        for invalid in (
+            f"{base_id}\n".encode("ascii"),
+            f"{base_id}\r\n".encode("ascii"),
+            b"sha256:not-a-digest",
+        ):
             with self.subTest(invalid=invalid):
                 with self.assertRaises(helper.WorkflowError):
                     helper.validate_oci_iid_bytes(invalid)
@@ -226,7 +281,113 @@ class OciCorrectnessContractTests(unittest.TestCase):
         self.assertIn('"imageTagBindingChecks"', source)
         self.assertIn("validate_oci_image_inspection", source)
 
-    def test_wrapper_requires_selected_profile_and_records_dynamic_docker_identity(
+    def test_oci_logged_json_binds_parse_and_hash_to_same_fd_bytes(self) -> None:
+        helper = load_helper()
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary).resolve() / "docker-inspect.json"
+            payload = b'{"Architecture":"amd64","Os":"linux"}\n'
+            path.write_bytes(payload)
+            record = {
+                "stdoutPath": str(path),
+                "stdoutSha256": hashlib.sha256(payload).hexdigest(),
+            }
+
+            document, digest = helper._same_fd_logged_json_snapshot(
+                path,
+                label="OCI_IMAGE_INSPECTION",
+                command_record=record,
+            )
+            self.assertEqual(
+                document,
+                {"Architecture": "amd64", "Os": "linux"},
+            )
+            self.assertEqual(digest, record["stdoutSha256"])
+
+            path.write_bytes(
+                b'{"Architecture":"arm64","Os":"linux"}\n'
+            )
+            with self.assertRaises(helper.WorkflowError):
+                helper._same_fd_logged_json_snapshot(
+                    path,
+                    label="OCI_IMAGE_INSPECTION",
+                    command_record=record,
+                )
+
+    def test_oci_context_provenance_uses_staged_build_inputs(self) -> None:
+        helper = load_helper()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            containerfile = root / "Containerfile"
+            binary = root / "candidate"
+            fixtures = root / "fixture-source"
+            context = root / "context"
+            containerfile.write_bytes(b"FROM pinned@example\n")
+            binary.write_bytes(b"candidate-binary")
+            binary.chmod(0o755)
+            (fixtures / "small").mkdir(parents=True)
+            (fixtures / "small/input.json").write_text(
+                '{"request":"frozen"}\n',
+                encoding="utf-8",
+            )
+
+            snapshot = helper._copy_oci_context(
+                context=context,
+                containerfile=containerfile,
+                binary=binary,
+                fixture_root=fixtures,
+            )
+            self.assertEqual(
+                snapshot,
+                {
+                    "binarySha256": helper.sha256_file(
+                        context / "s1-4x-haskell"
+                    ),
+                    "containerfileSha256": helper.sha256_file(
+                        context / "Containerfile"
+                    ),
+                    "fixtureTreeSha256": helper._regular_tree_sha256(
+                        context / "fixtures",
+                        label="OCI_FIXTURE_CONTEXT_TEST",
+                    ),
+                },
+            )
+            helper._validate_oci_context_snapshot(
+                context,
+                expected=snapshot,
+            )
+
+            (context / "Containerfile").write_bytes(
+                b"FROM substituted@example\n"
+            )
+            with self.assertRaises(helper.WorkflowError):
+                helper._validate_oci_context_snapshot(
+                    context,
+                    expected=snapshot,
+                )
+
+    def test_oci_flow_uses_same_fd_logs_and_checks_staged_context_twice(
+        self,
+    ) -> None:
+        source = HELPER_PATH.read_text(encoding="utf-8")
+
+        self.assertNotIn(
+            'strict_json_load(output / "oci-base-before.stdout")',
+            source,
+        )
+        self.assertNotIn(
+            'strict_json_load(output / "oci-base-after.stdout")',
+            source,
+        )
+        self.assertGreaterEqual(
+            source.count("_same_fd_logged_json_snapshot("),
+            6,
+        )
+        self.assertGreaterEqual(
+            source.count("_validate_oci_context_snapshot("),
+            3,
+        )
+
+    def test_wrapper_requires_pinned_docker_client_and_daemon_identity(
         self,
     ) -> None:
         self.assertTrue(WRAPPER_PATH.is_file(), "OCI wrapper is missing")
@@ -237,6 +398,8 @@ class OciCorrectnessContractTests(unittest.TestCase):
             "select-proven-profile.sh",
             "--check",
             "S1_4X_DOCKER_BIN",
+            "S1_4X_DOCKER_SHA256",
+            "S1_4X_DOCKER_DAEMON_IDENTITY_SHA256",
             "profile_workflow.py",
             "oci-correctness",
             "--network",
@@ -244,9 +407,12 @@ class OciCorrectnessContractTests(unittest.TestCase):
         ):
             with self.subTest(required=required):
                 self.assertIn(required, source)
-        self.assertNotIn("S1_4X_DOCKER_SHA256", source)
-        self.assertNotIn("DOCKER_SHA256_MISMATCH", HELPER_PATH.read_text(encoding="utf-8"))
         helper_source = HELPER_PATH.read_text(encoding="utf-8")
+        self.assertIn("DOCKER_SHA256_MISMATCH", helper_source)
+        self.assertIn(
+            "OCI_DAEMON_IDENTITY_SHA256_MISMATCH",
+            helper_source,
+        )
         for trust_token in (
             "docker context show",
             '"{{json .}}"',
