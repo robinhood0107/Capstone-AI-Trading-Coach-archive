@@ -17,6 +17,7 @@ from gate import (  # noqa: E402
     GateError,
     compare_candidate_results,
     run_candidate,
+    run_transport_case,
     strict_json_load,
     validate_result_batch,
     validate_transport_failure,
@@ -185,6 +186,40 @@ class ProcessContractTests(TestCase):
                 stderr=json.dumps(transport).encode("utf-8"),
                 output_exists=True,
             )
+
+    def test_transport_replay_binds_expected_exit_and_code(self) -> None:
+        temp = self.enterContext(__import__("tempfile").TemporaryDirectory())
+        root = Path(temp)
+        request = root / "invalid-request.json"
+        request.write_text('{"schemaVersion":"wrong"}', encoding="utf-8")
+        fixtures = root / "fixtures"
+        fixtures.mkdir()
+        output = root / "must-not-exist.json"
+
+        def runner(command: list[str], **_: Any) -> subprocess.CompletedProcess[bytes]:
+            return subprocess.CompletedProcess(
+                command,
+                64,
+                b"",
+                json.dumps(
+                    {
+                        "schemaVersion": "s1.4x-transport-error-v1",
+                        "code": "request_invalid",
+                    }
+                ).encode("utf-8"),
+            )
+
+        result = run_transport_case(
+            label="scala/request-wrong-version",
+            command_template=["/candidate", "{protocol_args}"],
+            request_path=request,
+            fixture_root=fixtures,
+            output_path=output,
+            expected_exit=64,
+            expected_code="request_invalid",
+            runner=runner,
+        )
+        self.assertEqual(result["code"], "request_invalid")
 
 
 class ComparatorTests(TestCase):
