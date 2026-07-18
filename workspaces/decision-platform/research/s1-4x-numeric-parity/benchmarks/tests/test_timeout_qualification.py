@@ -122,11 +122,47 @@ def test_command_manifest_requires_precommitted_digest_and_executable_identity(
         )
 
 
+def test_runner_manifest_hash_and_parse_share_one_snapshot(
+    tmp_path: Path,
+) -> None:
+    manifest = _command_manifest()
+    path = tmp_path / "commands.json"
+    digest = _write_manifest(path, manifest)
+    forged = json.loads(json.dumps(manifest))
+    forged["boundaryCommands"]["scala"].extend(["--override", "forged"])
+    replacement = tmp_path / "replacement.json"
+    replacement.write_text(json.dumps(forged), encoding="utf-8")
+    real_sha256_file = runner.sha256_file
+    swapped = False
+
+    def replace_after_hash(candidate: Path) -> str:
+        nonlocal swapped
+        actual = real_sha256_file(candidate)
+        if candidate == path and not swapped:
+            replacement.replace(candidate)
+            swapped = True
+        return actual
+
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setattr(runner, "sha256_file", replace_after_hash)
+        validated = runner._strict_command_manifest(
+            path,
+            expected_sha256=digest,
+            benchmark_subject_commit=COMMIT,
+            candidate_source_commit=COMMIT,
+        )
+
+    assert validated == manifest
+
+
 def test_runner_executes_sealed_verified_bytes_after_supplier_path_replacement(
     tmp_path: Path,
 ) -> None:
     supplied = tmp_path / "wrapper"
-    supplied.write_text("#!/bin/sh\nprintf 'A\\n'\n", encoding="utf-8")
+    supplied.write_text(
+        "#!/usr/bin/bash\nprintf 'A\\n'\n",
+        encoding="utf-8",
+    )
     supplied.chmod(0o700)
     identity = {
         "path": str(supplied),
@@ -135,7 +171,10 @@ def test_runner_executes_sealed_verified_bytes_after_supplier_path_replacement(
 
     with runner._pin_executable(identity, role="test") as pinned:
         replacement = tmp_path / "replacement"
-        replacement.write_text("#!/bin/sh\nprintf 'B\\n'\n", encoding="utf-8")
+        replacement.write_text(
+            "#!/usr/bin/bash\nprintf 'B\\n'\n",
+            encoding="utf-8",
+        )
         replacement.chmod(0o700)
         replacement.replace(supplied)
 

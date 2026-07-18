@@ -20,6 +20,7 @@ from benchmark_commands import (  # noqa: E402
     build_manifest,
     inspect_executable_identity,
     validate_manifest,
+    validate_manifest_file,
     write_manifest_exclusive,
 )
 from prepare_benchmark_commands import _identity  # noqa: E402
@@ -32,9 +33,37 @@ class BenchmarkCommandManifestTests(TestCase):
             "schemaVersion": "s1.4x-benchmark-command-manifest-v2",
             "benchmarkSubjectCommit": "a" * 40,
             "candidateSourceCommit": "a" * 40,
-            "hostValidatorCommand": [executable, "{host_report}"],
+            "hostValidatorCommand": [
+                executable,
+                "--output",
+                "{host_report}",
+                "--allowed-process-root-pid",
+                "{allowed_process_root_pid}",
+            ],
             "boundaryCommands": {
-                boundary: [executable, "{qualification}"]
+                boundary: [
+                    executable,
+                    "--plan",
+                    "{plan}",
+                    "--block-dir",
+                    "{block_dir}",
+                    "--qualification",
+                    "{qualification}",
+                    "--boundary",
+                    boundary,
+                    "--selector",
+                    "{selector_id}",
+                    "--family",
+                    "{family_id}",
+                    "--rotation",
+                    "{rotation_id}",
+                    "--outer-repetition",
+                    "{outer_repetition}",
+                    "--run-id",
+                    "{run_id}",
+                    "--benchmark-subject-commit",
+                    "{benchmark_subject_commit}",
+                ]
                 for boundary in BOUNDARY_IDS
             },
             "allowedExecutables": {
@@ -99,6 +128,145 @@ class BenchmarkCommandManifestTests(TestCase):
                     "boundaries": {boundary: identity for boundary in BOUNDARY_IDS},
                 },
             )
+
+    def test_manifest_rejects_escaped_placeholder_and_extra_argv(self) -> None:
+        executable = Path(sys.executable).resolve()
+        identity = {
+            "path": str(executable),
+            "sha256": hashlib.sha256(executable.read_bytes()).hexdigest(),
+        }
+        manifest = self._manifest_for_identity(identity)
+        manifest["hostValidatorCommand"] = [
+            str(executable),
+            "--output",
+            "{host_report}",
+            "--allowed-process-root-pid",
+            "{allowed_process_root_pid}",
+        ]
+        manifest["boundaryCommands"] = {
+            boundary: [
+                str(executable),
+                "--plan",
+                "{plan}",
+                "--block-dir",
+                "{block_dir}",
+                "--qualification",
+                "{qualification}",
+                "--boundary",
+                boundary,
+                "--selector",
+                "{selector_id}",
+                "--family",
+                "{family_id}",
+                "--rotation",
+                "{rotation_id}",
+                "--outer-repetition",
+                "{outer_repetition}",
+                "--run-id",
+                "{run_id}",
+                "--benchmark-subject-commit",
+                "{benchmark_subject_commit}",
+            ]
+            for boundary in BOUNDARY_IDS
+        }
+        escaped = json.loads(json.dumps(manifest))
+        escaped["boundaryCommands"]["scala"][6] = "{{qualification}}"
+        with self.assertRaisesRegex(
+            CommandManifestError,
+            "BOUNDARY_COMMAND_TEMPLATE_MISMATCH",
+        ):
+            validate_manifest(escaped)
+
+        extra = json.loads(json.dumps(manifest))
+        extra["boundaryCommands"]["haskell"].extend(["--override", "forged"])
+        with self.assertRaisesRegex(
+            CommandManifestError,
+            "BOUNDARY_COMMAND_TEMPLATE_MISMATCH",
+        ):
+            validate_manifest(extra)
+
+    def test_manifest_file_hash_and_parse_share_one_snapshot(self) -> None:
+        executable = Path(sys.executable).resolve()
+        identity = {
+            "path": str(executable),
+            "sha256": hashlib.sha256(executable.read_bytes()).hexdigest(),
+        }
+        manifest = self._manifest_for_identity(identity)
+        manifest["hostValidatorCommand"] = [
+            str(executable),
+            "--output",
+            "{host_report}",
+            "--allowed-process-root-pid",
+            "{allowed_process_root_pid}",
+        ]
+        manifest["boundaryCommands"] = {
+            boundary: [
+                str(executable),
+                "--plan",
+                "{plan}",
+                "--block-dir",
+                "{block_dir}",
+                "--qualification",
+                "{qualification}",
+                "--boundary",
+                boundary,
+                "--selector",
+                "{selector_id}",
+                "--family",
+                "{family_id}",
+                "--rotation",
+                "{rotation_id}",
+                "--outer-repetition",
+                "{outer_repetition}",
+                "--run-id",
+                "{run_id}",
+                "--benchmark-subject-commit",
+                "{benchmark_subject_commit}",
+            ]
+            for boundary in BOUNDARY_IDS
+        }
+        forged = json.loads(json.dumps(manifest))
+        forged["boundaryCommands"]["scala"].extend(["--override", "forged"])
+
+        with tempfile.TemporaryDirectory(dir="/tmp") as directory:
+            path = Path(directory) / "commands.json"
+            path.write_text(json.dumps(manifest), encoding="utf-8")
+            expected = hashlib.sha256(path.read_bytes()).hexdigest()
+            replacement = path.with_name("replacement.json")
+            replacement.write_text(json.dumps(forged), encoding="utf-8")
+            real_hash = hashlib.sha256
+            swapped = False
+
+            def replace_after_hash(candidate: Path) -> str:
+                nonlocal swapped
+                digest = real_hash(candidate.read_bytes()).hexdigest()
+                if not swapped:
+                    replacement.replace(candidate)
+                    swapped = True
+                return digest
+
+            with patch(
+                "benchmark_commands._file_sha256",
+                side_effect=replace_after_hash,
+            ):
+                validated = validate_manifest_file(path, expected)
+
+            self.assertEqual(validated, manifest)
+
+    def test_official_benchmark_wrappers_use_absolute_frozen_tools(self) -> None:
+        numeric_root = INTEGRATION.parent
+        wrappers = [
+            numeric_root / "integration/tools/run-host-validator.sh",
+            numeric_root / "integration/tools/run-python-benchmark-block.sh",
+        ]
+        for wrapper in wrappers:
+            with self.subTest(wrapper=wrapper.name):
+                source = wrapper.read_text(encoding="utf-8")
+                self.assertTrue(source.startswith("#!/usr/bin/bash\n"))
+                self.assertIn("/usr/bin/git", source)
+                self.assertIn("/home/pjjpj/.local/bin/uv", source)
+                self.assertNotIn("command -v", source)
+                self.assertNotIn("S1_4X_UV_BIN", source)
 
         commands["scala"] = [str(executable), "{qualification}", "{qualification}"]
         with self.assertRaisesRegex(
