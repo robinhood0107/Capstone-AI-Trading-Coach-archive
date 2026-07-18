@@ -4,11 +4,15 @@
   "files": {
     "benchmarks/scala/ai/trading/coach/s14x/benchmark/BenchmarkInvocation.scala": {
       "role": "benchmark",
-      "sha256": "5886ff624adb6eb50f140744ceb468bf960dae2eefbda7ef511fa9579811b302"
+      "sha256": "8e8e7e11ab7b46857df243a3f46d3fa301a6564536837310b375aa5cc293be5a"
     },
     "benchmarks/scala/ai/trading/coach/s14x/benchmark/BenchmarkSetupProbeMain.scala": {
       "role": "benchmark",
       "sha256": "d839a6afd4d9815178e14adf81683da7480046bb1c602f920faac38785fe9454"
+    },
+    "benchmarks/scala/ai/trading/coach/s14x/benchmark/JvmForkEvidence.scala": {
+      "role": "benchmark",
+      "sha256": "dbe3d964d2b0916a503afa0ab8082f2bdcb6d020b0c0019810796db17a53b536"
     },
     "benchmarks/scala/s1_4x/benchmarks/classical_path_risk/ClassicalPathRiskBenchmark.scala": {
       "role": "benchmark",
@@ -40,7 +44,7 @@
     },
     "selected-profile.scala": {
       "role": "configuration",
-      "sha256": "78260658189047f9a7b24c2bff766796c2b395554b774c6bbe7d57241e7835b8"
+      "sha256": "42e5f772f82bfbaee73ab134a1dc3ddca4e2d8ebcd1076f77ddbc0c26e739d07"
     },
     "src/main/scala/ai/trading/coach/s14x/core/AdvancedRisk.scala": {
       "role": "main",
@@ -112,7 +116,7 @@
     },
     "src/test/scala/ai/trading/coach/s14x/shell/PropertyEvidenceMain.scala": {
       "role": "test",
-      "sha256": "27c15e8565eaa3fd083d3ba1dd3ddbcca3ae5b1e3e178f0b6fcf6f54e7cafd85"
+      "sha256": "be5527119cb775e8f1f5c3ace7675e967f5af0c70310a179a9c82157a7c461f6"
     }
   },
   "inputSets": {
@@ -123,5 +127,5 @@
     "lint": "files",
     "profileRun": "files"
   },
-  "canonicalManifestSha256": "115d5ce1996e62b2b3ec1551c9600952844d7937a39cb034fef97dcf9190a8f1"
+  "canonicalManifestSha256": "21a92a29e3f075bf2b435c20f90e4d3e1f3432eb20aec33f2fe9908404b3676e"
 }

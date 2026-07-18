@@ -5,12 +5,12 @@
     {
       "featureId": "scala.closed-enum-adt",
       "decision": "ADOPT",
-      "status": "scaffolded"
+      "status": "pending-effective-evidence"
     },
     {
       "featureId": "scala.opaque-validation-boundaries",
       "decision": "ADOPT",
-      "status": "scaffolded"
+      "status": "pending-effective-evidence"
     },
     {
       "featureId": "scala.optimizer-profile-b-c",
@@ -18,9 +18,19 @@
       "status": "pending-qualification"
     },
     {
-      "featureId": "scala.experimental-unsafe-native",
+      "featureId": "scala.local-mutation-hot-kernel",
+      "decision": "CONDITIONAL",
+      "status": "pending-fallback-evidence"
+    },
+    {
+      "featureId": "scala.safe-init-warning",
+      "decision": "PROBE_ONLY",
+      "status": "pending-probe-evidence"
+    },
+    {
+      "featureId": "scala.experimental-and-native-features",
       "decision": "REJECT",
-      "status": "enforced-by-source-policy"
+      "status": "pending-policy-evidence"
     }
   ]
 }
