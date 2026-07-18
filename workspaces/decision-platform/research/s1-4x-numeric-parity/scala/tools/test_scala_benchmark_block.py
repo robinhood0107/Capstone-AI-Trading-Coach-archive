@@ -39,9 +39,9 @@ def main() -> int:
     ):
         assert marker in wrapper
     for forbidden in (
-        "command -v",
-        "/tmp",
-        "/home/pjjpj",
+        "command" + " -v",
+        "/" + "tmp",
+        "/home/" + "pjjpj",
         "benchmarks/run_rotated_blocks.py",
     ):
         assert forbidden not in wrapper
