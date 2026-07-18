@@ -37,7 +37,22 @@ import S14X.Core.Error
 import S14X.Core.ScalarValidation (ensureFinite)
 
 sumVector :: U.Vector Double -> Double
-sumVector = U.foldl' (+) 0.0
+sumVector values =
+  let (total, compensation) =
+        U.foldl'
+          compensatedStep
+          (0.0, 0.0)
+          values
+   in total + compensation
+
+compensatedStep :: (Double, Double) -> Double -> (Double, Double)
+compensatedStep (total, compensation) value =
+  let candidate = total + value
+      correction =
+        if abs total >= abs value
+          then (total - candidate) + value
+          else (value - candidate) + total
+   in (candidate, compensation + correction)
 
 meanVector :: U.Vector Double -> Double
 meanVector values = sumVector values / fromIntegral (U.length values)
@@ -45,8 +60,8 @@ meanVector values = sumVector values / fromIntegral (U.length values)
 sampleVariance :: U.Vector Double -> Double
 sampleVariance values =
   let mean = meanVector values
-      squared = U.foldl' (\total value -> total + (value - mean) * (value - mean)) 0.0 values
-   in squared / fromIntegral (U.length values - 1)
+      squared = U.map (\value -> (value - mean) * (value - mean)) values
+   in sumVector squared / fromIntegral (U.length values - 1)
 
 hf7Quantile :: U.Vector Double -> Double -> Either StableError Double
 hf7Quantile values probability =
@@ -82,7 +97,7 @@ stableWeightedMean values normalizedWeights =
         then Right 0.0
         else
           let normalized =
-                U.sum
+                sumVector
                   (U.zipWith (\value weight -> weight * (value / scale)) values normalizedWeights)
               tolerance = 64.0 * encodeFloat 1 (-52)
            in if normalized < -1.0 - tolerance || normalized > 1.0 + tolerance
