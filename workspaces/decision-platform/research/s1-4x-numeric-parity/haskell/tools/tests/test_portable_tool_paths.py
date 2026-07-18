@@ -125,6 +125,20 @@ class PortableToolPathTests(unittest.TestCase):
                 self.assertIn(f'${{{variable}:?', script)
                 self.assertNotIn(f'${{{variable}:-', script)
 
+    def test_toolchain_accepts_only_the_hash_bound_frozen_dependency_result(
+        self,
+    ) -> None:
+        script = (TOOLS_ROOT / "assert-toolchain.sh").read_text(encoding="utf-8")
+        for token in (
+            "FAIL_FROZEN_DEPENDENCY",
+            "ghc-compatibility-solve-failure.v1.json",
+            "ghc-compatibility-result.v1.json",
+        ):
+            with self.subTest(token=token):
+                self.assertIn(token, script)
+        self.assertNotIn("PENDING_SOLVE", script)
+        self.assertNotIn("ALLOW_PENDING_COMPATIBILITY", script)
+
 
 if __name__ == "__main__":
     unittest.main()
