@@ -18,7 +18,8 @@ tests =
       testCase "formatter and HLint retain the frozen hard gates" formatterAndLintConfiguration,
       testCase
         "weighted autocorrelation uses the compensated sum primitive"
-        weightedAutocorrelationUsesCompensatedSum
+        weightedAutocorrelationUsesCompensatedSum,
+      testCase "component entry modules have unique truthful names" uniqueComponentEntryModules
     ]
 
 noForbiddenForms :: IO ()
@@ -184,6 +185,26 @@ sectionBetween :: String -> String -> String -> Maybe String
 sectionBetween startMarker endMarker content = do
   start <- find (startMarker `isPrefixOf`) (tails content)
   beforeMarker endMarker start
+
+uniqueComponentEntryModules :: IO ()
+uniqueComponentEntryModules = do
+  application <- readFile "app/Main.hs"
+  testEntry <- readFile "test/Main.hs"
+  benchmarkEntry <- readFile "benchmark/Main.hs"
+  package <- readFile "package.yaml"
+  assertBool "application entry module must remain Main" ("module Main (main) where" `isInfixOf` application)
+  assertBool
+    "test entry module must have a unique module-safety identity"
+    ("module S14X.TestMain (main) where" `isInfixOf` testEntry)
+  assertBool
+    "benchmark entry module must have a unique module-safety identity"
+    ("module S14X.BenchmarkMain (main) where" `isInfixOf` benchmarkEntry)
+  assertBool
+    "test component must bind its non-Main entry explicitly"
+    ("-main-is S14X.TestMain.main" `isInfixOf` package)
+  assertBool
+    "benchmark component must bind its non-Main entry explicitly"
+    ("-main-is S14X.BenchmarkMain.main" `isInfixOf` package)
 
 haskellSources :: FilePath -> IO [FilePath]
 haskellSources root = do
