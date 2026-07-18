@@ -976,6 +976,68 @@ def test_measurement_transition_is_exact_and_tamper_evident(
     with pytest.raises(ContractError, match="INVALID_MEASUREMENT_QUALIFICATION"):
         runner._verify_measurement_qualification(path, expected=expected)
 
+
+def test_measurement_qualification_hash_and_parse_share_one_snapshot(
+    tmp_path: Path,
+    plan: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    block = runner.build_schedule(plan)[0]
+    executable_path = Path(sys.executable).absolute()
+    expected = runner._qualification_document(
+        plan=plan,
+        plan_sha256="1" * 64,
+        command_manifest_sha256="2" * 64,
+        benchmark_subject_commit=COMMIT,
+        candidate_source_commit=COMMIT,
+        run_id="run-aba",
+        block=block,
+        host_validity={
+            "artifactPath": "host-validity.json",
+            "sha256": "3" * 64,
+            "status": "PASS",
+            "policySha256": "4" * 64,
+            "portableHostIdSha256": "5" * 64,
+        },
+        executable={
+            "path": str(executable_path),
+            "resolvedPath": str(executable_path.resolve()),
+            "sha256": sha256_file(executable_path),
+        },
+        command=[str(executable_path), "--selector", block.selector_id],
+        measurement_entered=False,
+    )
+    entered = dict(expected)
+    entered["phase"] = "MEASUREMENT"
+    entered["measurementEntered"] = True
+    path = tmp_path / "timeout-qualification.json"
+    runner._write_json_exclusive(path, entered)
+    original = path.read_bytes()
+    forged = dict(entered)
+    forged["measurementEntered"] = False
+    forged_bytes = json.dumps(forged, allow_nan=False).encode("utf-8")
+    original_loader = runner.strict_json_load
+    swap_attempted = False
+
+    def aba_loader(candidate: Path) -> Any:
+        nonlocal swap_attempted
+        if candidate == path:
+            swap_attempted = True
+            path.write_bytes(forged_bytes)
+            parsed = original_loader(candidate)
+            path.write_bytes(original)
+            return parsed
+        return original_loader(candidate)
+
+    monkeypatch.setattr(runner, "strict_json_load", aba_loader)
+    digest = runner._verify_measurement_qualification(
+        path,
+        expected=expected,
+    )
+
+    assert swap_attempted is False
+    assert digest == hashlib.sha256(original).hexdigest()
+
     runner.mark_measurement_entered(path)
     assert runner._verify_measurement_qualification(path, expected=expected) == (
         sha256_file(path)
