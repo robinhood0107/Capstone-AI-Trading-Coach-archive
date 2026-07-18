@@ -10,6 +10,23 @@
     - -XNoGeneralizedNewtypeDeriving
     - -XNoDerivingVia
     - -XNoDeriveAnyClass
+- ignore:
+    name: Use isAsciiUpper
+    within:
+      - S14X.Contract.Process
+- ignore:
+    name: Use isAsciiLower
+    within:
+      - S14X.Contract.Process
+- ignore:
+    name: Use isDigit
+    within:
+      - S14X.Contract.Process
+- ignore:
+    name: Avoid partial function
+    within:
+      - S14X.Core.NumericPrimitives
+      - S14X.PropertyCases
 - modules:
     - name:
         - Control.Monad.IO.Class
@@ -18,16 +35,25 @@
         - Foreign.C
         - Foreign.Ptr
         - GHC.IO.Unsafe
-        - System.Environment
-        - System.IO
         - System.IO.Unsafe
         - System.Random
       within: []
+    - name:
+        - System.Environment
+      within:
+        - Main
+        - S14X.BenchmarkMain
+        - S14X.TestMain
+    - name:
+        - System.IO
+      within:
+        - Main
+        - S14X.AtomicOutputSpec
+        - S14X.Contract.AtomicOutput
 - functions:
     - name:
         - "!!"
         - Control.Exception.throw
-        - Control.Exception.throwIO
         - Data.Either.fromLeft
         - Data.Either.fromRight
         - Data.Maybe.fromJust
@@ -44,7 +70,6 @@
         - read
         - tail
         - throw
-        - throwIO
         - undefined
         - unsafeCoerce
         - unsafeDupablePerformIO
