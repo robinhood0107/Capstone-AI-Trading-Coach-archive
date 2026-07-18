@@ -465,6 +465,52 @@ def test_timeout_termination_has_stable_leaf_when_group_survives_sigkill(
         runner._terminate_process_group(FinishedLeader())
 
 
+def test_sigkill_is_sent_within_one_shared_five_second_term_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = [100.0]
+    signals: list[tuple[int, float]] = []
+
+    class StuckLeader:
+        pid = 12345
+
+        def wait(self, timeout: float | None = None) -> int:
+            raise AssertionError("patched wait helper owns the simulated clock")
+
+    def wait_for_leader(
+        process: runner.WaitableProcess,
+        *,
+        timeout_seconds: float,
+    ) -> bool:
+        clock[0] += timeout_seconds
+        return False
+
+    def wait_for_group(process_group_id: int, timeout_seconds: float) -> bool:
+        clock[0] += timeout_seconds
+        return False
+
+    monkeypatch.setattr(runner.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(runner, "_wait_for_leader", wait_for_leader)
+    monkeypatch.setattr(runner, "_wait_for_process_group_exit", wait_for_group)
+    monkeypatch.setattr(
+        runner,
+        "_signal_process_group",
+        lambda process_group_id, sent_signal: signals.append(
+            (sent_signal, clock[0])
+        ),
+    )
+
+    with pytest.raises(
+        ContractError,
+        match="TIMEOUT_PROCESS_GROUP_SURVIVED_SIGKILL",
+    ):
+        runner._terminate_process_group(StuckLeader())
+
+    assert signals[0] == (signal.SIGTERM, 100.0)
+    assert signals[1][0] == signal.SIGKILL
+    assert signals[1][1] <= 105.0
+
+
 def test_process_group_probe_treats_esrch_as_absent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
