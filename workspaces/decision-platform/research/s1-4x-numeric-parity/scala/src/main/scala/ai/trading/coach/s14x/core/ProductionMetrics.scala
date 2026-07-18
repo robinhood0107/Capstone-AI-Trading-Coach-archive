@@ -40,7 +40,7 @@ object ProductionMetrics:
   /** 양수 가격 경로와 양의 연환산 주기를 받아 기하 연환산 수익률을 계산한다. */
   def cagr(
       prices: Vector[Double],
-      periodsPerYear: BigInt = BigInt(252),
+      periodsPerYear: BigInt = BigInt(252)
   ): Either[StableError, Double] =
     for
       values <- Validation.productionSequence(prices, minimumLength = 2)
@@ -60,12 +60,14 @@ object ProductionMetrics:
   def realizedVolatility(logReturns: Vector[Double]): Either[StableError, Double] =
     Validation
       .productionSequence(logReturns, minimumLength = 2)
-      .flatMap(values => Validation.finiteProduction(NumericPrimitives.sampleStandardDeviation(values)))
+      .flatMap(values =>
+        Validation.finiteProduction(NumericPrimitives.sampleStandardDeviation(values))
+      )
 
   /** 로그수익률 표본 변동성을 양의 연환산 주기의 제곱근으로 확장한다. */
   def annualizedVolatility(
       logReturns: Vector[Double],
-      periodsPerYear: BigInt = BigInt(252),
+      periodsPerYear: BigInt = BigInt(252)
   ): Either[StableError, Double] =
     for
       values <- Validation.productionSequence(logReturns, minimumLength = 2)
@@ -95,7 +97,7 @@ object ProductionMetrics:
   def sharpeRatio(
       returns: Vector[Double],
       riskFreeRate: Double = 0.0,
-      periodsPerYear: BigInt = BigInt(252),
+      periodsPerYear: BigInt = BigInt(252)
   ): Either[StableError, Double] =
     for
       values <- Validation.productionSequence(returns, minimumLength = 2)
@@ -118,7 +120,7 @@ object ProductionMetrics:
   def sortinoRatio(
       returns: Vector[Double],
       targetReturn: Double = 0.0,
-      periodsPerYear: BigInt = BigInt(252),
+      periodsPerYear: BigInt = BigInt(252)
   ): Either[StableError, Double] =
     for
       values <- Validation.productionSequence(returns, minimumLength = 2)
@@ -153,7 +155,7 @@ object ProductionMetrics:
   /** 수익률 표본과 신뢰수준을 받아 frozen 선형 보간 규칙의 historical VaR를 반환한다. */
   def historicalVar(
       returns: Vector[Double],
-      confidence: Double = 0.95,
+      confidence: Double = 0.95
   ): Either[StableError, Double] =
     for
       values <- Validation.productionSequence(returns, minimumLength = 2)
@@ -164,7 +166,7 @@ object ProductionMetrics:
   /** 수익률 표본과 신뢰수준을 받아 VaR 이하 관측치 평균인 historical CVaR를 반환한다. */
   def historicalCvar(
       returns: Vector[Double],
-      confidence: Double = 0.95,
+      confidence: Double = 0.95
   ): Either[StableError, Double] =
     for
       values <- Validation.productionSequence(returns, minimumLength = 2)

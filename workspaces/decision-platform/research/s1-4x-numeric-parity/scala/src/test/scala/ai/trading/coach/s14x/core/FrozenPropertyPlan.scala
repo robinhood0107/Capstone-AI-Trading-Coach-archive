@@ -60,7 +60,7 @@ object FrozenPropertyPlan extends Properties("s1.4x-frozen-property-plan"):
 
   registered("volatility.translation-and-scale") = forAll(
     Gen.choose(-10.0, 10.0),
-    Gen.choose(0.1, 10.0),
+    Gen.choose(0.1, 10.0)
   ) { (shift, scale) =>
     val values = Vector(-0.2, 0.0, 0.1, 0.3)
     val baseline = right(ProductionMetrics.realizedVolatility(values))
@@ -83,7 +83,7 @@ object FrozenPropertyPlan extends Properties("s1.4x-frozen-property-plan"):
 
   registered("var-cvar.shift-and-positive-scale") = forAll(
     Gen.choose(-2.0, 2.0),
-    Gen.choose(0.1, 10.0),
+    Gen.choose(0.1, 10.0)
   ) { (shift, scale) =>
     val values = Vector(-0.1, -0.05, 0.0, 0.05, 0.1)
     val shiftedScaled = values.map(value => value * scale + shift)
@@ -113,16 +113,15 @@ object FrozenPropertyPlan extends Properties("s1.4x-frozen-property-plan"):
     )
   }
 
-  registered("realized.scale-laws") = forAll(Gen.choose(-10.0, 10.0).suchThat(_ != 0.0)) {
-    scale =>
-      val values = Vector(0.01, -0.02, 0.03)
-      val rv = right(AdvancedRisk.realizedVariance(values))
-      val scaledRv = right(AdvancedRisk.realizedVariance(values.map(_ * scale)))
-      val rvol = right(AdvancedRisk.realizedVolatilityIntraday(values))
-      val scaledRvol =
-        right(AdvancedRisk.realizedVolatilityIntraday(values.map(_ * scale)))
-      rv.zip(scaledRv).forall((one, two) => close(one * scale * scale, two)) &&
-      rvol.zip(scaledRvol).forall((one, two) => close(one * math.abs(scale), two))
+  registered("realized.scale-laws") = forAll(Gen.choose(-10.0, 10.0).suchThat(_ != 0.0)) { scale =>
+    val values = Vector(0.01, -0.02, 0.03)
+    val rv = right(AdvancedRisk.realizedVariance(values))
+    val scaledRv = right(AdvancedRisk.realizedVariance(values.map(_ * scale)))
+    val rvol = right(AdvancedRisk.realizedVolatilityIntraday(values))
+    val scaledRvol =
+      right(AdvancedRisk.realizedVolatilityIntraday(values.map(_ * scale)))
+    rv.zip(scaledRv).forall((one, two) => close(one * scale * scale, two)) &&
+    rvol.zip(scaledRvol).forall((one, two) => close(one * math.abs(scale), two))
   }
 
   registered("lo.order-sensitive") = forAll(repetition) { _ =>
@@ -147,7 +146,7 @@ object FrozenPropertyPlan extends Properties("s1.4x-frozen-property-plan"):
       BigInt(2),
       "daily",
       "a" * 64,
-      BigInt(1),
+      BigInt(1)
     )
 
   registered("dsr.benchmark-equality") = forAll(repetition) { _ =>
@@ -159,7 +158,7 @@ object FrozenPropertyPlan extends Properties("s1.4x-frozen-property-plan"):
         3.0,
         BigInt(2),
         1.0,
-        provenance,
+        provenance
       )
     ).exists(close(_, 0.5))
   }
@@ -173,7 +172,7 @@ object FrozenPropertyPlan extends Properties("s1.4x-frozen-property-plan"):
         3.0,
         BigInt(3),
         1.0,
-        provenance,
+        provenance
       )
       .left
       .toOption
@@ -188,14 +187,14 @@ object FrozenPropertyPlan extends Properties("s1.4x-frozen-property-plan"):
       AdvancedRisk.kupiecUnconditionalCoverageTest(
         alternatingRealized,
         alternatingForecast,
-        0.6,
+        0.6
       )
     )
     val second = right(
       AdvancedRisk.kupiecUnconditionalCoverageTest(
         alternatingRealized.reverse,
         alternatingForecast.reverse,
-        0.6,
+        0.6
       )
     )
     first == second
@@ -206,7 +205,7 @@ object FrozenPropertyPlan extends Properties("s1.4x-frozen-property-plan"):
       AdvancedRisk.kupiecUnconditionalCoverageTest(
         Vector(1.0, 2.0),
         Vector(1.0, 1.0),
-        0.5,
+        0.5
       )
     ).exists(_.exceptions == 1)
   }
@@ -215,13 +214,13 @@ object FrozenPropertyPlan extends Properties("s1.4x-frozen-property-plan"):
     val first = right(
       AdvancedRisk.christoffersenIndependenceTest(
         alternatingRealized,
-        alternatingForecast,
+        alternatingForecast
       )
     )
     val second = right(
       AdvancedRisk.christoffersenIndependenceTest(
         Vector(0.0, 0.0, 2.0, 2.0, 0.0),
-        alternatingForecast,
+        alternatingForecast
       )
     )
     first.zip(second).forall((one, two) => !close(one.statistic, two.statistic))
@@ -232,14 +231,14 @@ object FrozenPropertyPlan extends Properties("s1.4x-frozen-property-plan"):
       AdvancedRisk.kupiecUnconditionalCoverageTest(
         alternatingRealized,
         alternatingForecast,
-        0.6,
+        0.6
       )
     )
     val second = right(
       AdvancedRisk.kupiecUnconditionalCoverageTest(
         alternatingRealized.map(_ * scale),
         alternatingForecast.map(_ * scale),
-        0.6,
+        0.6
       )
     )
     first == second
@@ -250,7 +249,7 @@ object FrozenPropertyPlan extends Properties("s1.4x-frozen-property-plan"):
       AdvancedRisk.kupiecUnconditionalCoverageTest(
         alternatingRealized,
         alternatingForecast,
-        0.6,
+        0.6
       )
     ).exists(result =>
       result.statistic >= 0.0 &&
@@ -265,12 +264,12 @@ object FrozenPropertyPlan extends Properties("s1.4x-frozen-property-plan"):
       AdvancedRisk.christoffersenConditionalCoverageTest(
         alternatingRealized,
         alternatingForecast,
-        0.6,
+        0.6
       )
     ).exists(result =>
       close(
         result.statistic,
-        result.unconditionalComponentStatistic + result.independenceComponentStatistic,
+        result.unconditionalComponentStatistic + result.independenceComponentStatistic
       )
     )
   }

@@ -11,7 +11,7 @@ import scala.util.control.NonFatal
 
 final case class DecodedBinaryArray(
     values: Vector[Double],
-    expectedSemanticError: Option[String],
+    expectedSemanticError: Option[String]
 ) derives CanEqual
 
 object BinaryArrayReader:
@@ -29,7 +29,7 @@ object BinaryArrayReader:
     "byteLength",
     "sha256",
     "generator",
-    "expectedSemanticError",
+    "expectedSemanticError"
   )
   private val SafeBasename = "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$".r
   private val Identifier = "^[a-z0-9](?:[a-z0-9._:-]{0,126}[a-z0-9])?$".r
@@ -61,7 +61,7 @@ object BinaryArrayReader:
               "generatorVersion",
               "distribution",
               "parameters",
-              "chunkLength",
+              "chunkLength"
             )
           val seed = generator.path("seed")
           val distribution = generator.path("distribution")
@@ -86,21 +86,20 @@ object BinaryArrayReader:
           fields == expected &&
           generator.path("generatorVersion").textValue() ==
             "s1.4x-literal-ieee754-bits-v1" &&
-          payload.isTextual &&
-          payload.textValue().length >= 2 &&
-          payload.textValue().length <= 1024 &&
-          LiteralPayload.matches(payload.textValue())
+            payload.isTextual &&
+            payload.textValue().length >= 2 &&
+            payload.textValue().length <= 1024 &&
+            LiteralPayload.matches(payload.textValue())
         case _ => false
 
-  /**
-   * manifest path/hash/shape를 모두 검증한 뒤에만 little-endian binary를 immutable Vector로
-   * 노출한다. hash/length/endian failure는 numeric error가 아니라 exit 65 소유다.
-   */
+  /** manifest path/hash/shape를 모두 검증한 뒤에만 little-endian binary를 immutable Vector로 노출한다.
+    * hash/length/endian failure는 numeric error가 아니라 exit 65 소유다.
+    */
   def read(
       descriptor: JsonNode,
       fixtureRoot: Path,
       fixtureId: String,
-      argumentName: String,
+      argumentName: String
   ): Either[TransportError, DecodedBinaryArray] =
     val descriptorFields = descriptor.fieldNames().asScala.toSet
     val manifestName = descriptor.path("manifestFile")
@@ -116,7 +115,7 @@ object BinaryArrayReader:
             TransportError(
               "manifest_invalid",
               fixtureId = Some(fixtureId),
-              field = Some("manifestFile"),
+              field = Some("manifestFile")
             )
           )
         case Some(manifestPath) =>
@@ -154,9 +153,11 @@ object BinaryArrayReader:
               val shapeValid =
                 shape.isArray &&
                   shape.size() == 1 &&
-                  shape.elements().asScala.toVector.forall(node =>
-                    node.isIntegralNumber && node.bigIntegerValue().signum() > 0
-                  )
+                  shape
+                    .elements()
+                    .asScala
+                    .toVector
+                    .forall(node => node.isIntegralNumber && node.bigIntegerValue().signum() > 0)
               val integralValid =
                 count.isIntegralNumber &&
                   byteLength.isIntegralNumber
@@ -175,7 +176,10 @@ object BinaryArrayReader:
                 val expectedCount = BigInt(count.bigIntegerValue())
                 val expectedLength = BigInt(byteLength.bigIntegerValue())
                 val shapeCount =
-                  shape.elements().asScala.toVector
+                  shape
+                    .elements()
+                    .asScala
+                    .toVector
                     .map(node => BigInt(node.bigIntegerValue()))
                     .foldLeft(BigInt(1))(_ * _)
                 if expectedCount != shapeCount ||

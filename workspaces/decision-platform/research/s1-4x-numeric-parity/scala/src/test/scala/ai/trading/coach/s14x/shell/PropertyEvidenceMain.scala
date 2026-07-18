@@ -16,10 +16,9 @@ import org.scalacheck.Test
 import org.scalacheck.rng.Seed
 import scala.jdk.CollectionConverters.*
 
-/**
- * frozen property를 직접 실행하고 ScalaCheck Result에서 얻은 count만 evidence로 기록한다.
- * wrapper나 integration gate가 성공 횟수를 추정하거나 console text를 다시 해석하지 않는다.
- */
+/** frozen property를 직접 실행하고 ScalaCheck Result에서 얻은 count만 evidence로 기록한다. wrapper나 integration
+  * gate가 성공 횟수를 추정하거나 console text를 다시 해석하지 않는다.
+  */
 object PropertyEvidenceMain:
   private val Implementation = "scala-3.8.4-jvm25"
   private val Sha256Pattern = "^[0-9a-f]{64}$".r
@@ -30,7 +29,7 @@ object PropertyEvidenceMain:
       s1Root: Path,
       profile: String,
       commandArgvSha256: String,
-      runnerPath: Path,
+      runnerPath: Path
   )
 
   private final case class SeedExecution(
@@ -41,7 +40,7 @@ object PropertyEvidenceMain:
       seed: Long,
       replayToken: String,
       shrinks: Int,
-      status: String,
+      status: String
   )
 
   private final case class PropertyExecution(
@@ -51,7 +50,7 @@ object PropertyEvidenceMain:
       attempted: Int,
       shrinks: Int,
       seedExecutions: Vector[SeedExecution],
-      status: String,
+      status: String
   )
 
   private def parseCli(arguments: Vector[String]): Either[String, Cli] =
@@ -73,8 +72,7 @@ object PropertyEvidenceMain:
       else if !Files.isDirectory(s1Root) ||
         !Files.isRegularFile(runnerPath) ||
         Files.isSymbolicLink(runnerPath)
-      then
-        Left("property evidence input path mismatch")
+      then Left("property evidence input path mismatch")
       else Right(Cli(outputDir, s1Root, profile, commandSha, runnerPath))
 
   private def sha256(path: Path): String =
@@ -95,16 +93,18 @@ object PropertyEvidenceMain:
         scalaRoot.resolve("selected-profile.scala"),
         scalaRoot.resolve("src/main/scala"),
         scalaRoot.resolve("src/test/scala"),
-        scalaRoot.resolve("benchmarks"),
+        scalaRoot.resolve("benchmarks")
       )
-    val files = roots.flatMap { root =>
-      if Files.isRegularFile(root) then Vector(root)
-      else if Files.isDirectory(root) then
-        val stream = Files.walk(root)
-        try stream.iterator().asScala.filter(Files.isRegularFile(_)).toVector
-        finally stream.close()
-      else Vector.empty
-    }.sortBy(path => scalaRoot.relativize(path).toString.replace('\\', '/'))
+    val files = roots
+      .flatMap { root =>
+        if Files.isRegularFile(root) then Vector(root)
+        else if Files.isDirectory(root) then
+          val stream = Files.walk(root)
+          try stream.iterator().asScala.filter(Files.isRegularFile(_)).toVector
+          finally stream.close()
+        else Vector.empty
+      }
+      .sortBy(path => scalaRoot.relativize(path).toString.replace('\\', '/'))
     val digest = MessageDigest.getInstance("SHA-256")
     files.foreach { path =>
       val relative =
@@ -121,16 +121,16 @@ object PropertyEvidenceMain:
 
   private def shrinks(result: Test.Result): Int =
     result.status match
-      case failed: Test.Failed        => failed.args.map(_.shrinks).sum
+      case failed: Test.Failed           => failed.args.map(_.shrinks).sum
       case exception: Test.PropException => exception.args.map(_.shrinks).sum
-      case proved: Test.Proved        => proved.args.map(_.shrinks).sum
-      case _                          => 0
+      case proved: Test.Proved           => proved.args.map(_.shrinks).sum
+      case _                             => 0
 
   private def executeSeed(
       property: Prop,
       seedValue: Long,
       seedIndex: Int,
-      minimumSuccessful: Int,
+      minimumSuccessful: Int
   ): SeedExecution =
     val seed = Seed(seedValue)
     val parameters =
@@ -155,14 +155,14 @@ object PropertyEvidenceMain:
       seedValue,
       seed.toBase64,
       shrinks(result),
-      status,
+      status
     )
 
   private def executeProperty(
       name: String,
       property: Prop,
       seeds: Vector[Long],
-      minimumSuccessfulPerSeed: Int,
+      minimumSuccessfulPerSeed: Int
   ): PropertyExecution =
     val seedExecutions = seeds.zipWithIndex.map { case (seed, index) =>
       executeSeed(property, seed, index, minimumSuccessfulPerSeed)
@@ -186,7 +186,7 @@ object PropertyEvidenceMain:
       attempted,
       shrinkCount,
       seedExecutions,
-      status,
+      status
     )
 
   private def seedNode(value: SeedExecution): ObjectNode =
@@ -219,7 +219,7 @@ object PropertyEvidenceMain:
 
   private def propertyArray(
       executions: Vector[PropertyExecution],
-      detailed: Boolean,
+      detailed: Boolean
   ): ArrayNode =
     executions.foldLeft(ContractDecoder.mapper.createArrayNode()) { (array, execution) =>
       array.add(propertyNode(execution, detailed))
@@ -235,7 +235,12 @@ object PropertyEvidenceMain:
         Files.readString(s1Root.resolve("contract/error-registry.v1.json"))
       )
     val expectedFunctions =
-      functionRegistry.path("entries").elements().asScala.toVector.map(_.path("functionId").textValue())
+      functionRegistry
+        .path("entries")
+        .elements()
+        .asScala
+        .toVector
+        .map(_.path("functionId").textValue())
     val actualFunctions = FunctionId.values.toVector.map(_.wire)
     val functionStatus = expectedFunctions == actualFunctions && expectedFunctions.size == 20
     val expectedErrors = errorRegistry.path("entries").elements().asScala.toVector
@@ -303,7 +308,7 @@ object PropertyEvidenceMain:
         minimumSuccessful == 1000 &&
         maximumDiscarded == 100 &&
         minimumSuccessfulPerSeed == 42 &&
-      seeds.size == 24 &&
+        seeds.size == 24 &&
         seeds.distinct.size == seeds.size &&
         expectedIds.size == 25 &&
         registeredIds == expectedIds &&
@@ -349,10 +354,13 @@ object PropertyEvidenceMain:
 
     Files.createDirectories(cli.outputDir)
     writeExclusive(cli.outputDir.resolve("scala-property-report.v1.json"), propertyReport)
-    writeExclusive(cli.outputDir.resolve("scala-registry-report.v1.json"), registryReport(cli.s1Root))
+    writeExclusive(
+      cli.outputDir.resolve("scala-registry-report.v1.json"),
+      registryReport(cli.s1Root)
+    )
     writeExclusive(
       cli.outputDir.resolve("scala-property-execution-evidence.v1.json"),
-      executionReport,
+      executionReport
     )
     exitCode
 

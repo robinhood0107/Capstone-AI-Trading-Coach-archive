@@ -4,11 +4,11 @@
   "files": {
     "benchmarks/scala/ai/trading/coach/s14x/benchmark/BenchmarkInvocation.scala": {
       "role": "benchmark",
-      "sha256": "d3b2ceb83ae48bb4e7f5e9c8b8404189af35599229d3b2af9d27b1b6e1e7cf78"
+      "sha256": "5886ff624adb6eb50f140744ceb468bf960dae2eefbda7ef511fa9579811b302"
     },
     "benchmarks/scala/ai/trading/coach/s14x/benchmark/BenchmarkSetupProbeMain.scala": {
       "role": "benchmark",
-      "sha256": "55811cba582a6e45b941e9e303a2256ae5a1e25e0f6aa0cb24af81562bf19855"
+      "sha256": "d839a6afd4d9815178e14adf81683da7480046bb1c602f920faac38785fe9454"
     },
     "benchmarks/scala/s1_4x/benchmarks/classical_path_risk/ClassicalPathRiskBenchmark.scala": {
       "role": "benchmark",
@@ -44,19 +44,19 @@
     },
     "src/main/scala/ai/trading/coach/s14x/core/AdvancedRisk.scala": {
       "role": "main",
-      "sha256": "1c8ef646aadb69038fe8d6c23fcae0a17446bf60fd908a9f9b782120b66b95b2"
+      "sha256": "042df59cd846fb8f7de59fd6e8bdacc925d4371bc12f961d42bfda7010579b7c"
     },
     "src/main/scala/ai/trading/coach/s14x/core/Models.scala": {
       "role": "main",
-      "sha256": "7e0fbc60dc2d364885e5d8a41d95595a03264ecc6529d66887d9d906d4175951"
+      "sha256": "c01501bd9769a7cb596bcf41292f362c28d537dbedd89028951da5544fc9b0da"
     },
     "src/main/scala/ai/trading/coach/s14x/core/NumericPrimitives.scala": {
       "role": "main",
-      "sha256": "60d84eaaa822d7347b98c06a4de42dbe169054b98f256e90a311e6b78b65eb8b"
+      "sha256": "86c5dff855377188c7fe11eb9708b2c2443ce42f1ef0402764677334507a31bf"
     },
     "src/main/scala/ai/trading/coach/s14x/core/ProductionMetrics.scala": {
       "role": "main",
-      "sha256": "530be7b00348b082d05348e4c4c6da9c3978a7b080ccf62aa5c8c939ad12c7fa"
+      "sha256": "bd8a187fa436a44820c1c67c6fa269ee62eaa4cd4e32a1b23e7f552846a3593d"
     },
     "src/main/scala/ai/trading/coach/s14x/core/StableError.scala": {
       "role": "main",
@@ -64,23 +64,23 @@
     },
     "src/main/scala/ai/trading/coach/s14x/core/Validation.scala": {
       "role": "main",
-      "sha256": "85fa0505fb89e4270a9ebd138f781c28c978038ecb51ff72469a5da1e9e7515d"
+      "sha256": "c583d0aab4f272116e110634edd82867b9b7f2c33253421ae3683747af834437"
     },
     "src/main/scala/ai/trading/coach/s14x/shell/BinaryArrayReader.scala": {
       "role": "main",
-      "sha256": "9270e86a6c5ded04b7ebd2cbea30d0524f5929a205db74b9bbd4c0a6be1fff5b"
+      "sha256": "570b9da6917c64d3c00956af54d3e44645a3b2cc524aa341f256af1af372c3d2"
     },
     "src/main/scala/ai/trading/coach/s14x/shell/CandidateRunner.scala": {
       "role": "main",
-      "sha256": "46af07ab843a666624323ab416992aaf1fd6304070ffb58d9dc9d415782afc03"
+      "sha256": "7ecc9d5dec0660f7ec3aed08894c2ec127074d95d1197528cf1f453037aed164"
     },
     "src/main/scala/ai/trading/coach/s14x/shell/ContractDecoder.scala": {
       "role": "main",
-      "sha256": "1f12b0caef246ef9904a0a315633531d791298dd1b124731fa29600e26b160c9"
+      "sha256": "2c9b739f444014b3255c423162cafebac87a0d2cff4f1635f993d37384e29865"
     },
     "src/main/scala/ai/trading/coach/s14x/shell/JsonSupport.scala": {
       "role": "main",
-      "sha256": "a126dd5cca68d144ca3037cc693c3aa5b49362cf2de0da25a113acf9ebc9854d"
+      "sha256": "cd7c99a6cfcbabb447523c3fff5cafe4cb6f31fc98841439addff9b6a64b72e1"
     },
     "src/main/scala/ai/trading/coach/s14x/shell/Main.scala": {
       "role": "main",
@@ -92,7 +92,7 @@
     },
     "src/test/scala/ai/trading/coach/s14x/core/FrozenPropertyPlan.scala": {
       "role": "test",
-      "sha256": "66a2f739f47a2bb6dd65fc4671c1f7f1cd30e3f5a3f177a1b388315c42390b04"
+      "sha256": "7d322e6ab70536c02e2ef1fe50de5c6cccd359f642a342ca6209799fd5d449b5"
     },
     "src/test/scala/ai/trading/coach/s14x/core/NumericPropertiesSuite.scala": {
       "role": "test",
@@ -112,7 +112,7 @@
     },
     "src/test/scala/ai/trading/coach/s14x/shell/PropertyEvidenceMain.scala": {
       "role": "test",
-      "sha256": "b7f69e7960447183bcf8ca4bebba8ce570f7992a931b0aa8c3e711db54d3662d"
+      "sha256": "27c15e8565eaa3fd083d3ba1dd3ddbcca3ae5b1e3e178f0b6fcf6f54e7cafd85"
     }
   },
   "inputSets": {
@@ -123,5 +123,5 @@
     "lint": "files",
     "profileRun": "files"
   },
-  "canonicalManifestSha256": "41f8673c23752e7cab0e758fc3aa7d5c97172e34b7ebd74d040f745cb03a5a2f"
+  "canonicalManifestSha256": "115d5ce1996e62b2b3ec1551c9600952844d7937a39cb034fef97dcf9190a8f1"
 }

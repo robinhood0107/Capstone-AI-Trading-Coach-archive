@@ -20,10 +20,9 @@ import java.security.MessageDigest
 import scala.jdk.CollectionConverters.*
 import scala.util.control.NonFatal
 
-/**
- * 한 JMH process가 실행할 frozen case와 검증 완료 입력이다. plan/manifest/hash/decode는
- * companion setup에서 끝나고 `run`에는 numeric kernel과 결과 강제 평가만 남는다.
- */
+/** 한 JMH process가 실행할 frozen case와 검증 완료 입력이다. plan/manifest/hash/decode는 companion setup에서 끝나고
+  * `run`에는 numeric kernel과 결과 강제 평가만 남는다.
+  */
 final class BenchmarkInvocation private (
     prepared: Option[BenchmarkInvocation.PreparedCase]
 ):
@@ -53,7 +52,7 @@ final class BenchmarkInvocation private (
         result.observations,
         result.exceptions,
         result.degreesOfFreedom,
-        result.significance,
+        result.significance
       )
     ) +
       result.transitions.n00.toDouble +
@@ -71,7 +70,7 @@ final class BenchmarkInvocation private (
         result.exceptions,
         result.degreesOfFreedom,
         result.significance,
-        result.transitions,
+        result.transitions
       )
     ) +
       result.conditionedObservations.toDouble +
@@ -82,8 +81,8 @@ final class BenchmarkInvocation private (
   private def runPrepared(value: PreparedCase): Double =
     val arguments = value.arguments
     value.functionId match
-      case "simple_returns" => vector(ProductionMetrics.simpleReturns(value.prices))
-      case "log_returns" => vector(ProductionMetrics.logReturns(value.prices))
+      case "simple_returns"    => vector(ProductionMetrics.simpleReturns(value.prices))
+      case "log_returns"       => vector(ProductionMetrics.logReturns(value.prices))
       case "cumulative_return" =>
         scalar(ProductionMetrics.cumulativeReturn(value.returns))
       case "cagr" =>
@@ -94,7 +93,7 @@ final class BenchmarkInvocation private (
         scalar(
           ProductionMetrics.annualizedVolatility(
             value.returns,
-            arguments.periodsPerYear,
+            arguments.periodsPerYear
           )
         )
       case "max_drawdown" => scalar(ProductionMetrics.maxDrawdown(value.prices))
@@ -103,7 +102,7 @@ final class BenchmarkInvocation private (
           ProductionMetrics.sharpeRatio(
             value.returns,
             arguments.riskFreeRate,
-            arguments.periodsPerYear,
+            arguments.periodsPerYear
           )
         )
       case "sortino_ratio" =>
@@ -111,7 +110,7 @@ final class BenchmarkInvocation private (
           ProductionMetrics.sortinoRatio(
             value.returns,
             arguments.targetReturn,
-            arguments.periodsPerYear,
+            arguments.periodsPerYear
           )
         )
       case "historical_var" =>
@@ -122,7 +121,7 @@ final class BenchmarkInvocation private (
         scalar(
           AdvancedRisk.historicalExpectedShortfall(
             value.returns,
-            arguments.confidence,
+            arguments.confidence
           )
         )
       case "realized_variance" =>
@@ -134,7 +133,7 @@ final class BenchmarkInvocation private (
           AdvancedRisk.loAdjustedSharpeRatio(
             value.returns,
             arguments.aggregationPeriods,
-            arguments.riskFreeRate,
+            arguments.riskFreeRate
           )
         )
       case "probabilistic_sharpe_ratio" =>
@@ -145,24 +144,23 @@ final class BenchmarkInvocation private (
               arguments.benchmarkSharpe,
               arguments.sampleSize,
               arguments.skewness,
-              arguments.kurtosis,
+              arguments.kurtosis
             )
           )
         }
       case "deflated_sharpe_ratio" =>
-        value.trialInputs.foldLeft(0.0) {
-          case (sum, (observed, trialCount, provenance)) =>
-            sum + scalar(
-              AdvancedRisk.deflatedSharpeRatio(
-                observed,
-                arguments.sampleSize,
-                arguments.skewness,
-                arguments.kurtosis,
-                trialCount,
-                arguments.sharpeEstimateVariance,
-                provenance,
-              )
+        value.trialInputs.foldLeft(0.0) { case (sum, (observed, trialCount, provenance)) =>
+          sum + scalar(
+            AdvancedRisk.deflatedSharpeRatio(
+              observed,
+              arguments.sampleSize,
+              arguments.skewness,
+              arguments.kurtosis,
+              trialCount,
+              arguments.sharpeEstimateVariance,
+              provenance
             )
+          )
         }
       case "kupiec_unconditional_coverage_test" =>
         value.coverage.foldLeft(0.0) { case (sum, (realized, forecast)) =>
@@ -171,7 +169,7 @@ final class BenchmarkInvocation private (
               realized,
               forecast,
               arguments.confidence,
-              arguments.significance,
+              arguments.significance
             )
             .fold(_ => Double.NaN, likelihood)
         }
@@ -181,7 +179,7 @@ final class BenchmarkInvocation private (
             .christoffersenIndependenceTest(
               realized,
               forecast,
-              arguments.significance,
+              arguments.significance
             )
             .fold(_ => Double.NaN, independence)
         }
@@ -192,16 +190,15 @@ final class BenchmarkInvocation private (
               realized,
               forecast,
               arguments.confidence,
-              arguments.significance,
+              arguments.significance
             )
             .fold(_ => Double.NaN, conditional)
         }
       case _ => Double.NaN
 
-  /**
-   * Setup에서 입력 검증과 한 번의 강제 평가가 모두 성공해야 fork가 timing으로 진입한다.
-   * 실패 시 process exit 70으로 닫아 JMH가 유효한 숫자를 만들지 못하게 한다.
-   */
+  /** Setup에서 입력 검증과 한 번의 강제 평가가 모두 성공해야 fork가 timing으로 진입한다. 실패 시 process exit 70으로 닫아 JMH가 유효한 숫자를
+    * 만들지 못하게 한다.
+    */
   def requireValidSetup(): Unit =
     // JMH setup의 강제 평가도 timing 밖 실패 경계다. numeric kernel이 예외를 내면
     // 유효한 score를 만들지 않고 fork 자체를 exit 70으로 닫는다.
@@ -233,7 +230,7 @@ object BenchmarkInvocation:
       manifestSha256: String,
       fixtureId: String,
       argumentName: String,
-      maximumCount: Int,
+      maximumCount: Int
   )
 
   private val Prices = FixtureSpec(
@@ -241,33 +238,33 @@ object BenchmarkInvocation:
     "778abae4d621653b448a40b2b854cdf0f2e6fc63b7f439bdde96aaba9b83e7b5",
     "large-prices-n100000",
     "prices",
-    100000,
+    100000
   )
   private val Returns = FixtureSpec(
     "large-returns-n100000.manifest.json",
     "10000aaf12ae80ba5d813ebf3012753d142088df19742e90a52467ca2c93f99a",
     "large-returns-n100000",
     "returns",
-    100000,
+    100000
   )
   private val CoverageRealized = FixtureSpec(
     "large-coverage-realized-losses-n3200000.manifest.json",
     "68b5c6c8e2eb5f502e7297ffdf63b3b635cce9131e27e37dfd1fb578a5e784b8",
     "large-coverage-realized-losses-n3200000",
     "realized_losses",
-    3200000,
+    3200000
   )
   private val CoverageForecast = FixtureSpec(
     "large-coverage-forecast-var-n3200000.manifest.json",
     "f4c2eeab713a948bfd645dcd43457c0a90c38340f4e66043a8a622f452797142",
     "large-coverage-forecast-var-n3200000",
     "forecast_vars",
-    3200000,
+    3200000
   )
 
   private final case class TrialMix(
       evaluationCount: Int,
-      trialCount: BigInt,
+      trialCount: BigInt
   )
 
   private final case class FunctionArguments(
@@ -283,7 +280,7 @@ object BenchmarkInvocation:
       kurtosis: Double,
       sharpeEstimateVariance: Double,
       trialCountMix: Vector[TrialMix],
-      trialCountProvenance: String,
+      trialCountProvenance: String
   )
 
   private final case class PlanCase(
@@ -294,7 +291,7 @@ object BenchmarkInvocation:
       vectorLength: Int,
       batchSize: Int,
       logicalOperationsPerInvocation: Int,
-      functionArguments: FunctionArguments,
+      functionArguments: FunctionArguments
   )
 
   private final case class PreparedCase(
@@ -303,7 +300,7 @@ object BenchmarkInvocation:
       returns: Vector[Double],
       observedSharpes: Vector[Double],
       trialInputs: Vector[(Double, BigInt, TrialProvenance)],
-      coverage: Vector[(Vector[Double], Vector[Double])],
+      coverage: Vector[(Vector[Double], Vector[Double])]
   ):
     val functionId: String = planCase.functionId
     val arguments: FunctionArguments = planCase.functionArguments
@@ -325,7 +322,7 @@ object BenchmarkInvocation:
   private def loadFixture(
       fixtureRoot: Path,
       fixture: FixtureSpec,
-      requiredCount: Int,
+      requiredCount: Int
   ): Option[Vector[Double]] =
     val realRoot = fixtureRoot.toRealPath()
     val manifestPath = realRoot.resolve("large").resolve(fixture.manifestFile).normalize()
@@ -343,7 +340,7 @@ object BenchmarkInvocation:
           descriptor(fixture.manifestFile),
           realRoot,
           fixture.fixtureId,
-          fixture.argumentName,
+          fixture.argumentName
         )
         .toOption
         .filter(decoded =>
@@ -377,7 +374,7 @@ object BenchmarkInvocation:
     kurtosis = 3.0,
     sharpeEstimateVariance = 1.0,
     trialCountMix = Vector.empty,
-    trialCountProvenance = "",
+    trialCountProvenance = ""
   )
 
   private def fields(node: JsonNode): Set[String] =
@@ -386,7 +383,7 @@ object BenchmarkInvocation:
   private def exactBigInt(
       node: JsonNode,
       name: String,
-      expected: BigInt,
+      expected: BigInt
   ): Option[BigInt] =
     val value = node.path(name)
     if value.isIntegralNumber && BigInt(value.bigIntegerValue()) == expected then
@@ -396,7 +393,7 @@ object BenchmarkInvocation:
   private def exactDouble(
       node: JsonNode,
       name: String,
-      expected: Double,
+      expected: Double
   ): Option[Double] =
     val value = node.path(name)
     if !value.isNumber then None
@@ -411,7 +408,7 @@ object BenchmarkInvocation:
   private def trialSegment(
       node: JsonNode,
       expectedEvaluations: Int,
-      expectedTrialCount: BigInt,
+      expectedTrialCount: BigInt
   ): Option[TrialMix] =
     if fields(node) != Set("evaluation_count", "trial_count") then None
     else
@@ -435,44 +432,34 @@ object BenchmarkInvocation:
 
   private def parseFunctionArguments(
       functionId: String,
-      node: JsonNode,
+      node: JsonNode
   ): Option[FunctionArguments] =
     val actualFields = fields(node)
     functionId match
-      case "simple_returns" |
-          "log_returns" |
-          "cumulative_return" |
-          "realized_volatility" |
-          "max_drawdown" |
-          "realized_variance" |
-          "realized_volatility_intraday"
+      case "simple_returns" | "log_returns" | "cumulative_return" | "realized_volatility" |
+          "max_drawdown" | "realized_variance" | "realized_volatility_intraday"
           if actualFields.isEmpty =>
         Some(DefaultArguments)
-      case "cagr" | "annualized_volatility"
-          if actualFields == Set("periods_per_year") =>
+      case "cagr" | "annualized_volatility" if actualFields == Set("periods_per_year") =>
         exactBigInt(node, "periods_per_year", BigInt(252))
           .map(value => DefaultArguments.copy(periodsPerYear = value))
-      case "sharpe_ratio"
-          if actualFields == Set("periods_per_year", "risk_free_rate") =>
+      case "sharpe_ratio" if actualFields == Set("periods_per_year", "risk_free_rate") =>
         for
           periods <- exactBigInt(node, "periods_per_year", BigInt(252))
           riskFree <- exactDouble(node, "risk_free_rate", 0.0)
         yield DefaultArguments.copy(
           periodsPerYear = periods,
-          riskFreeRate = riskFree,
+          riskFreeRate = riskFree
         )
-      case "sortino_ratio"
-          if actualFields == Set("periods_per_year", "target_return") =>
+      case "sortino_ratio" if actualFields == Set("periods_per_year", "target_return") =>
         for
           periods <- exactBigInt(node, "periods_per_year", BigInt(252))
           target <- exactDouble(node, "target_return", 0.0)
         yield DefaultArguments.copy(
           periodsPerYear = periods,
-          targetReturn = target,
+          targetReturn = target
         )
-      case "historical_var" |
-          "historical_cvar" |
-          "historical_expected_shortfall"
+      case "historical_var" | "historical_cvar" | "historical_expected_shortfall"
           if actualFields == Set("confidence") =>
         exactDouble(node, "confidence", 0.95)
           .map(value => DefaultArguments.copy(confidence = value))
@@ -483,7 +470,7 @@ object BenchmarkInvocation:
           riskFree <- exactDouble(node, "risk_free_rate", 0.0)
         yield DefaultArguments.copy(
           aggregationPeriods = periods,
-          riskFreeRate = riskFree,
+          riskFreeRate = riskFree
         )
       case "probabilistic_sharpe_ratio"
           if actualFields ==
@@ -497,7 +484,7 @@ object BenchmarkInvocation:
           benchmarkSharpe = benchmark,
           kurtosis = kurtosis,
           sampleSize = sampleSize,
-          skewness = skewness,
+          skewness = skewness
         )
       case "deflated_sharpe_ratio"
           if actualFields == Set(
@@ -506,7 +493,7 @@ object BenchmarkInvocation:
             "sharpe_estimate_variance",
             "skewness",
             "trial_count_mix",
-            "trial_count_provenance",
+            "trial_count_provenance"
           ) =>
         for
           kurtosis <- exactDouble(node, "kurtosis", 3.0)
@@ -522,20 +509,18 @@ object BenchmarkInvocation:
           sharpeEstimateVariance = variance,
           skewness = skewness,
           trialCountMix = mix,
-          trialCountProvenance = provenance,
+          trialCountProvenance = provenance
         )
-      case "kupiec_unconditional_coverage_test" |
-          "christoffersen_conditional_coverage_test"
+      case "kupiec_unconditional_coverage_test" | "christoffersen_conditional_coverage_test"
           if actualFields == Set("confidence", "significance") =>
         for
           confidence <- exactDouble(node, "confidence", 0.95)
           significance <- exactDouble(node, "significance", 0.05)
         yield DefaultArguments.copy(
           confidence = confidence,
-          significance = significance,
+          significance = significance
         )
-      case "christoffersen_independence_test"
-          if actualFields == Set("significance") =>
+      case "christoffersen_independence_test" if actualFields == Set("significance") =>
         exactDouble(node, "significance", 0.05)
           .map(value => DefaultArguments.copy(significance = value))
       case _ => None
@@ -543,7 +528,7 @@ object BenchmarkInvocation:
   private def selectPlanCase(
       planPath: Path,
       caseId: String,
-      expectedFamily: String,
+      expectedFamily: String
   ): Option[PlanCase] =
     val planBound =
       planPath.isAbsolute &&
@@ -577,7 +562,7 @@ object BenchmarkInvocation:
             operations <- positiveInt(node, "logicalOperationsPerInvocation")
             functionArguments <- parseFunctionArguments(
               functionId,
-              node.path("functionArguments"),
+              node.path("functionArguments")
             )
             if selectedCaseId == caseId
             if familyId == expectedFamily
@@ -589,18 +574,17 @@ object BenchmarkInvocation:
             vectorLength,
             batchSize,
             operations,
-            functionArguments,
+            functionArguments
           )
         }
 
   private def trialInputs(
       observed: Vector[Double],
       trialMix: Vector[TrialMix],
-      provenanceMethod: String,
+      provenanceMethod: String
   ): Vector[(Double, BigInt, TrialProvenance)] =
-    val counts = trialMix.flatMap(segment =>
-      Vector.fill(segment.evaluationCount)(segment.trialCount)
-    )
+    val counts =
+      trialMix.flatMap(segment => Vector.fill(segment.evaluationCount)(segment.trialCount))
     observed.zip(counts).map { case (observedSharpe, trialCount) =>
       (
         observedSharpe,
@@ -612,14 +596,14 @@ object BenchmarkInvocation:
           trialCount,
           "daily",
           DsrRegistrySha256,
-          BigInt(1),
-        ),
+          BigInt(1)
+        )
       )
     }
 
   private def prepare(
       planCase: PlanCase,
-      fixtureRoot: Path,
+      fixtureRoot: Path
   ): Option[PreparedCase] =
     val emptyDoubles = Vector.empty[Double]
     val emptyTrials = Vector.empty[(Double, BigInt, TrialProvenance)]
@@ -632,7 +616,7 @@ object BenchmarkInvocation:
           emptyDoubles,
           emptyDoubles,
           emptyTrials,
-          emptyCoverage,
+          emptyCoverage
         )
       )
     else if planCase.fixtureId.startsWith("large-returns-n100000-prefix-n") then
@@ -643,7 +627,7 @@ object BenchmarkInvocation:
           returns,
           emptyDoubles,
           emptyTrials,
-          emptyCoverage,
+          emptyCoverage
         )
       )
     else if planCase.fixtureId == "precomputed-probabilistic_sharpe_ratio-b16384" then
@@ -654,7 +638,7 @@ object BenchmarkInvocation:
           emptyDoubles,
           observed,
           emptyTrials,
-          emptyCoverage,
+          emptyCoverage
         )
       )
     else if planCase.fixtureId == "precomputed-deflated_sharpe_ratio-b16384" then
@@ -663,7 +647,7 @@ object BenchmarkInvocation:
           trialInputs(
             observed,
             planCase.functionArguments.trialCountMix,
-            planCase.functionArguments.trialCountProvenance,
+            planCase.functionArguments.trialCountProvenance
           )
         Option.when(inputs.size == observed.size)(
           PreparedCase(
@@ -672,7 +656,7 @@ object BenchmarkInvocation:
             emptyDoubles,
             observed,
             inputs,
-            emptyCoverage,
+            emptyCoverage
           )
         )
       }
@@ -692,7 +676,7 @@ object BenchmarkInvocation:
               val start = index * planCase.vectorLength
               (
                 realized.slice(start, start + planCase.vectorLength),
-                forecast.slice(start, start + planCase.vectorLength),
+                forecast.slice(start, start + planCase.vectorLength)
               )
             }
             PreparedCase(
@@ -701,17 +685,16 @@ object BenchmarkInvocation:
               emptyDoubles,
               emptyDoubles,
               emptyTrials,
-              sequences,
+              sequences
             )
           }
       else None
     else None
 
-  /**
-   * Public Gate 1 policy가 JMH `@Param`을 금지하므로 wrapper가 시작한 단일-case process
-   * 환경을 읽는다. frozen plan SHA와 89-case closure, manifest SHA, payload hash/shape를 모두
-   * 확인한 PreparedCase만 timing state로 전달한다.
-   */
+  /** Public Gate 1 policy가 JMH `@Param`을 금지하므로 wrapper가 시작한 단일-case process 환경을 읽는다. frozen plan
+    * SHA와 89-case closure, manifest SHA, payload hash/shape를 모두 확인한 PreparedCase만 timing state로
+    * 전달한다.
+    */
   def fromEnvironment(expectedFamily: String): BenchmarkInvocation =
     // Path/JSON/hash/binary decode는 외부 입력 경계다. 이 단일 NonFatal 경계에서
     // 어떤 malformed I/O도 None으로 닫아 JMH setup이 유효한 timing 결과를 만들지 못하게 한다.

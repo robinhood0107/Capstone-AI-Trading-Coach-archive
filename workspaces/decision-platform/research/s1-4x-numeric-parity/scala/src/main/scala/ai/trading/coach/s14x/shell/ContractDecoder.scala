@@ -27,10 +27,8 @@ enum FunctionId(val wire: String) derives CanEqual:
   case LoAdjustedSharpeRatio extends FunctionId("lo_adjusted_sharpe_ratio")
   case ProbabilisticSharpeRatio extends FunctionId("probabilistic_sharpe_ratio")
   case DeflatedSharpeRatio extends FunctionId("deflated_sharpe_ratio")
-  case KupiecUnconditionalCoverageTest
-      extends FunctionId("kupiec_unconditional_coverage_test")
-  case ChristoffersenIndependenceTest
-      extends FunctionId("christoffersen_independence_test")
+  case KupiecUnconditionalCoverageTest extends FunctionId("kupiec_unconditional_coverage_test")
+  case ChristoffersenIndependenceTest extends FunctionId("christoffersen_independence_test")
   case ChristoffersenConditionalCoverageTest
       extends FunctionId("christoffersen_conditional_coverage_test")
 
@@ -44,13 +42,13 @@ final case class TransportError(
     code: String,
     requestId: Option[String] = None,
     fixtureId: Option[String] = None,
-    field: Option[String] = None,
+    field: Option[String] = None
 ) derives CanEqual
 
 final case class CanonicalCase(
     fixtureId: String,
     functionId: FunctionId,
-    arguments: ObjectNode,
+    arguments: ObjectNode
 ) derives CanEqual
 
 final case class CanonicalRequest(requestId: String, cases: Vector[CanonicalCase]) derives CanEqual
@@ -92,7 +90,7 @@ object ContractDecoder:
     FunctionId.ProbabilisticSharpeRatio ->
       (
         Set("observed_sharpe", "benchmark_sharpe", "sample_size", "skewness", "kurtosis"),
-        Set.empty,
+        Set.empty
       ),
     FunctionId.DeflatedSharpeRatio ->
       (
@@ -103,16 +101,16 @@ object ContractDecoder:
           "kurtosis",
           "trial_count",
           "sharpe_estimate_variance",
-          "trial_provenance",
+          "trial_provenance"
         ),
-        Set.empty,
+        Set.empty
       ),
     FunctionId.KupiecUnconditionalCoverageTest ->
       (Set("realized_losses", "forecast_vars", "confidence"), Set("significance")),
     FunctionId.ChristoffersenIndependenceTest ->
       (Set("realized_losses", "forecast_vars"), Set("significance")),
     FunctionId.ChristoffersenConditionalCoverageTest ->
-      (Set("realized_losses", "forecast_vars", "confidence"), Set("significance")),
+      (Set("realized_losses", "forecast_vars", "confidence"), Set("significance"))
   )
 
   private def fields(node: JsonNode): Set[String] =
@@ -168,7 +166,7 @@ object ContractDecoder:
               val decoded = cases.elements().asScala.toVector.map(decodeCase)
               decoded.collectFirst { case Left(error) => error } match
                 case Some(error) => Left(error.copy(requestId = Some(identifier)))
-                case None =>
+                case None        =>
                   val values = decoded.collect { case Right(value) => value }
                   if values.map(_.fixtureId).distinct.size != values.size then
                     Left(TransportError("request_invalid", requestId = Some(identifier)))

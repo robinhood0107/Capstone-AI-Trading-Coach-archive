@@ -12,7 +12,7 @@ import scala.jdk.CollectionConverters.*
 final case class CandidateCaseResult(
     fixtureId: String,
     functionId: FunctionId,
-    value: Either[StableError, NumericResult],
+    value: Either[StableError, NumericResult]
 ) derives CanEqual:
   /** semantic result의 stable error code만 노출하며 transport error와 혼합하지 않는다. */
   def errorCode: Option[String] = value.left.toOption.map(_.code)
@@ -27,14 +27,14 @@ object CandidateRunner:
   private def productionArray(
       testCase: CanonicalCase,
       name: String,
-      fixtureRoot: Path,
+      fixtureRoot: Path
   ): Either[TransportError, Either[StableError, Vector[Double]]] =
     array(testCase, name, fixtureRoot, production = true)
 
   private def researchArray(
       testCase: CanonicalCase,
       name: String,
-      fixtureRoot: Path,
+      fixtureRoot: Path
   ): Either[TransportError, Either[StableError, Vector[Double]]] =
     array(testCase, name, fixtureRoot, production = false)
 
@@ -42,7 +42,7 @@ object CandidateRunner:
       testCase: CanonicalCase,
       name: String,
       fixtureRoot: Path,
-      production: Boolean,
+      production: Boolean
   ): Either[TransportError, Either[StableError, Vector[Double]]] =
     val node = argument(testCase, name)
     if node.isObject && node.path("kind").textValue() == "binaryFloat64" then
@@ -59,7 +59,7 @@ object CandidateRunner:
                 TransportError(
                   "manifest_invalid",
                   fixtureId = Some(testCase.fixtureId),
-                  field = Some("expectedSemanticError"),
+                  field = Some("expectedSemanticError")
                 )
               )
             case None => Right(Right(decoded.values))
@@ -108,7 +108,7 @@ object CandidateRunner:
       testCase: CanonicalCase,
       name: String,
       default: Double,
-      error: StableError,
+      error: StableError
   ): Either[StableError, Double] =
     val node = argument(testCase, name)
     if node.isMissingNode then Right(default)
@@ -121,7 +121,7 @@ object CandidateRunner:
       testCase: CanonicalCase,
       name: String,
       default: Option[BigInt],
-      error: StableError,
+      error: StableError
   ): Either[StableError, BigInt] =
     val node = argument(testCase, name)
     if node.isMissingNode then default.toRight(error)
@@ -139,7 +139,7 @@ object CandidateRunner:
       "effective_trial_count",
       "sampling_frequency",
       "trial_registry_sha256",
-      "variance_ddof",
+      "variance_ddof"
     )
     if fields != expected then Left(StableError.TrialProvenanceInvalid)
     else
@@ -161,7 +161,7 @@ object CandidateRunner:
             BigInt(node.path("effective_trial_count").bigIntegerValue()),
             node.path("sampling_frequency").textValue(),
             node.path("trial_registry_sha256").textValue(),
-            BigInt(node.path("variance_ddof").bigIntegerValue()),
+            BigInt(node.path("variance_ddof").bigIntegerValue())
           )
         )
 
@@ -177,7 +177,7 @@ object CandidateRunner:
 
   private def runCase(
       testCase: CanonicalCase,
-      fixtureRoot: Path,
+      fixtureRoot: Path
   ): Either[TransportError, CandidateCaseResult] =
     val computed: Either[TransportError, Either[StableError, NumericResult]] =
       testCase.functionId match
@@ -198,7 +198,7 @@ object CandidateRunner:
                 testCase,
                 "periods_per_year",
                 Some(BigInt(252)),
-                StableError.PeriodsPerYearInvalid,
+                StableError.PeriodsPerYearInvalid
               )
               result <- scalarResult(ProductionMetrics.cagr(values, periods))
             yield result
@@ -215,7 +215,7 @@ object CandidateRunner:
                 testCase,
                 "periods_per_year",
                 Some(BigInt(252)),
-                StableError.PeriodsPerYearInvalid,
+                StableError.PeriodsPerYearInvalid
               )
               result <- scalarResult(ProductionMetrics.annualizedVolatility(values, periods))
             yield result
@@ -232,13 +232,13 @@ object CandidateRunner:
                 testCase,
                 "risk_free_rate",
                 0.0,
-                StableError.RiskFreeRateInvalid,
+                StableError.RiskFreeRateInvalid
               )
               periods <- integer(
                 testCase,
                 "periods_per_year",
                 Some(BigInt(252)),
-                StableError.PeriodsPerYearInvalid,
+                StableError.PeriodsPerYearInvalid
               )
               result <- scalarResult(ProductionMetrics.sharpeRatio(values, riskFree, periods))
             yield result
@@ -252,7 +252,7 @@ object CandidateRunner:
                 testCase,
                 "periods_per_year",
                 Some(BigInt(252)),
-                StableError.PeriodsPerYearInvalid,
+                StableError.PeriodsPerYearInvalid
               )
               result <- scalarResult(ProductionMetrics.sortinoRatio(values, target, periods))
             yield result
@@ -281,7 +281,7 @@ object CandidateRunner:
                 testCase,
                 "confidence",
                 0.95,
-                StableError.ResearchInputInvalid,
+                StableError.ResearchInputInvalid
               )
               result <- scalarResult(
                 AdvancedRisk.historicalExpectedShortfall(values, confidence)
@@ -294,9 +294,7 @@ object CandidateRunner:
           )
         case FunctionId.RealizedVolatilityIntraday =>
           researchArray(testCase, "intraday_log_returns", fixtureRoot).map(
-            _.flatMap(values =>
-              scalarResult(AdvancedRisk.realizedVolatilityIntraday(values))
-            )
+            _.flatMap(values => scalarResult(AdvancedRisk.realizedVolatilityIntraday(values)))
           )
         case FunctionId.LoAdjustedSharpeRatio =>
           researchArray(testCase, "returns", fixtureRoot).map { decoded =>
@@ -306,13 +304,13 @@ object CandidateRunner:
                 testCase,
                 "aggregation_periods",
                 None,
-                StableError.AggregationPeriodsInvalid,
+                StableError.AggregationPeriodsInvalid
               )
               riskFree <- real(
                 testCase,
                 "risk_free_rate",
                 0.0,
-                StableError.ResearchInputInvalid,
+                StableError.ResearchInputInvalid
               )
               result <- scalarResult(
                 AdvancedRisk.loAdjustedSharpeRatio(values, periods, riskFree)
@@ -326,13 +324,13 @@ object CandidateRunner:
                 testCase,
                 "observed_sharpe",
                 0.0,
-                StableError.ResearchInputInvalid,
+                StableError.ResearchInputInvalid
               )
               benchmark <- real(
                 testCase,
                 "benchmark_sharpe",
                 0.0,
-                StableError.ResearchInputInvalid,
+                StableError.ResearchInputInvalid
               )
               sample <- integer(testCase, "sample_size", None, StableError.ResearchInputInvalid)
               skew <- real(testCase, "skewness", 0.0, StableError.MomentInvalid)
@@ -343,7 +341,7 @@ object CandidateRunner:
                   benchmark,
                   sample,
                   skew,
-                  kurtosis,
+                  kurtosis
                 )
               )
             yield result
@@ -355,7 +353,7 @@ object CandidateRunner:
                 testCase,
                 "observed_sharpe",
                 0.0,
-                StableError.ResearchInputInvalid,
+                StableError.ResearchInputInvalid
               )
               sample <- integer(testCase, "sample_size", None, StableError.ResearchInputInvalid)
               skew <- real(testCase, "skewness", 0.0, StableError.MomentInvalid)
@@ -364,13 +362,13 @@ object CandidateRunner:
                 testCase,
                 "trial_count",
                 None,
-                StableError.TrialCountInvalid,
+                StableError.TrialCountInvalid
               )
               variance <- real(
                 testCase,
                 "sharpe_estimate_variance",
                 0.0,
-                StableError.TrialVarianceInvalid,
+                StableError.TrialVarianceInvalid
               )
               trialProvenance <- provenance(testCase)
               result <- scalarResult(
@@ -381,7 +379,7 @@ object CandidateRunner:
                   kurtosis,
                   trials,
                   variance,
-                  trialProvenance,
+                  trialProvenance
                 )
               )
             yield result
@@ -390,66 +388,69 @@ object CandidateRunner:
           for
             realized <- researchArray(testCase, "realized_losses", fixtureRoot)
             forecast <- researchArray(testCase, "forecast_vars", fixtureRoot)
-          yield for
-            realizedValues <- realized
-            forecastValues <- forecast
-            confidence <- real(
-              testCase,
-              "confidence",
-              0.0,
-              StableError.ResearchInputInvalid,
-            )
-            alpha <- real(testCase, "significance", 0.05, StableError.SignificanceInvalid)
-            result <- AdvancedRisk
-              .kupiecUnconditionalCoverageTest(
-                realizedValues,
-                forecastValues,
-                confidence,
-                alpha,
+          yield
+            for
+              realizedValues <- realized
+              forecastValues <- forecast
+              confidence <- real(
+                testCase,
+                "confidence",
+                0.0,
+                StableError.ResearchInputInvalid
               )
-              .map(NumericResult.Likelihood.apply)
-          yield result
+              alpha <- real(testCase, "significance", 0.05, StableError.SignificanceInvalid)
+              result <- AdvancedRisk
+                .kupiecUnconditionalCoverageTest(
+                  realizedValues,
+                  forecastValues,
+                  confidence,
+                  alpha
+                )
+                .map(NumericResult.Likelihood.apply)
+            yield result
         case FunctionId.ChristoffersenIndependenceTest =>
           for
             realized <- researchArray(testCase, "realized_losses", fixtureRoot)
             forecast <- researchArray(testCase, "forecast_vars", fixtureRoot)
-          yield for
-            realizedValues <- realized
-            forecastValues <- forecast
-            alpha <- real(testCase, "significance", 0.05, StableError.SignificanceInvalid)
-            result <- AdvancedRisk
-              .christoffersenIndependenceTest(realizedValues, forecastValues, alpha)
-              .map(NumericResult.Independence.apply)
-          yield result
+          yield
+            for
+              realizedValues <- realized
+              forecastValues <- forecast
+              alpha <- real(testCase, "significance", 0.05, StableError.SignificanceInvalid)
+              result <- AdvancedRisk
+                .christoffersenIndependenceTest(realizedValues, forecastValues, alpha)
+                .map(NumericResult.Independence.apply)
+            yield result
         case FunctionId.ChristoffersenConditionalCoverageTest =>
           for
             realized <- researchArray(testCase, "realized_losses", fixtureRoot)
             forecast <- researchArray(testCase, "forecast_vars", fixtureRoot)
-          yield for
-            realizedValues <- realized
-            forecastValues <- forecast
-            confidence <- real(
-              testCase,
-              "confidence",
-              0.0,
-              StableError.ResearchInputInvalid,
-            )
-            alpha <- real(testCase, "significance", 0.05, StableError.SignificanceInvalid)
-            result <- AdvancedRisk
-              .christoffersenConditionalCoverageTest(
-                realizedValues,
-                forecastValues,
-                confidence,
-                alpha,
+          yield
+            for
+              realizedValues <- realized
+              forecastValues <- forecast
+              confidence <- real(
+                testCase,
+                "confidence",
+                0.0,
+                StableError.ResearchInputInvalid
               )
-              .map(NumericResult.Conditional.apply)
-          yield result
+              alpha <- real(testCase, "significance", 0.05, StableError.SignificanceInvalid)
+              result <- AdvancedRisk
+                .christoffersenConditionalCoverageTest(
+                  realizedValues,
+                  forecastValues,
+                  confidence,
+                  alpha
+                )
+                .map(NumericResult.Conditional.apply)
+            yield result
     computed.map(value => CandidateCaseResult(testCase.fixtureId, testCase.functionId, value))
 
   /** request order를 보존하고 transport failure 하나라도 있으면 partial batch를 만들지 않는다. */
   def execute(
       request: CanonicalRequest,
-      fixtureRoot: Path,
+      fixtureRoot: Path
   ): Either[TransportError, CandidateBatch] =
     val results = request.cases.map(testCase => runCase(testCase, fixtureRoot))
     results.collectFirst { case Left(error) => error } match

@@ -4,7 +4,7 @@ object AdvancedRisk:
   /** 손실 표본과 신뢰수준을 받아 fractional tail weight 기반 historical expected shortfall을 반환한다. */
   def historicalExpectedShortfall(
       losses: Vector[Double],
-      confidence: Double = 0.95,
+      confidence: Double = 0.95
   ): Either[StableError, Double] =
     for
       values <- Validation.researchSequence(losses)
@@ -25,8 +25,7 @@ object AdvancedRisk:
       result <-
         if normalized < -1.0 - tolerance || normalized > 1.0 + tolerance then
           Left(StableError.ResearchResultNonFinite)
-        else
-          Validation.finiteResearch(math.min(1.0, math.max(-1.0, normalized)) * scale)
+        else Validation.finiteResearch(math.min(1.0, math.max(-1.0, normalized)) * scale)
     yield result
 
   /** intraday 로그수익률 제곱합을 실현분산으로 반환하며 비유한 입력·결과를 거부한다. */
@@ -49,7 +48,7 @@ object AdvancedRisk:
   def loAdjustedSharpeRatio(
       returns: Vector[Double],
       aggregationPeriods: BigInt,
-      riskFreeRate: Double = 0.0,
+      riskFreeRate: Double = 0.0
   ): Either[StableError, Double] =
     for
       values <- Validation.researchSequence(returns, minimumLength = 2)
@@ -91,7 +90,7 @@ object AdvancedRisk:
       benchmarkSharpe: Double,
       sampleSize: BigInt,
       skewness: Double,
-      kurtosis: Double,
+      kurtosis: Double
   ): Either[StableError, (Double, Double, BigInt, Double)] =
     for
       observed <-
@@ -116,7 +115,7 @@ object AdvancedRisk:
       benchmarkSharpe: Double,
       sampleSize: BigInt,
       skewness: Double,
-      kurtosis: Double,
+      kurtosis: Double
   ): Either[StableError, Double] =
     validatedPsr(observedSharpe, benchmarkSharpe, sampleSize, skewness, kurtosis).flatMap {
       case (observed, benchmark, observations, radicand) =>
@@ -135,7 +134,7 @@ object AdvancedRisk:
       kurtosis: Double,
       trialCount: BigInt,
       sharpeEstimateVariance: Double,
-      trialProvenance: TrialProvenance,
+      trialProvenance: TrialProvenance
   ): Either[StableError, Double] =
     for
       validated <- validatedPsr(observedSharpe, 0.0, sampleSize, skewness, kurtosis)
@@ -160,20 +159,20 @@ object AdvancedRisk:
         benchmark,
         validated._3,
         skewness,
-        kurtosis,
+        kurtosis
       )
     yield result
 
   private final case class Backtest(
       realized: Vector[Double],
       forecast: Vector[Double],
-      exceptions: Vector[Int],
+      exceptions: Vector[Int]
   )
 
   private def validateBacktest(
       realizedLosses: Vector[Double],
       forecastVars: Vector[Double],
-      minimumLength: Int,
+      minimumLength: Int
   ): Either[StableError, Backtest] =
     for
       realized <- Validation.researchSequence(realizedLosses)
@@ -218,7 +217,7 @@ object AdvancedRisk:
         independent <- NumericPrimitives.bernoulliLogLikelihood(
           total,
           counts.n01 + counts.n11,
-          pi,
+          pi
         )
         markov00 <- NumericPrimitives.xlogComplement(counts.n00, piZeroOne)
         markov01 <- NumericPrimitives.xlogProbability(counts.n01, piZeroOne)
@@ -229,7 +228,7 @@ object AdvancedRisk:
   private def kupiecStatistic(
       observations: Int,
       exceptions: Int,
-      confidence: Double,
+      confidence: Double
   ): Either[StableError, Double] =
     val maximumLikelihood = exceptions.toDouble / observations.toDouble
     val nullLog =
@@ -243,7 +242,7 @@ object AdvancedRisk:
       realizedLosses: Vector[Double],
       forecastVars: Vector[Double],
       confidence: Double,
-      significance: Double = 0.05,
+      significance: Double = 0.05
   ): Either[StableError, LikelihoodResult] =
     for
       inputs <- validateBacktest(realizedLosses, forecastVars, minimumLength = 1)
@@ -259,14 +258,14 @@ object AdvancedRisk:
       inputs.exceptions.size,
       exceptionCount,
       1,
-      alpha,
+      alpha
     )
 
   /** 예외 indicator의 1차 전이를 이용해 Christoffersen 독립성 통계와 판정을 반환한다. */
   def christoffersenIndependenceTest(
       realizedLosses: Vector[Double],
       forecastVars: Vector[Double],
-      significance: Double = 0.05,
+      significance: Double = 0.05
   ): Either[StableError, IndependenceResult] =
     for
       inputs <- validateBacktest(realizedLosses, forecastVars, minimumLength = 2)
@@ -283,7 +282,7 @@ object AdvancedRisk:
       inputs.exceptions.sum,
       1,
       alpha,
-      counts,
+      counts
     )
 
   /** 실현손실·예측 VaR의 I_2:T 구간에서 UC와 Markov likelihood를 결합해 conditional coverage를 반환한다. */
@@ -291,7 +290,7 @@ object AdvancedRisk:
       realizedLosses: Vector[Double],
       forecastVars: Vector[Double],
       confidence: Double,
-      significance: Double = 0.05,
+      significance: Double = 0.05
   ): Either[StableError, ConditionalCoverageResult] =
     for
       inputs <- validateBacktest(realizedLosses, forecastVars, minimumLength = 2)
@@ -304,7 +303,7 @@ object AdvancedRisk:
       nullLog = NumericPrimitives.confidenceExceptionLogLikelihood(
         conditionedObservations,
         conditionedExceptions,
-        probability,
+        probability
       )
       unconditional <- NumericPrimitives.likelihoodRatio(nullLog, logs._1)
       independence <- NumericPrimitives.likelihoodRatio(logs._1, logs._2)
@@ -328,5 +327,5 @@ object AdvancedRisk:
       conditionedObservations,
       conditionedExceptions,
       unconditional,
-      independence,
+      independence
     )

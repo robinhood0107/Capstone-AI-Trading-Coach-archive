@@ -20,27 +20,30 @@ object JsonSupport:
     value match
       case numberValue: Double => if numberValue == 0.0 then 0.0 else numberValue
       case vector: Vector[?]   => vector.map(normalizeNumberTree)
-      case map: Map[?, ?] =>
+      case map: Map[?, ?]      =>
         map.toVector.collect { case (key: String, item) => key -> normalizeNumberTree(item) }.toMap
       case other => other
 
   private def node(value: Any): JsonNode =
     value match
-      case value: String  => Mapper.getNodeFactory.textNode(value)
-      case value: Boolean => Mapper.getNodeFactory.booleanNode(value)
-      case value: Int     => Mapper.getNodeFactory.numberNode(value)
-      case value: Long    => Mapper.getNodeFactory.numberNode(value)
-      case value: BigInt  => Mapper.getNodeFactory.numberNode(value.bigInteger)
-      case value: Double  => number(value)
+      case value: String     => Mapper.getNodeFactory.textNode(value)
+      case value: Boolean    => Mapper.getNodeFactory.booleanNode(value)
+      case value: Int        => Mapper.getNodeFactory.numberNode(value)
+      case value: Long       => Mapper.getNodeFactory.numberNode(value)
+      case value: BigInt     => Mapper.getNodeFactory.numberNode(value.bigInteger)
+      case value: Double     => number(value)
       case values: Vector[?] =>
         values.foldLeft(Mapper.createArrayNode())((array, item) => array.add(node(item)))
       case values: Map[?, ?] =>
-        values.toVector.collect { case (key: String, item) => key -> item }.sortBy(_._1).foldLeft(
-          Mapper.createObjectNode()
-        ) { case (objectNode, (key, item)) =>
-          val _ = objectNode.set[JsonNode](key, node(item))
-          objectNode
-        }
+        values.toVector
+          .collect { case (key: String, item) => key -> item }
+          .sortBy(_._1)
+          .foldLeft(
+            Mapper.createObjectNode()
+          ) { case (objectNode, (key, item)) =>
+            val _ = objectNode.set[JsonNode](key, node(item))
+            objectNode
+          }
       case _ => Mapper.getNodeFactory.textNode("unsupported")
 
   /** 테스트·evidence용 값 tree를 negative-zero 없는 compact JSON 문자열로 직렬화한다. */
@@ -67,7 +70,7 @@ object JsonSupport:
 
   private def resultValue(value: NumericResult): JsonNode =
     value match
-      case NumericResult.Scalar(numberValue) => number(numberValue)
+      case NumericResult.Scalar(numberValue)  => number(numberValue)
       case NumericResult.VectorResult(values) =>
         values.foldLeft(Mapper.createArrayNode())((array, item) => array.add(number(item)))
       case NumericResult.Likelihood(result) =>
@@ -82,8 +85,8 @@ object JsonSupport:
             result.observations,
             result.exceptions,
             result.degreesOfFreedom,
-            result.significance,
-          ),
+            result.significance
+          )
         )
         base.set[ObjectNode]("transitions", transitionsNode(result.transitions))
         base
@@ -97,8 +100,8 @@ object JsonSupport:
             result.observations,
             result.exceptions,
             result.degreesOfFreedom,
-            result.significance,
-          ),
+            result.significance
+          )
         )
         base.set[ObjectNode]("transitions", transitionsNode(result.transitions))
         base.put("conditioned_observations", result.conditionedObservations)
@@ -106,12 +109,12 @@ object JsonSupport:
         base.put(
           "unconditional_component_statistic",
           if result.unconditionalComponentStatistic == 0.0 then 0.0
-          else result.unconditionalComponentStatistic,
+          else result.unconditionalComponentStatistic
         )
         base.put(
           "independence_component_statistic",
           if result.independenceComponentStatistic == 0.0 then 0.0
-          else result.independenceComponentStatistic,
+          else result.independenceComponentStatistic
         )
         base
 

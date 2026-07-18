@@ -1,9 +1,8 @@
 package ai.trading.coach.s14x.core
 
-/**
- * production과 research API의 입력·오류 precedence를 한 경계에서 고정한다.
- * 성공 값은 immutable 입력과 positive-zero 결과만 다음 numeric 단계로 전달한다.
- */
+/** production과 research API의 입력·오류 precedence를 한 경계에서 고정한다. 성공 값은 immutable 입력과 positive-zero 결과만
+  * 다음 numeric 단계로 전달한다.
+  */
 object Validation:
   private val MaxProductionInputLength = 100000
   // IEEE-754 max finite의 exact integer 값이다. Decimal 문자열 반올림으로 상한을 만들지 않는다.
@@ -15,7 +14,7 @@ object Validation:
   /** Typed core 경계에서 길이·finite precedence를 적용하고 immutable snapshot을 반환한다. */
   def productionSequence(
       values: Vector[Double],
-      minimumLength: Int,
+      minimumLength: Int
   ): Either[StableError, Vector[Double]] =
     if values.isEmpty then Left(StableError.InputEmpty)
     else if values.size > MaxProductionInputLength then Left(StableError.InputTooLong)
@@ -26,10 +25,10 @@ object Validation:
   /** Transport-representable raw list의 shape → bool → type precedence를 보존한다. */
   def productionRawSequence(
       raw: Any,
-      minimumLength: Int,
+      minimumLength: Int
   ): Either[StableError, Vector[Double]] =
     raw match
-      case _: Boolean => Left(StableError.InputBoolInvalid)
+      case _: Boolean        => Left(StableError.InputBoolInvalid)
       case values: Vector[?] =>
         val nested = values.exists {
           case _: Iterable[?] => true
@@ -63,7 +62,7 @@ object Validation:
   /** research 배열은 finite를 먼저 확인한 뒤 최소 길이를 확인해 frozen 오류 precedence를 보존한다. */
   def researchSequence(
       values: Vector[Double],
-      minimumLength: Int = 1,
+      minimumLength: Int = 1
   ): Either[StableError, Vector[Double]] =
     if values.exists(value => !value.isFinite) then Left(StableError.ResearchInputInvalid)
     else if values.size < minimumLength then Left(StableError.ResearchInputTooShort)
@@ -80,14 +79,12 @@ object Validation:
 
   /** research confidence를 열린 구간 (0, 1)로 제한하고 research 입력 오류로 통일한다. */
   def researchConfidence(value: Double): Either[StableError, Double] =
-    if !value.isFinite || value <= 0.0 || value >= 1.0 then
-      Left(StableError.ResearchInputInvalid)
+    if !value.isFinite || value <= 0.0 || value >= 1.0 then Left(StableError.ResearchInputInvalid)
     else Right(value)
 
   /** hypothesis-test significance를 finite 열린 구간 (0, 1)로 제한한다. */
   def significance(value: Double): Either[StableError, Double] =
-    if !value.isFinite || value <= 0.0 || value >= 1.0 then
-      Left(StableError.SignificanceInvalid)
+    if !value.isFinite || value <= 0.0 || value >= 1.0 then Left(StableError.SignificanceInvalid)
     else Right(value)
 
   /** PSR 표본 수는 2 이상이면서 Float64로 유한하게 표현 가능한 정수만 허용한다. */

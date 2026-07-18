@@ -7,7 +7,7 @@ final case class TrialProvenance(
     effectiveTrialCount: BigInt,
     samplingFrequency: String,
     trialRegistrySha256: String,
-    varianceDdof: BigInt,
+    varianceDdof: BigInt
 ) derives CanEqual
 
 final case class Transitions(n00: Int, n01: Int, n10: Int, n11: Int) derives CanEqual
@@ -19,7 +19,7 @@ final case class LikelihoodResult(
     observations: Int,
     exceptions: Int,
     degreesOfFreedom: Int,
-    significance: Double,
+    significance: Double
 ) derives CanEqual
 
 final case class IndependenceResult(
@@ -30,7 +30,7 @@ final case class IndependenceResult(
     exceptions: Int,
     degreesOfFreedom: Int,
     significance: Double,
-    transitions: Transitions,
+    transitions: Transitions
 ) derives CanEqual
 
 final case class ConditionalCoverageResult(
@@ -45,7 +45,7 @@ final case class ConditionalCoverageResult(
     conditionedObservations: Int,
     conditionedExceptions: Int,
     unconditionalComponentStatistic: Double,
-    independenceComponentStatistic: Double,
+    independenceComponentStatistic: Double
 ) derives CanEqual
 
 sealed trait NumericResult derives CanEqual
