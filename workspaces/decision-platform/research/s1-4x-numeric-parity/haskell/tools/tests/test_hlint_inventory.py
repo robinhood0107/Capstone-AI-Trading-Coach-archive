@@ -37,9 +37,136 @@ class HLintInventoryTests(unittest.TestCase):
         self.assertEqual(summary.allowance_count, 6)
         self.assertEqual(summary.imported_symbol_count, 11)
 
-    def test_throw_io_has_no_standing_allowance(self) -> None:
+    def test_throw_io_is_a_global_restriction_not_a_whitelist(self) -> None:
         configuration = (HASKELL_ROOT / ".hlint.yaml").read_text(encoding="utf-8")
-        hlint_inventory.validate_no_throw_io_allowance(configuration)
+        hlint_inventory.validate_throw_io_restrictions(configuration)
+
+        whitelist = """\
+- functions:
+    - name:
+        - Control.Exception.throwIO
+        - throwIO
+      within:
+        - Example.Allowed
+"""
+        with self.assertRaisesRegex(
+            hlint_inventory.InventoryError,
+            "throwIO restriction",
+        ):
+            hlint_inventory.validate_throw_io_restrictions(whitelist)
+
+    def test_inline_yaml_ignore_is_in_the_managed_inventory(self) -> None:
+        configuration = """\
+- ignore: {name: Use isDigit, within: [Example.Module]}
+"""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "src/Example/Module.hs"
+            focused = root / "test/ExampleSpec.hs"
+            source.parent.mkdir(parents=True)
+            focused.parent.mkdir(parents=True)
+            source.write_text(
+                "module Example.Module (digit) where\n"
+                "digit value = value >= '0' && value <= '9'\n",
+                encoding="utf-8",
+            )
+            focused.write_text(
+                'testCase "ASCII digit contract" testBody\n',
+                encoding="utf-8",
+            )
+            entries = [
+                {
+                    "language": "haskell",
+                    "file": "src/Example/Module.hs",
+                    "rule": "Use isDigit",
+                    "symbol": "digit",
+                    "reason": "ASCII only",
+                    "focusedTest": "test/ExampleSpec.hs: ASCII digit contract",
+                    "owner": "S1.4X",
+                    "expiresWhen": "An exact ASCII predicate is frozen.",
+                }
+            ]
+            diagnostics = [
+                {
+                    "file": str(source),
+                    "severity": "Ignore",
+                    "hint": "Use isDigit",
+                    "module": ["Example.Module"],
+                    "decl": ["digit"],
+                    "from": "value >= '0' && value <= '9'",
+                }
+            ]
+
+            summary = hlint_inventory.validate_managed_ignored_diagnostics(
+                root,
+                configuration,
+                entries,
+                diagnostics,
+            )
+
+            self.assertEqual(summary.configured_pair_count, 1)
+            self.assertEqual(summary.managed_diagnostic_count, 1)
+
+    def test_source_local_hlint_suppression_is_rejected_in_every_source_root(
+        self,
+    ) -> None:
+        for source_root in ("src", "app", "test", "benchmark"):
+            with self.subTest(source_root=source_root):
+                with tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    source = root / source_root / "Example.hs"
+                    source.parent.mkdir(parents=True)
+                    source.write_text(
+                        '{-# ANN module ("HLint: ignore Use head" :: String) #-}\n'
+                        "module Example (value) where\n"
+                        "value = 1\n",
+                        encoding="utf-8",
+                    )
+                    with self.assertRaisesRegex(
+                        hlint_inventory.InventoryError,
+                        "source-local HLint suppression",
+                    ):
+                        hlint_inventory.validate_no_source_local_suppressions(root)
+
+    def test_unknown_ignored_diagnostic_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "src/Example.hs"
+            source.parent.mkdir(parents=True)
+            source.write_text(
+                "module Example (value) where\nvalue = 1\n",
+                encoding="utf-8",
+            )
+            diagnostics = [
+                {
+                    "file": str(source),
+                    "severity": "Ignore",
+                    "hint": "Unexpected hidden rule",
+                    "module": ["Example"],
+                    "decl": ["value"],
+                    "from": "value = 1",
+                }
+            ]
+
+            with self.assertRaisesRegex(
+                hlint_inventory.InventoryError,
+                "unknown ignored HLint diagnostic",
+            ):
+                hlint_inventory.validate_managed_ignored_diagnostics(
+                    root,
+                    "",
+                    [],
+                    diagnostics,
+                )
+
+    def test_qualified_throw_io_fixture_is_bound_to_both_global_names(self) -> None:
+        configuration = (HASKELL_ROOT / ".hlint.yaml").read_text(encoding="utf-8")
+        fixture = (
+            HASKELL_ROOT / "tools/fixtures/hlint/qualified-throw-io.hs"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("Exception.throwIO", fixture)
+        hlint_inventory.validate_throw_io_restrictions(configuration)
 
     def test_extra_managed_ignored_diagnostic_is_rejected(self) -> None:
         configuration = """\
