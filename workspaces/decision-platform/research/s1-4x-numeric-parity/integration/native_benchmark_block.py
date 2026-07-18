@@ -12,6 +12,7 @@ import re
 import statistics
 import sys
 from collections.abc import Mapping
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +33,9 @@ from validate_benchmark_report import (  # type: ignore[import-not-found]  # noq
 
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 COMMIT = re.compile(r"^[0-9a-f]{40}$")
+UTC_TIMESTAMP = re.compile(
+    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$"
+)
 NATIVE_FIELDS = {
     "schemaVersion",
     "boundaryId",
@@ -120,6 +124,36 @@ NATIVE_STATISTICS_CASE_FIELDS = {
     "normalizedConfidenceHighNsPerLogicalOperation",
     "normalizedDispersionNsPerLogicalOperation",
 }
+HASKELL_SELECTED_PROFILE_FIELDS = {
+    "schemaVersion",
+    "profileId",
+    "ghcOptions",
+    "compilerVersion",
+    "compilerSha256",
+    "sourceTreeSha256",
+    "optionsSha256",
+    "fullCorrectnessSha256",
+    "qualificationPlanSha256",
+    "qualificationArtifactSha256",
+    "selectorConfigSha256",
+    "fallbackProfile",
+    "selectedBy",
+}
+HASKELL_SOURCE_MANIFEST_FIELDS = {
+    "schemaVersion",
+    "language",
+    "files",
+    "inputSets",
+    "canonicalManifestSha256",
+}
+HASKELL_SOURCE_INPUT_SETS = {
+    "tracked": "files",
+    "manifest": "files",
+    "format": "files",
+    "compile": "files",
+    "lint": "files",
+    "profileRun": "files",
+}
 CRITERION_MEASUREMENT_KEYS = [
     "time",
     "cpuTime",
@@ -136,6 +170,54 @@ CRITERION_MEASUREMENT_KEYS = [
 ]
 # Criterion 1.6.4.0 analyseSample은 total measTime 0.03초 이상만 bootstrap에 사용한다.
 CRITERION_BOOTSTRAP_THRESHOLD_SECONDS = 0.03
+FROZEN_SCALA_CLI_SHA256 = "54b93b8401e333095526da5e4853780d5bf37494baa1ba5486e9e643084253d0"
+FROZEN_SCALAFIX_SHA256 = "9db6db7359e580de8f4b72cd7c104d70023cf32a278db0c30aefb79c939eb0f3"
+FROZEN_SCALAFMT_ARCHIVE_SHA256 = (
+    "e7d43a5621074a63a46d5b287d0b0bb0650033deeb836af2b27515b2127476f2"
+)
+FROZEN_SCALAFMT_EXECUTABLE_SHA256 = (
+    "88526f9f4d64c2fb023d54578812419f49e2ec09e30e4fb77443a05f1a59cac0"
+)
+FROZEN_JAVA_EXECUTABLE_SHA256 = (
+    "ac3505f0c58282f00a6585591324a86b038c89cd171105fe42a1a0cf2f13b517"
+)
+FROZEN_GHCUP_SHA256 = "9ed5da5449b48043a0d17e767c05d2ef585e25a639bb934329496c6d2fad9cf8"
+FROZEN_STACK_SHA256 = "923dbd137756652c67b376e2447c655b87fcc373f4d104b5073bca913471ecbe"
+FROZEN_GHC_910_SHA256 = "d0c0dd79a1bcc5dce3c9e73613c1be51f61b78d5ef7c0970ffe9f142a90a5e2c"
+FROZEN_GHC_914_SHA256 = "ecfd54b4161699f574d2b163bdc817c54df08a08a310323e43b41ab5fc413ef1"
+FROZEN_HLINT_SHA256 = "3ff3fb4b571876d668ddf4ad0245769c19a640283fabb0c2629038aa34197f62"
+FROZEN_STYLISH_HASKELL_SHA256 = (
+    "385dc27bc2d0fb654e76ecadfb57bc0b7e1c58afe74f19923e20b696e6fe0d7b"
+)
+FROZEN_MERGED_TOOLCHAIN_PROVENANCE_SHA256 = (
+    "cd9e29a22473fba6203daa4f3a0cbaa57b8b6e5c5fc22de05ca0801c404ffa98"
+)
+FROZEN_TOOLCHAIN_PROVENANCE_SCHEMA_SHA256 = (
+    "6dc1701aa04903d4b611929da83fef0a02645c846654dca213811c8b941376bd"
+)
+TOOLCHAIN_PROJECTION_FIELDS = (
+    "stackPolicy",
+    "stackInstallCommand",
+    "ghcupToolId",
+    "ghcupVersion",
+    "ghcupReleaseUri",
+    "ghcupAssetUri",
+    "ghcupAssetSha256",
+    "ghcupMetadataCommit",
+    "ghcupMetadataUri",
+    "ghcupMetadataRawUri",
+    "ghcupMetadataRawSha256",
+    "stackDistributionChannel",
+    "stackArchiveUri",
+    "stackArchiveSha256",
+    "stackBinPathId",
+    "stackBinResolver",
+    "stackBinSha256",
+    "stackNumericVersion",
+    "upstreamStandaloneAssetUri",
+    "upstreamStandaloneAssetSha256",
+    "upstreamStandaloneAssetRole",
+)
 
 
 def _exact_object(value: Any, fields: set[str], *, error: str) -> dict[str, Any]:
@@ -162,11 +244,39 @@ def _canonical_sha256(value: Any) -> str:
     ).hexdigest()
 
 
-def _argv_pair(arguments: list[str], option: str, expected: str) -> bool:
-    return any(
-        arguments[index] == option and arguments[index + 1] == expected
-        for index in range(len(arguments) - 1)
-    )
+def _parse_utc_timestamp(value: str) -> datetime | None:
+    if UTC_TIMESTAMP.fullmatch(value) is None:
+        return None
+    try:
+        return datetime.fromisoformat(f"{value[:-1]}+00:00")
+    except ValueError:
+        return None
+
+
+def _bound_regular_file(
+    *,
+    path_value: Any,
+    sha256_value: Any,
+    error: str,
+    expected_path: Path | None = None,
+    expected_sha256: str | None = None,
+) -> Path:
+    if (
+        not isinstance(path_value, str)
+        or not Path(path_value).is_absolute()
+        or SHA256.fullmatch(str(sha256_value)) is None
+    ):
+        raise GateError(error)
+    path = Path(path_value)
+    if (
+        (expected_path is not None and path != expected_path)
+        or path.is_symlink()
+        or not path.is_file()
+        or sha256_file(path) != sha256_value
+        or (expected_sha256 is not None and sha256_value != expected_sha256)
+    ):
+        raise GateError(error)
+    return path
 
 
 def _number(value: Any, *, positive: bool = False) -> float | None:
@@ -289,8 +399,478 @@ def _validate_native_statistics_case(
             statistics_case["dispersionValue"],
             expected["dispersionValue"],
         )
+        or (
+            "logicalOperationsPerInvocation" in expected
+            and statistics_case["logicalOperationsPerInvocation"]
+            != expected["logicalOperationsPerInvocation"]
+        )
+        or (
+            "normalizedP95NsPerLogicalOperation" in expected
+            and not _same_number(
+                statistics_case["normalizedP95NsPerLogicalOperation"],
+                expected["normalizedP95NsPerLogicalOperation"],
+            )
+        )
+        or (
+            "normalizedConfidenceLowNsPerLogicalOperation" in expected
+            and not _same_number(
+                statistics_case[
+                    "normalizedConfidenceLowNsPerLogicalOperation"
+                ],
+                expected["normalizedConfidenceLowNsPerLogicalOperation"],
+            )
+        )
+        or (
+            "normalizedConfidenceHighNsPerLogicalOperation" in expected
+            and not _same_number(
+                statistics_case[
+                    "normalizedConfidenceHighNsPerLogicalOperation"
+                ],
+                expected["normalizedConfidenceHighNsPerLogicalOperation"],
+            )
+        )
+        or (
+            "normalizedDispersionNsPerLogicalOperation" in expected
+            and not _same_number(
+                statistics_case["normalizedDispersionNsPerLogicalOperation"],
+                expected["normalizedDispersionNsPerLogicalOperation"],
+            )
+        )
     ):
         raise GateError(error)
+
+
+def _validate_scala_toolchain_lock(
+    value: Any,
+    *,
+    s1_4x_root: Path,
+    error: str,
+) -> None:
+    lock = _exact_object(
+        value,
+        {
+            "schemaVersion",
+            "language",
+            "mergedToolchainProvenancePath",
+            "mergedToolchainProvenanceSha256",
+            "jdk",
+            "scalaCli",
+            "scala",
+            "scalafmt",
+            "scalafix",
+            "sharedDistributionProvenance",
+        },
+        error=error,
+    )
+    jdk = _exact_object(
+        lock["jdk"],
+        {
+            "javaHomePathId",
+            "implementor",
+            "runtimeVersion",
+            "vmName",
+            "javaExecutableSha256",
+        },
+        error=error,
+    )
+    scala_cli = _exact_object(
+        lock["scalaCli"],
+        {"pathId", "version", "binarySha256", "defaultScalaVersion"},
+        error=error,
+    )
+    scala = _exact_object(
+        lock["scala"],
+        {"version", "projectPath", "projectSha256"},
+        error=error,
+    )
+    scalafmt = _exact_object(
+        lock["scalafmt"],
+        {
+            "version",
+            "configPath",
+            "configSha256",
+            "runnerPathId",
+            "archiveUri",
+            "archivePathId",
+            "archiveSha256",
+            "executablePathId",
+            "executableSha256",
+            "resolvedVersionOutput",
+            "resolutionLogUri",
+            "resolutionLogSha256",
+            "networkPolicy",
+        },
+        error=error,
+    )
+    scalafix = _exact_object(
+        lock["scalafix"],
+        {"pathId", "version", "binarySha256"},
+        error=error,
+    )
+    project_path = s1_4x_root / "scala/project.scala"
+    scalafmt_path = s1_4x_root / "scala/.scalafmt.conf"
+    merged_provenance_path = s1_4x_root / "contract/toolchain-provenance.v1.json"
+    merged_provenance = strict_json_load(merged_provenance_path)
+    if not isinstance(merged_provenance, dict) or any(
+        field not in merged_provenance for field in TOOLCHAIN_PROJECTION_FIELDS
+    ):
+        raise GateError(error)
+    scala_projection_fields = tuple(
+        field
+        for field in TOOLCHAIN_PROJECTION_FIELDS
+        if field not in {"ghcupReleaseUri", "ghcupAssetUri", "upstreamStandaloneAssetUri"}
+    )
+    expected_shared = {
+        field: merged_provenance[field] for field in scala_projection_fields
+    }
+    expected_prefix = "workspaces/decision-platform/research/s1-4x-numeric-parity"
+    if (
+        lock["schemaVersion"] != "s1.4x-scala-toolchain-lock-v1"
+        or lock["language"] != "scala"
+        or lock["mergedToolchainProvenancePath"]
+        != f"{expected_prefix}/contract/toolchain-provenance.v1.json"
+        or lock["mergedToolchainProvenanceSha256"] != FROZEN_MERGED_TOOLCHAIN_PROVENANCE_SHA256
+        or jdk["javaHomePathId"] != "TEMURIN_25_0_3_9_LTS"
+        or jdk["implementor"] != "Eclipse Adoptium"
+        or jdk["runtimeVersion"] != "25.0.3+9-LTS"
+        or jdk["vmName"] != "OpenJDK 64-Bit Server VM"
+        or jdk["javaExecutableSha256"] != FROZEN_JAVA_EXECUTABLE_SHA256
+        or scala_cli
+        != {
+            "pathId": "SCALA_CLI_1_15_0",
+            "version": "1.15.0",
+            "binarySha256": FROZEN_SCALA_CLI_SHA256,
+            "defaultScalaVersion": "3.8.4",
+        }
+        or scala["version"] != "3.8.4"
+        or scala["projectPath"] != f"{expected_prefix}/scala/project.scala"
+        or scala["projectSha256"] != sha256_file(project_path)
+        or scalafmt["version"] != "3.11.4"
+        or scalafmt["configPath"] != f"{expected_prefix}/scala/.scalafmt.conf"
+        or scalafmt["configSha256"] != sha256_file(scalafmt_path)
+        or scalafmt["runnerPathId"] != "SCALA_CLI_1_15_0"
+        or scalafmt["archiveUri"]
+        != (
+            "https://github.com/scalameta/scalafmt/releases/download/"
+            "v3.11.4/scalafmt-x86_64-pc-linux.zip"
+        )
+        or scalafmt["archivePathId"]
+        != (
+            "S1_4X_CACHE_ROOT/coursier/https/github.com/scalameta/scalafmt/"
+            "releases/download/v3.11.4/scalafmt-x86_64-pc-linux.zip"
+        )
+        or scalafmt["archiveSha256"] != FROZEN_SCALAFMT_ARCHIVE_SHA256
+        or scalafmt["executablePathId"]
+        != (
+            "COURSIER_ARCHIVE_CACHE/https/github.com/scalameta/scalafmt/"
+            "releases/download/v3.11.4/scalafmt-x86_64-pc-linux.zip/scalafmt"
+        )
+        or scalafmt["executableSha256"] != FROZEN_SCALAFMT_EXECUTABLE_SHA256
+        or scalafmt["resolvedVersionOutput"] != "scalafmt 3.11.4"
+        or scalafmt["resolutionLogUri"]
+        != "evidence://s1-4x-scala-scalafmt-evidence-9c3cb8f-01/logs/first-apply.stderr"
+        or scalafmt["resolutionLogSha256"]
+        != "1cc7516d57c230f10242f43884f12f3d26cbd6d681dbaed317262148c136b781"
+        or scalafmt["networkPolicy"] != "OFFLINE_PINNED_LAUNCHER"
+        or scalafix
+        != {
+            "pathId": "SCALAFIX_0_14_7",
+            "version": "0.14.7",
+            "binarySha256": FROZEN_SCALAFIX_SHA256,
+        }
+        or lock["sharedDistributionProvenance"] != expected_shared
+    ):
+        raise GateError(error)
+
+
+def _validate_haskell_toolchain_lock(
+    value: Any,
+    *,
+    s1_4x_root: Path,
+    error: str,
+) -> None:
+    lock = _exact_object(
+        value,
+        {
+            "schemaVersion",
+            "snapshot",
+            "mergedToolchainProvenance",
+            "contractProjection",
+            "resolvedTools",
+            "resolverAssertions",
+            "compatibilityPlan",
+            "stackConfigurations",
+        },
+        error=error,
+    )
+    merged = _exact_object(
+        lock["mergedToolchainProvenance"],
+        {"path", "sha256", "schemaPath", "schemaSha256"},
+        error=error,
+    )
+    tools = _exact_object(
+        lock["resolvedTools"],
+        {
+            "ghcup",
+            "authoritativeGhc",
+            "compatibilityGhc",
+            "stack",
+            "hlint",
+            "stylishHaskell",
+        },
+        error=error,
+    )
+    ghcup = _exact_object(
+        tools["ghcup"],
+        {"pathId", "version", "sha256"},
+        error=error,
+    )
+    stack = _exact_object(
+        tools["stack"],
+        {"pathId", "version", "sha256"},
+        error=error,
+    )
+    authoritative_ghc = _exact_object(
+        tools["authoritativeGhc"],
+        {"pathId", "version", "sha256"},
+        error=error,
+    )
+    compatibility_ghc = _exact_object(
+        tools["compatibilityGhc"],
+        {"pathId", "version", "sha256"},
+        error=error,
+    )
+    hlint = _exact_object(
+        tools["hlint"],
+        {"pathId", "version", "sha256"},
+        error=error,
+    )
+    stylish = _exact_object(
+        tools["stylishHaskell"],
+        {"pathId", "version", "sha256"},
+        error=error,
+    )
+    merged_provenance_path = s1_4x_root / "contract/toolchain-provenance.v1.json"
+    merged_schema_path = s1_4x_root / "contract/schemas/toolchain-provenance.schema.json"
+    merged_provenance = strict_json_load(merged_provenance_path)
+    if not isinstance(merged_provenance, dict) or any(
+        field not in merged_provenance for field in TOOLCHAIN_PROJECTION_FIELDS
+    ):
+        raise GateError(error)
+    expected_projection = {
+        field: merged_provenance[field] for field in TOOLCHAIN_PROJECTION_FIELDS
+    }
+    if (
+        lock["schemaVersion"] != "s1.4x-haskell-toolchain-lock-v1"
+        or lock["snapshot"] != "lts-24.50"
+        or merged
+        != {
+            "path": "contract/toolchain-provenance.v1.json",
+            "sha256": FROZEN_MERGED_TOOLCHAIN_PROVENANCE_SHA256,
+            "schemaPath": "contract/schemas/toolchain-provenance.schema.json",
+            "schemaSha256": FROZEN_TOOLCHAIN_PROVENANCE_SCHEMA_SHA256,
+        }
+        or sha256_file(merged_provenance_path)
+        != FROZEN_MERGED_TOOLCHAIN_PROVENANCE_SHA256
+        or sha256_file(merged_schema_path)
+        != FROZEN_TOOLCHAIN_PROVENANCE_SCHEMA_SHA256
+        or lock["contractProjection"] != expected_projection
+        or ghcup
+        != {
+            "pathId": "GHCUP_0_2_6_2_LINUX_X86_64",
+            "version": "0.2.6.2",
+            "sha256": FROZEN_GHCUP_SHA256,
+        }
+        or stack
+        != {
+            "pathId": "GHCUP_STACK_3_11_1",
+            "version": "3.11.1",
+            "sha256": FROZEN_STACK_SHA256,
+        }
+        or authoritative_ghc
+        != {
+            "pathId": "GHCUP_GHC_9_10_3",
+            "version": "9.10.3",
+            "sha256": FROZEN_GHC_910_SHA256,
+        }
+        or compatibility_ghc
+        != {
+            "pathId": "GHCUP_GHC_9_14_1",
+            "version": "9.14.1",
+            "sha256": FROZEN_GHC_914_SHA256,
+        }
+        or hlint
+        != {
+            "pathId": "HLINT_3_10",
+            "version": "3.10",
+            "sha256": FROZEN_HLINT_SHA256,
+        }
+        or stylish
+        != {
+            "pathId": "STYLISH_HASKELL_0_15_1_0",
+            "version": "0.15.1.0",
+            "sha256": FROZEN_STYLISH_HASKELL_SHA256,
+        }
+        or lock["resolverAssertions"]
+        != {
+            "authoritativeGhc": [
+                "--offline",
+                "run",
+                "--quick",
+                "--ghc",
+                "9.10.3",
+                "--stack",
+                "3.11.1",
+                "--",
+                "ghc",
+                "--numeric-version",
+            ],
+            "authoritativeStack": [
+                "--offline",
+                "run",
+                "--quick",
+                "--ghc",
+                "9.10.3",
+                "--stack",
+                "3.11.1",
+                "--",
+                "stack",
+                "--numeric-version",
+            ],
+            "compatibilityGhc": [
+                "--offline",
+                "run",
+                "--quick",
+                "--ghc",
+                "9.14.1",
+                "--stack",
+                "3.11.1",
+                "--",
+                "ghc",
+                "--numeric-version",
+            ],
+        }
+        or not isinstance(lock["compatibilityPlan"], dict)
+        or not isinstance(lock["stackConfigurations"], dict)
+    ):
+        raise GateError(error)
+
+
+def _validate_haskell_selected_profile(
+    value: Any,
+    *,
+    plan: Mapping[str, Any],
+    plan_path: Path,
+    error: str,
+) -> dict[str, Any]:
+    """최종 Haskell profile이 frozen plan/source/compiler identity를 묶는지 검증한다."""
+
+    profile = _exact_object(
+        value,
+        HASKELL_SELECTED_PROFILE_FIELDS,
+        error=error,
+    )
+    options = profile["ghcOptions"]
+    if (
+        profile["schemaVersion"] != "s1.4x-haskell-selected-profile-v1"
+        or profile["profileId"] not in {
+            "baseline-o0-fasm",
+            "optimized-o2-fasm",
+        }
+        or options not in (["-O0", "-fasm"], ["-O2", "-fasm"])
+        or (
+            profile["profileId"] == "baseline-o0-fasm"
+            and options != ["-O0", "-fasm"]
+        )
+        or (
+            profile["profileId"] == "optimized-o2-fasm"
+            and options != ["-O2", "-fasm"]
+        )
+        or profile["compilerVersion"] != "9.10.3"
+        or profile["compilerSha256"] != FROZEN_GHC_910_SHA256
+        or any(
+            SHA256.fullmatch(str(profile[field])) is None
+            for field in (
+                "sourceTreeSha256",
+                "optionsSha256",
+                "fullCorrectnessSha256",
+                "qualificationPlanSha256",
+                "qualificationArtifactSha256",
+                "selectorConfigSha256",
+            )
+        )
+        or profile["optionsSha256"] != _canonical_sha256(options)
+        or profile["qualificationPlanSha256"] != sha256_file(plan_path)
+        or profile["selectorConfigSha256"]
+        != _canonical_sha256(plan.get("haskellProfileQualification"))
+        or profile["fallbackProfile"] != "baseline-o0-fasm"
+        or profile["selectedBy"] not in {
+            "frozen-criterion-selector",
+            "proven-fallback",
+        }
+    ):
+        raise GateError(error)
+    return profile
+
+
+def _validate_haskell_source_manifest(
+    value: Any,
+    *,
+    haskell_root: Path,
+    error: str,
+) -> dict[str, Any]:
+    """Source manifest 내부 digest와 현재 regular source bytes를 함께 고정한다."""
+
+    manifest = _exact_object(
+        value,
+        HASKELL_SOURCE_MANIFEST_FIELDS,
+        error=error,
+    )
+    files = manifest["files"]
+    if (
+        manifest["schemaVersion"] != "s1.4x-source-input-manifest-v1"
+        or manifest["language"] != "haskell"
+        or manifest["inputSets"] != HASKELL_SOURCE_INPUT_SETS
+        or not isinstance(files, dict)
+        or not files
+        or any(not isinstance(relative_path, str) for relative_path in files)
+        or SHA256.fullmatch(str(manifest["canonicalManifestSha256"])) is None
+    ):
+        raise GateError(error)
+    manifest_lines: list[str] = []
+    for relative_path in sorted(files, key=str.encode):
+        metadata = _exact_object(
+            files[relative_path],
+            {"role", "sha256"},
+            error=error,
+        )
+        relative = Path(relative_path)
+        if (
+            not isinstance(relative_path, str)
+            or not relative_path
+            or relative.is_absolute()
+            or ".." in relative.parts
+            or not isinstance(metadata["role"], str)
+            or not metadata["role"]
+            or SHA256.fullmatch(str(metadata["sha256"])) is None
+        ):
+            raise GateError(error)
+        source = haskell_root / relative
+        try:
+            source.resolve(strict=True).relative_to(haskell_root.resolve(strict=True))
+        except (OSError, ValueError) as exc:
+            raise GateError(error) from exc
+        if (
+            source.is_symlink()
+            or not source.is_file()
+            or sha256_file(source) != metadata["sha256"]
+        ):
+            raise GateError(error)
+        manifest_lines.append(f"{metadata['sha256']}  {relative_path}\n")
+    closure_sha256 = hashlib.sha256("".join(manifest_lines).encode("utf-8")).hexdigest()
+    if manifest["canonicalManifestSha256"] != closure_sha256:
+        raise GateError(error)
+    return manifest
 
 
 def _validate_execution_receipt(
@@ -306,7 +886,7 @@ def _validate_execution_receipt(
     input_ledger_path: Path,
     effective_runtime_arguments_sha256: str,
     profile: str,
-) -> None:
+) -> str | None:
     receipt_path_text = item["executionReceiptPath"]
     if (
         not isinstance(receipt_path_text, str)
@@ -393,14 +973,51 @@ def _validate_execution_receipt(
             candidate_provenance,
             {
                 "kind",
+                "selectedProfilePath",
+                "selectedProfileSha256",
+                "selectedProfileId",
+                "sourceInputManifestPath",
+                "sourceInputManifestSha256",
+                "toolchainLockPath",
+                "toolchainLockSha256",
+                "mergedToolchainProvenancePath",
+                "mergedToolchainProvenanceSha256",
                 "effectiveJvmArgumentsCapabilityPath",
                 "effectiveJvmArgumentsCapabilitySha256",
             },
             error=f"NATIVE_EXECUTION_PROVENANCE_INVALID:{case_id}",
         )
+        selected_profile_path_text = scala_provenance["selectedProfilePath"]
+        source_manifest_path_text = scala_provenance["sourceInputManifestPath"]
         capability_path_text = scala_provenance["effectiveJvmArgumentsCapabilityPath"]
+        s1_4x_root = resolved_plan.parent.parent
+        expected_project_path = s1_4x_root / "scala/project.scala"
+        expected_profile_path = s1_4x_root / "scala/selected-profile.scala"
+        expected_source_manifest_path = s1_4x_root / "scala/source-inputs.v1.json"
+        expected_source_path = s1_4x_root / "scala/src/main/scala"
+        expected_benchmark_path = s1_4x_root / "scala/benchmarks"
+        expected_toolchain_lock_path = s1_4x_root / "scala/toolchain-lock.v1.json"
+        expected_merged_provenance_path = s1_4x_root / "contract/toolchain-provenance.v1.json"
         if (
             scala_provenance["kind"] != "scala"
+            or provenance["benchmarkExecutableSha256"] != FROZEN_SCALA_CLI_SHA256
+            or not isinstance(selected_profile_path_text, str)
+            or not Path(selected_profile_path_text).is_absolute()
+            or selected_profile_path_text != str(expected_profile_path)
+            or SHA256.fullmatch(str(scala_provenance["selectedProfileSha256"])) is None
+            or Path(selected_profile_path_text).is_symlink()
+            or not Path(selected_profile_path_text).is_file()
+            or sha256_file(Path(selected_profile_path_text))
+            != scala_provenance["selectedProfileSha256"]
+            or scala_provenance["selectedProfileId"] != profile
+            or not isinstance(source_manifest_path_text, str)
+            or not Path(source_manifest_path_text).is_absolute()
+            or source_manifest_path_text != str(expected_source_manifest_path)
+            or SHA256.fullmatch(str(scala_provenance["sourceInputManifestSha256"])) is None
+            or Path(source_manifest_path_text).is_symlink()
+            or not Path(source_manifest_path_text).is_file()
+            or sha256_file(Path(source_manifest_path_text))
+            != scala_provenance["sourceInputManifestSha256"]
             or not isinstance(capability_path_text, str)
             or not Path(capability_path_text).is_absolute()
             or SHA256.fullmatch(str(scala_provenance["effectiveJvmArgumentsCapabilitySha256"]))
@@ -409,25 +1026,93 @@ def _validate_execution_receipt(
             or not Path(capability_path_text).is_file()
             or sha256_file(Path(capability_path_text))
             != scala_provenance["effectiveJvmArgumentsCapabilitySha256"]
+            or expected_project_path.is_symlink()
+            or not expected_project_path.is_file()
+            or expected_source_path.is_symlink()
+            or not expected_source_path.is_dir()
+            or expected_benchmark_path.is_symlink()
+            or not expected_benchmark_path.is_dir()
         ):
             raise GateError(f"NATIVE_EXECUTION_PROVENANCE_INVALID:{case_id}")
-        required_pairs = {
-            "-bm": "avgt",
-            "-tu": "ns",
-            "-t": "1",
-            "-f": "3",
-            "-wi": "5",
-            "-i": "10",
-            "-w": "1s",
-            "-r": "1s",
-            "-rf": "json",
-            "-rff": str(block_directory / item["rawEvidencePath"]),
-        }
-        if any(
-            not _argv_pair(arguments, option, expected)
-            for option, expected in required_pairs.items()
+        toolchain_lock_path = _bound_regular_file(
+            path_value=scala_provenance["toolchainLockPath"],
+            sha256_value=scala_provenance["toolchainLockSha256"],
+            expected_path=expected_toolchain_lock_path,
+            error=f"NATIVE_EXECUTION_PROVENANCE_INVALID:{case_id}",
+        )
+        _bound_regular_file(
+            path_value=scala_provenance["mergedToolchainProvenancePath"],
+            sha256_value=scala_provenance["mergedToolchainProvenanceSha256"],
+            expected_path=expected_merged_provenance_path,
+            expected_sha256=FROZEN_MERGED_TOOLCHAIN_PROVENANCE_SHA256,
+            error=f"NATIVE_EXECUTION_PROVENANCE_INVALID:{case_id}",
+        )
+        _validate_scala_toolchain_lock(
+            strict_json_load(toolchain_lock_path),
+            s1_4x_root=s1_4x_root,
+            error=f"NATIVE_EXECUTION_PROVENANCE_INVALID:{case_id}",
+        )
+        selector = next(
+            (
+                entry
+                for entry in plan.get("familySelectors", [])
+                if isinstance(entry, dict) and entry.get("selectorId") == selector_id
+            ),
+            None,
+        )
+        jmh_include_regex = selector.get("jmhIncludeRegex") if isinstance(selector, dict) else None
+        selector_case_ids = selector.get("expectedCaseIds") if isinstance(selector, dict) else None
+        raw_path = str(block_directory / item["rawEvidencePath"])
+        expected_arguments = [
+            benchmark_executable_text,
+            "--power",
+            "run",
+            str(expected_project_path),
+            str(expected_profile_path),
+            str(expected_source_path),
+            str(expected_benchmark_path),
+            "--server=false",
+            "--jvm",
+            "system",
+            "--jmh",
+            "--jmh-version",
+            "1.37",
+            "--",
+            "-bm",
+            "avgt",
+            "-tu",
+            "ns",
+            "-t",
+            "1",
+            "-f",
+            "3",
+            "-wi",
+            "5",
+            "-i",
+            "10",
+            "-w",
+            "1s",
+            "-r",
+            "1s",
+            "-rf",
+            "json",
+            "-rff",
+            raw_path,
+            str(jmh_include_regex),
+        ]
+        try:
+            compiled_selector = (
+                re.compile(jmh_include_regex) if isinstance(jmh_include_regex, str) else None
+            )
+        except re.error as exc:
+            raise GateError(f"NATIVE_EXECUTION_ARGV_INVALID:{case_id}") from exc
+        if (
+            compiled_selector is None
+            or selector_case_ids != expected_case_ids
+            or arguments != expected_arguments
         ):
             raise GateError(f"NATIVE_EXECUTION_ARGV_INVALID:{case_id}")
+        return jmh_include_regex
     else:
         haskell_provenance = _exact_object(
             candidate_provenance,
@@ -436,7 +1121,15 @@ def _validate_execution_receipt(
                 "selectedProfilePath",
                 "selectedProfileSha256",
                 "selectedProfileId",
+                "sourceInputManifestPath",
+                "sourceInputManifestSha256",
                 "effectiveCompilerFlagsSha256",
+                "markerPythonPath",
+                "markerPythonSha256",
+                "markerScriptPath",
+                "markerScriptSha256",
+                "markerArgv",
+                "markerArgvSha256",
                 "ghcupPath",
                 "ghcupSha256",
                 "stackPath",
@@ -444,29 +1137,79 @@ def _validate_execution_receipt(
                 "stackYamlPath",
                 "stackYamlSha256",
                 "selectedGhcOptions",
+                "toolchainLockPath",
+                "toolchainLockSha256",
+                "mergedToolchainProvenancePath",
+                "mergedToolchainProvenanceSha256",
             },
             error=f"NATIVE_EXECUTION_PROVENANCE_INVALID:{case_id}",
         )
         selected_profile_text = haskell_provenance["selectedProfilePath"]
+        source_manifest_text = haskell_provenance["sourceInputManifestPath"]
+        marker_python_text = haskell_provenance["markerPythonPath"]
+        marker_script_text = haskell_provenance["markerScriptPath"]
+        marker_argv = haskell_provenance["markerArgv"]
         ghcup_path_text = haskell_provenance["ghcupPath"]
         stack_path_text = haskell_provenance["stackPath"]
         stack_yaml_path_text = haskell_provenance["stackYamlPath"]
         selected_options = haskell_provenance["selectedGhcOptions"]
+        s1_4x_root = resolved_plan.parent.parent
+        expected_profile_path = s1_4x_root / "haskell/selected-profile.v1.json"
+        expected_source_manifest_path = s1_4x_root / "haskell/source-inputs.v1.json"
+        expected_marker_script_path = s1_4x_root / "benchmarks/run_rotated_blocks.py"
+        expected_qualification_path = block_directory / "timeout-qualification.json"
+        expected_stack_yaml_path = s1_4x_root / "haskell/stack.yaml"
+        expected_toolchain_lock_path = s1_4x_root / "haskell/toolchain-lock.v1.json"
+        expected_merged_provenance_path = s1_4x_root / "contract/toolchain-provenance.v1.json"
         if (
             haskell_provenance["kind"] != "haskell"
             or not isinstance(selected_profile_text, str)
             or not Path(selected_profile_text).is_absolute()
+            or selected_profile_text != str(expected_profile_path)
+            or not isinstance(source_manifest_text, str)
+            or not Path(source_manifest_text).is_absolute()
+            or source_manifest_text != str(expected_source_manifest_path)
+            or not isinstance(marker_python_text, str)
+            or not Path(marker_python_text).is_absolute()
+            or not isinstance(marker_script_text, str)
+            or marker_script_text != str(expected_marker_script_path)
+            or not isinstance(marker_argv, list)
             or not isinstance(ghcup_path_text, str)
             or not isinstance(stack_path_text, str)
             or not isinstance(stack_yaml_path_text, str)
             or not Path(ghcup_path_text).is_absolute()
             or not Path(stack_path_text).is_absolute()
             or not Path(stack_yaml_path_text).is_absolute()
+            or stack_yaml_path_text != str(expected_stack_yaml_path)
             or SHA256.fullmatch(str(haskell_provenance["selectedProfileSha256"])) is None
             or Path(selected_profile_text).is_symlink()
             or not Path(selected_profile_text).is_file()
             or sha256_file(Path(selected_profile_text))
             != haskell_provenance["selectedProfileSha256"]
+            or SHA256.fullmatch(
+                str(haskell_provenance["sourceInputManifestSha256"])
+            )
+            is None
+            or Path(source_manifest_text).is_symlink()
+            or not Path(source_manifest_text).is_file()
+            or sha256_file(Path(source_manifest_text))
+            != haskell_provenance["sourceInputManifestSha256"]
+            or SHA256.fullmatch(str(haskell_provenance["markerPythonSha256"]))
+            is None
+            or SHA256.fullmatch(str(haskell_provenance["markerScriptSha256"]))
+            is None
+            or SHA256.fullmatch(str(haskell_provenance["markerArgvSha256"]))
+            is None
+            or marker_argv
+            != [
+                marker_python_text,
+                marker_script_text,
+                "mark-measurement-entered",
+                "--qualification",
+                str(expected_qualification_path),
+            ]
+            or haskell_provenance["markerArgvSha256"]
+            != _canonical_sha256(marker_argv)
             or haskell_provenance["selectedProfileId"] != profile
             or haskell_provenance["effectiveCompilerFlagsSha256"]
             != effective_runtime_arguments_sha256
@@ -475,29 +1218,66 @@ def _validate_execution_receipt(
             or SHA256.fullmatch(str(haskell_provenance["ghcupSha256"])) is None
             or SHA256.fullmatch(str(haskell_provenance["stackSha256"])) is None
             or SHA256.fullmatch(str(haskell_provenance["stackYamlSha256"])) is None
+            or haskell_provenance["ghcupSha256"] != FROZEN_GHCUP_SHA256
+            or haskell_provenance["stackSha256"] != FROZEN_STACK_SHA256
         ):
             raise GateError(f"NATIVE_EXECUTION_PROVENANCE_INVALID:{case_id}")
         ghcup_path = Path(ghcup_path_text)
         stack_path = Path(stack_path_text)
         stack_yaml_path = Path(stack_yaml_path_text)
+        marker_python_path = Path(marker_python_text)
+        marker_script_path = Path(marker_script_text)
         if (
             any(
                 path.is_symlink() or not path.is_file()
-                for path in (ghcup_path, stack_path, stack_yaml_path)
+                for path in (
+                    ghcup_path,
+                    stack_path,
+                    stack_yaml_path,
+                    marker_python_path,
+                    marker_script_path,
+                )
             )
             or sha256_file(ghcup_path) != haskell_provenance["ghcupSha256"]
             or sha256_file(stack_path) != haskell_provenance["stackSha256"]
             or sha256_file(stack_yaml_path) != haskell_provenance["stackYamlSha256"]
+            or sha256_file(marker_python_path)
+            != haskell_provenance["markerPythonSha256"]
+            or sha256_file(marker_script_path)
+            != haskell_provenance["markerScriptSha256"]
         ):
             raise GateError(f"NATIVE_EXECUTION_PROVENANCE_INVALID:{case_id}")
-        selected_profile = _exact_object(
+        toolchain_lock_path = _bound_regular_file(
+            path_value=haskell_provenance["toolchainLockPath"],
+            sha256_value=haskell_provenance["toolchainLockSha256"],
+            expected_path=expected_toolchain_lock_path,
+            error=f"NATIVE_EXECUTION_PROVENANCE_INVALID:{case_id}",
+        )
+        _bound_regular_file(
+            path_value=haskell_provenance["mergedToolchainProvenancePath"],
+            sha256_value=haskell_provenance["mergedToolchainProvenanceSha256"],
+            expected_path=expected_merged_provenance_path,
+            expected_sha256=FROZEN_MERGED_TOOLCHAIN_PROVENANCE_SHA256,
+            error=f"NATIVE_EXECUTION_PROVENANCE_INVALID:{case_id}",
+        )
+        _validate_haskell_toolchain_lock(
+            strict_json_load(toolchain_lock_path),
+            s1_4x_root=s1_4x_root,
+            error=f"NATIVE_EXECUTION_PROVENANCE_INVALID:{case_id}",
+        )
+        selected_profile = _validate_haskell_selected_profile(
             strict_json_load(Path(selected_profile_text)),
-            {"schemaVersion", "profileId", "ghcOptions", "optionsSha256"},
+            plan=plan,
+            plan_path=resolved_plan,
+            error=f"NATIVE_EXECUTION_PROVENANCE_INVALID:{case_id}",
+        )
+        _validate_haskell_source_manifest(
+            strict_json_load(Path(source_manifest_text)),
+            haskell_root=s1_4x_root / "haskell",
             error=f"NATIVE_EXECUTION_PROVENANCE_INVALID:{case_id}",
         )
         if (
-            selected_profile["schemaVersion"] != "s1.4x-haskell-selected-profile-v1"
-            or selected_profile["profileId"] != profile
+            selected_profile["profileId"] != profile
             or selected_profile["optionsSha256"] != effective_runtime_arguments_sha256
             or selected_profile["ghcOptions"] != selected_options
         ):
@@ -511,13 +1291,13 @@ def _validate_execution_receipt(
             None,
         )
         criterion_prefix = selector.get("criterionPrefix") if isinstance(selector, dict) else None
-        selector_case_ids = (
-            selector.get("expectedCaseIds") if isinstance(selector, dict) else None
-        )
+        selector_case_ids = selector.get("expectedCaseIds") if isinstance(selector, dict) else None
         raw_path = str(block_directory / item["rawEvidencePath"])
         expected_arguments = [
             str(ghcup_path),
+            "--offline",
             "run",
+            "--quick",
             "--ghc",
             "9.10.3",
             "--stack",
@@ -526,6 +1306,9 @@ def _validate_execution_receipt(
             str(stack_path),
             "--stack-yaml",
             str(stack_yaml_path),
+            "--no-terminal",
+            "--color",
+            "never",
             "--system-ghc",
             "--no-install-ghc",
             "bench",
@@ -543,26 +1326,37 @@ def _validate_execution_receipt(
             or arguments != expected_arguments
         ):
             raise GateError(f"NATIVE_EXECUTION_ARGV_INVALID:{case_id}")
+    return None
 
 
 def _parse_jmh_raw(
     value: Any,
     *,
     case_id: str,
+    jmh_include_regex: str,
     native_case: Mapping[str, Any],
     native_statistics_case: Mapping[str, Any],
 ) -> None:
     if not isinstance(value, list) or len(value) != 1 or not isinstance(value[0], dict):
         raise GateError(f"JMH_RAW_DOCUMENT_INVALID:{case_id}")
     result = value[0]
+    benchmark_name = result.get("benchmark")
+    hidden_parameters = result.get("params", {})
+    try:
+        benchmark_matches = (
+            isinstance(benchmark_name, str)
+            and re.fullmatch(jmh_include_regex, benchmark_name) is not None
+        )
+    except re.error as exc:
+        raise GateError(f"JMH_RAW_CASE_SELECTION_INVALID:{case_id}") from exc
+    if not benchmark_matches or hidden_parameters != {}:
+        raise GateError(f"JMH_RAW_CASE_SELECTION_INVALID:{case_id}")
     metric = result.get("primaryMetric")
     raw_data = metric.get("rawData") if isinstance(metric, dict) else None
     score = metric.get("score") if isinstance(metric, dict) else None
     score_confidence = metric.get("scoreConfidence") if isinstance(metric, dict) else None
     if (
         result.get("jmhVersion") != "1.37"
-        or not isinstance(result.get("benchmark"), str)
-        or not result["benchmark"]
         or result.get("mode") != "avgt"
         or result.get("threads") != 1
         or result.get("forks") != 3
@@ -629,9 +1423,8 @@ def _parse_criterion_report(
     *,
     report_number: int,
     case_id: str,
-    native_case: Mapping[str, Any],
-    native_statistics_case: Mapping[str, Any],
-) -> None:
+    logical_operations_per_invocation: int,
+) -> tuple[dict[str, Any], dict[str, Any]]:
     report = _exact_object(
         report_value,
         {
@@ -652,9 +1445,8 @@ def _parse_criterion_report(
         or report["reportKeys"] != CRITERION_MEASUREMENT_KEYS
         or not isinstance(measurements, list)
         or len(measurements) < 2
-        or native_case.get("samples") != len(measurements)
-        or native_case.get("warmupIterations") != 0
-        or native_case.get("measurementIterations") != len(measurements)
+        or type(logical_operations_per_invocation) is not int
+        or logical_operations_per_invocation < 1
     ):
         raise GateError(f"CRITERION_RAW_CONTRACT_INVALID:{case_id}")
     samples: list[float] = []
@@ -751,10 +1543,6 @@ def _parse_criterion_report(
             standard_deviation["point"],
             statistics.stdev(bootstrap_samples),
         )
-        or not _same_number(
-            native_case.get("nativeValue"),
-            regression_time["point"],
-        )
     ):
         raise GateError(f"CRITERION_RAW_CONTRACT_INVALID:{case_id}")
     outlier_variance = _exact_object(
@@ -799,38 +1587,56 @@ def _parse_criterion_report(
             or any(_number(item) is None or float(item) < 0.0 for item in kde["kdePDF"])
         ):
             raise GateError(f"CRITERION_RAW_CONTRACT_INVALID:{case_id}")
-    _validate_native_statistics_case(
-        native_statistics_case,
-        case_id=case_id,
-        expected={
-            "nativeSampleCount": len(samples),
-            "nativeP95": _nearest_rank_p95(samples),
-            "confidenceLevel": regression_time["confidenceLevel"],
-            "confidenceLow": regression_time["confidenceLow"],
-            "confidenceHigh": regression_time["confidenceHigh"],
-            "dispersionMetric": ("criterion-bootstrap-standard-deviation-seconds-per-invocation"),
-            "dispersionValue": standard_deviation["point"],
-            "nativeUnit": "s",
-        },
-        error=f"CRITERION_NATIVE_STATISTICS_MISMATCH:{case_id}",
-    )
+    scale = 1_000_000_000.0 / logical_operations_per_invocation
+    native_p95 = _nearest_rank_p95(samples)
+    dispersion = standard_deviation["point"]
+    native_case = {
+        "caseId": case_id,
+        "nativeValue": regression_time["point"],
+        "samples": len(measurements),
+        "warmupIterations": 0,
+        "measurementIterations": len(measurements),
+    }
+    native_statistics_case = {
+        "caseId": case_id,
+        "nativeSampleCount": len(samples),
+        "nativeP95": native_p95,
+        "confidenceLevel": regression_time["confidenceLevel"],
+        "confidenceLow": regression_time["confidenceLow"],
+        "confidenceHigh": regression_time["confidenceHigh"],
+        "dispersionMetric": (
+            "criterion-bootstrap-standard-deviation-seconds-per-invocation"
+        ),
+        "dispersionValue": dispersion,
+        "nativeUnit": "s",
+        "logicalOperationsPerInvocation": logical_operations_per_invocation,
+        "normalizedP95NsPerLogicalOperation": native_p95 * scale,
+        "normalizedConfidenceLowNsPerLogicalOperation": (
+            regression_time["confidenceLow"] * scale
+        ),
+        "normalizedConfidenceHighNsPerLogicalOperation": (
+            regression_time["confidenceHigh"] * scale
+        ),
+        "normalizedDispersionNsPerLogicalOperation": dispersion * scale,
+    }
+    return native_case, native_statistics_case
 
 
 def _parse_criterion_family_raw(
     value: Any,
     *,
-    native_cases: list[dict[str, Any]],
-    native_statistics_cases: list[dict[str, Any]],
-) -> None:
-    expected_case_ids = [str(case["caseId"]) for case in native_cases]
+    expected_case_ids: list[str],
+    logical_operations_by_case: Mapping[str, int],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     if (
         not isinstance(value, list)
         or len(value) != 3
         or value[0] != "criterion"
         or value[1] != "1.6.4.0"
         or not isinstance(value[2], list)
-        or not 2 <= len(native_cases) <= 45
-        or len(value[2]) != len(native_cases)
+        or not 2 <= len(expected_case_ids) <= 45
+        or len(value[2]) != len(expected_case_ids)
+        or set(logical_operations_by_case) != set(expected_case_ids)
     ):
         raise GateError("CRITERION_RAW_DOCUMENT_INVALID")
     actual_names = [
@@ -838,21 +1644,19 @@ def _parse_criterion_family_raw(
     ]
     if actual_names != expected_case_ids:
         raise GateError("CRITERION_RAW_CASE_ORDER_INVALID")
-    for report_number, (report, native_case, native_statistics_case) in enumerate(
-        zip(
-            value[2],
-            native_cases,
-            native_statistics_cases,
-            strict=True,
-        )
-    ):
-        _parse_criterion_report(
+    native_cases: list[dict[str, Any]] = []
+    native_statistics_cases: list[dict[str, Any]] = []
+    for report_number, report in enumerate(value[2]):
+        case_id = expected_case_ids[report_number]
+        native_case, native_statistics_case = _parse_criterion_report(
             report,
             report_number=report_number,
-            case_id=expected_case_ids[report_number],
-            native_case=native_case,
-            native_statistics_case=native_statistics_case,
+            case_id=case_id,
+            logical_operations_per_invocation=logical_operations_by_case[case_id],
         )
+        native_cases.append(native_case)
+        native_statistics_cases.append(native_statistics_case)
+    return native_cases, native_statistics_cases
 
 
 def validate_native_contract_evidence(
@@ -1039,7 +1843,7 @@ def validate_native_contract_evidence(
             or profile is None
         ):
             raise GateError("NATIVE_EXECUTION_CONTEXT_INVALID")
-        _validate_execution_receipt(
+        receipt_selector = _validate_execution_receipt(
             item=item,
             boundary_id=boundary_id,
             selector_id=selector_id,
@@ -1053,11 +1857,15 @@ def validate_native_contract_evidence(
             profile=profile,
         )
         if boundary_id == "scala":
-            if native_statistics_case is None:
+            if native_statistics_case is None or not isinstance(
+                receipt_selector,
+                str,
+            ):
                 raise GateError(f"NATIVE_STATISTICS_CASE_INVALID:{case_id}")
             _parse_jmh_raw(
                 strict_json_load(raw_path),
                 case_id=str(case_id),
+                jmh_include_regex=receipt_selector,
                 native_case=native_case,
                 native_statistics_case=native_statistics_case,
             )
@@ -1083,12 +1891,351 @@ def validate_native_contract_evidence(
             or native_statistics_cases is None
         ):
             raise GateError("CRITERION_FAMILY_EVIDENCE_NOT_SHARED")
-        _parse_criterion_family_raw(
-            strict_json_load(haskell_raw_path),
-            native_cases=native_cases,
-            native_statistics_cases=native_statistics_cases,
+        if plan_path is None:
+            raise GateError("NATIVE_EXECUTION_CONTEXT_INVALID")
+        plan_document = strict_json_load(plan_path)
+        frozen_cases = (
+            plan_document.get("cases") if isinstance(plan_document, dict) else None
         )
+        if not isinstance(frozen_cases, list):
+            raise GateError("CRITERION_FROZEN_CASES_INVALID")
+        frozen_case_by_id = {
+            case.get("caseId"): case
+            for case in frozen_cases
+            if isinstance(case, dict) and isinstance(case.get("caseId"), str)
+        }
+        logical_operations_by_case: dict[str, int] = {}
+        for case_id in expected_case_ids:
+            frozen_case = frozen_case_by_id.get(case_id)
+            logical_operations = (
+                frozen_case.get("logicalOperationsPerInvocation")
+                if isinstance(frozen_case, dict)
+                else None
+            )
+            if type(logical_operations) is not int or logical_operations < 1:
+                raise GateError("CRITERION_FROZEN_CASES_INVALID")
+            logical_operations_by_case[case_id] = logical_operations
+        parsed_native_cases, parsed_statistics_cases = _parse_criterion_family_raw(
+            strict_json_load(haskell_raw_path),
+            expected_case_ids=expected_case_ids,
+            logical_operations_by_case=logical_operations_by_case,
+        )
+        for native_case, expected_native_case in zip(
+            native_cases,
+            parsed_native_cases,
+            strict=True,
+        ):
+            actual = _exact_object(
+                native_case,
+                NATIVE_CASE_FIELDS,
+                error=(
+                    "CRITERION_NATIVE_CASE_MISMATCH:"
+                    f"{expected_native_case['caseId']}"
+                ),
+            )
+            if (
+                actual["caseId"] != expected_native_case["caseId"]
+                or actual["samples"] != expected_native_case["samples"]
+                or actual["warmupIterations"]
+                != expected_native_case["warmupIterations"]
+                or actual["measurementIterations"]
+                != expected_native_case["measurementIterations"]
+                or not _same_number(
+                    actual["nativeValue"],
+                    expected_native_case["nativeValue"],
+                )
+            ):
+                raise GateError(
+                    "CRITERION_NATIVE_CASE_MISMATCH:"
+                    f"{expected_native_case['caseId']}"
+                )
+        for statistics_case, expected_statistics_case in zip(
+            native_statistics_cases,
+            parsed_statistics_cases,
+            strict=True,
+        ):
+            _validate_native_statistics_case(
+                statistics_case,
+                case_id=str(expected_statistics_case["caseId"]),
+                expected=expected_statistics_case,
+                error=(
+                    "CRITERION_NATIVE_STATISTICS_MISMATCH:"
+                    f"{expected_statistics_case['caseId']}"
+                ),
+            )
     return document
+
+
+def produce_haskell_native_evidence(
+    *,
+    repo_root: Path,
+    plan_path: Path,
+    block_directory: Path,
+    selector_id: str,
+    criterion_raw_path: Path,
+    execution_receipt_path: Path,
+    input_ledger_path: Path,
+    fixture_root_path: Path,
+    selected_profile_path: Path,
+    source_input_manifest_path: Path,
+    toolchain_lock_path: Path,
+    merged_toolchain_provenance_path: Path,
+    benchmark_artifact_path: Path,
+    started_at: str,
+    finished_at: str,
+) -> dict[str, Any]:
+    """Criterion family raw를 공통 parser로만 계산해 세 native evidence를 배타 발행한다."""
+
+    repo = repo_root.resolve(strict=True)
+    plan_file = plan_path.resolve(strict=True)
+    block = block_directory.resolve(strict=True)
+    raw_file = criterion_raw_path.resolve(strict=True)
+    receipt_file = execution_receipt_path.resolve(strict=True)
+    ledger_file = input_ledger_path.resolve(strict=True)
+    fixture_root = fixture_root_path.resolve(strict=True)
+    profile_file = selected_profile_path.resolve(strict=True)
+    source_manifest_file = source_input_manifest_path.resolve(strict=True)
+    toolchain_lock_file = toolchain_lock_path.resolve(strict=True)
+    merged_provenance_file = merged_toolchain_provenance_path.resolve(strict=True)
+    benchmark_artifact = benchmark_artifact_path.resolve(strict=True)
+    started_timestamp = _parse_utc_timestamp(started_at)
+    finished_timestamp = _parse_utc_timestamp(finished_at)
+    if (
+        not repo.is_dir()
+        or not block.is_dir()
+        or raw_file != block / "raw/criterion-family.json"
+        or receipt_file != block / "receipts/criterion-family.json"
+        or ledger_file != block / "input-ledger.json"
+        or any(
+            path.is_symlink() or not path.is_file()
+            for path in (
+                plan_file,
+                raw_file,
+                receipt_file,
+                ledger_file,
+                profile_file,
+                source_manifest_file,
+                toolchain_lock_file,
+                merged_provenance_file,
+                benchmark_artifact,
+            )
+        )
+        or started_timestamp is None
+        or finished_timestamp is None
+        or started_timestamp >= finished_timestamp
+    ):
+        raise GateError("HASKELL_NATIVE_PRODUCER_INPUT_INVALID")
+    s1_4x_root = plan_file.parent.parent
+    haskell_root = s1_4x_root / "haskell"
+    if (
+        profile_file != haskell_root / "selected-profile.v1.json"
+        or source_manifest_file != haskell_root / "source-inputs.v1.json"
+        or toolchain_lock_file != haskell_root / "toolchain-lock.v1.json"
+        or merged_provenance_file
+        != s1_4x_root / "contract/toolchain-provenance.v1.json"
+    ):
+        raise GateError("HASKELL_NATIVE_PRODUCER_PROVENANCE_PATH_INVALID")
+    output_paths = {
+        "nativeContractValidationSha256": (
+            block / "native-contract-validation.json"
+        ),
+        "nativeReportSha256": block / "native.json",
+        "nativeStatisticsSha256": block / "native-statistics.json",
+    }
+    if any(path.exists() or path.is_symlink() for path in output_paths.values()):
+        raise GateError("HASKELL_NATIVE_OUTPUT_ALREADY_EXISTS")
+    plan = validate_plan(plan_file)
+    selector = next(
+        (
+            item
+            for item in plan["familySelectors"]
+            if item.get("selectorId") == selector_id
+        ),
+        None,
+    )
+    if (
+        not isinstance(selector, dict)
+        or selector.get("boundaryId") != "haskell"
+        or selector.get("criterionMatchMode") != "prefix"
+        or not isinstance(selector.get("criterionPrefix"), str)
+        or not selector["criterionPrefix"]
+        or not isinstance(selector.get("expectedCaseIds"), list)
+    ):
+        raise GateError("HASKELL_NATIVE_SELECTOR_INVALID")
+    expected_case_ids = selector["expectedCaseIds"]
+    if (
+        not 2 <= len(expected_case_ids) <= 45
+        or any(not isinstance(case_id, str) or not case_id for case_id in expected_case_ids)
+        or len(set(expected_case_ids)) != len(expected_case_ids)
+    ):
+        raise GateError("HASKELL_NATIVE_SELECTOR_INVALID")
+    frozen_case_by_id = {
+        case["caseId"]: case
+        for case in plan["cases"]
+        if isinstance(case, dict) and isinstance(case.get("caseId"), str)
+    }
+    logical_operations_by_case: dict[str, int] = {}
+    for case_id in expected_case_ids:
+        frozen_case = frozen_case_by_id.get(case_id)
+        logical_operations = (
+            frozen_case.get("logicalOperationsPerInvocation")
+            if isinstance(frozen_case, dict)
+            else None
+        )
+        if type(logical_operations) is not int or logical_operations < 1:
+            raise GateError(f"HASKELL_NATIVE_FROZEN_CASE_INVALID:{case_id}")
+        logical_operations_by_case[case_id] = logical_operations
+    validate_input_ledger(
+        strict_json_load(ledger_file),
+        plan=plan,
+        plan_path=plan_file,
+        repo_root=repo,
+        boundary_id="haskell",
+        selector_id=selector_id,
+    )
+    profile = _validate_haskell_selected_profile(
+        strict_json_load(profile_file),
+        plan=plan,
+        plan_path=plan_file,
+        error="HASKELL_NATIVE_SELECTED_PROFILE_INVALID",
+    )
+    _validate_haskell_source_manifest(
+        strict_json_load(source_manifest_file),
+        haskell_root=haskell_root,
+        error="HASKELL_NATIVE_SOURCE_MANIFEST_INVALID",
+    )
+    _validate_haskell_toolchain_lock(
+        strict_json_load(toolchain_lock_file),
+        s1_4x_root=s1_4x_root,
+        error="HASKELL_NATIVE_TOOLCHAIN_LOCK_INVALID",
+    )
+    if (
+        merged_provenance_file.is_symlink()
+        or sha256_file(merged_provenance_file)
+        != FROZEN_MERGED_TOOLCHAIN_PROVENANCE_SHA256
+    ):
+        raise GateError("HASKELL_NATIVE_TOOLCHAIN_PROVENANCE_INVALID")
+    raw_sha256 = sha256_file(raw_file)
+    receipt_sha256 = sha256_file(receipt_file)
+    receipt = _exact_object(
+        strict_json_load(receipt_file),
+        EXECUTION_RECEIPT_FIELDS,
+        error="HASKELL_NATIVE_EXECUTION_RECEIPT_INVALID",
+    )
+    receipt_provenance = _exact_object(
+        receipt["provenance"],
+        EXECUTION_PROVENANCE_FIELDS,
+        error="HASKELL_NATIVE_EXECUTION_RECEIPT_INVALID",
+    )
+    benchmark_artifact_sha256 = sha256_file(benchmark_artifact)
+    if (
+        receipt["rawEvidencePath"] != "raw/criterion-family.json"
+        or receipt["rawEvidenceSha256"] != raw_sha256
+        or receipt_provenance["benchmarkExecutablePath"]
+        != str(benchmark_artifact)
+        or receipt_provenance["benchmarkExecutableSha256"]
+        != benchmark_artifact_sha256
+    ):
+        raise GateError("HASKELL_NATIVE_EXECUTION_RECEIPT_INVALID")
+    native_cases, statistics_cases = _parse_criterion_family_raw(
+        strict_json_load(raw_file),
+        expected_case_ids=expected_case_ids,
+        logical_operations_by_case=logical_operations_by_case,
+    )
+    native_contract_cases = [
+        {
+            "caseId": case["caseId"],
+            "nativeSampleCount": case["samples"],
+            "rawEvidencePath": "raw/criterion-family.json",
+            "rawEvidenceSha256": raw_sha256,
+            "executionReceiptPath": "receipts/criterion-family.json",
+            "executionReceiptSha256": receipt_sha256,
+            "status": "PASS",
+        }
+        for case in native_cases
+    ]
+    native_contract = {
+        "schemaVersion": "s1.4x-native-contract-validation-v1",
+        "boundaryId": "haskell",
+        "selectorId": selector_id,
+        "framework": "Criterion",
+        "frameworkVersion": "1.6.4.0",
+        "configuration": {
+            "benchmarkMode": "Criterion",
+            "nativeTimeUnit": "s",
+            "threads": 1,
+            "timeLimitSeconds": 5,
+            "rtsArguments": ["+RTS", "-N1", "-RTS"],
+        },
+        "cases": native_contract_cases,
+        "status": "PASS",
+    }
+    validate_native_contract_evidence(
+        native_contract,
+        boundary_id="haskell",
+        selector_id=selector_id,
+        block_directory=block,
+        native_cases=native_cases,
+        native_statistics_cases=statistics_cases,
+        plan_path=plan_file,
+        fixture_root_path=fixture_root,
+        input_ledger_path=ledger_file,
+        effective_runtime_arguments_sha256=str(profile["optionsSha256"]),
+        profile=str(profile["profileId"]),
+    )
+    native_contract_sha256 = _canonical_sha256(native_contract)
+    native_document = {
+        "schemaVersion": "s1.4x-candidate-native-benchmark-v1",
+        "boundaryId": "haskell",
+        "selectorId": selector_id,
+        "nativeBenchmarkMode": "Criterion",
+        "nativeTimeUnit": "s",
+        "profile": profile["profileId"],
+        "artifactSha256": benchmark_artifact_sha256,
+        "sourceTreeSha256": profile["sourceTreeSha256"],
+        "toolchainLockSha256": sha256_file(toolchain_lock_file),
+        "effectiveRuntimeArgumentsSha256": profile["optionsSha256"],
+        "inputLedgerSha256": sha256_file(ledger_file),
+        "nativeContractValidationSha256": native_contract_sha256,
+        "startedAt": started_at,
+        "finishedAt": finished_at,
+        "cases": native_cases,
+        "status": "PASS",
+    }
+    native_sha256 = _canonical_sha256(native_document)
+    statistics_document = {
+        "schemaVersion": "s1.4x-native-statistics-v1",
+        "boundaryId": "haskell",
+        "selectorId": selector_id,
+        "nativeReportSha256": native_sha256,
+        "cases": statistics_cases,
+        "status": "PASS",
+    }
+    exclusive_json_write(
+        output_paths["nativeContractValidationSha256"],
+        native_contract,
+    )
+    exclusive_json_write(output_paths["nativeReportSha256"], native_document)
+    exclusive_json_write(
+        output_paths["nativeStatisticsSha256"],
+        statistics_document,
+    )
+    output_sha256 = {
+        field: sha256_file(path) for field, path in output_paths.items()
+    }
+    if (
+        output_sha256["nativeContractValidationSha256"]
+        != native_contract_sha256
+        or output_sha256["nativeReportSha256"] != native_sha256
+    ):
+        raise GateError("HASKELL_NATIVE_OUTPUT_DIGEST_INVALID")
+    return {
+        "boundaryId": "haskell",
+        "selectorId": selector_id,
+        "caseCount": len(native_cases),
+        **output_sha256,
+        "status": "PASS",
+    }
 
 
 def build_block_result(
@@ -1298,8 +2445,63 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _haskell_producer_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Criterion raw family를 shared native evidence로 투영한다."
+    )
+    parser.add_argument("--repo-root", type=Path, required=True)
+    parser.add_argument("--plan", type=Path, required=True)
+    parser.add_argument("--block-dir", type=Path, required=True)
+    parser.add_argument("--selector", required=True)
+    parser.add_argument("--criterion-raw", type=Path, required=True)
+    parser.add_argument("--execution-receipt", type=Path, required=True)
+    parser.add_argument("--input-ledger", type=Path, required=True)
+    parser.add_argument("--fixture-root", type=Path, required=True)
+    parser.add_argument("--selected-profile", type=Path, required=True)
+    parser.add_argument("--source-input-manifest", type=Path, required=True)
+    parser.add_argument("--toolchain-lock", type=Path, required=True)
+    parser.add_argument("--toolchain-provenance", type=Path, required=True)
+    parser.add_argument("--benchmark-artifact", type=Path, required=True)
+    parser.add_argument("--started-at", required=True)
+    parser.add_argument("--finished-at", required=True)
+    return parser
+
+
+def _haskell_producer_main(argv: list[str]) -> int:
+    arguments = _haskell_producer_parser().parse_args(argv)
+    try:
+        result = produce_haskell_native_evidence(
+            repo_root=arguments.repo_root,
+            plan_path=arguments.plan,
+            block_directory=arguments.block_dir,
+            selector_id=arguments.selector,
+            criterion_raw_path=arguments.criterion_raw,
+            execution_receipt_path=arguments.execution_receipt,
+            input_ledger_path=arguments.input_ledger,
+            fixture_root_path=arguments.fixture_root,
+            selected_profile_path=arguments.selected_profile,
+            source_input_manifest_path=arguments.source_input_manifest,
+            toolchain_lock_path=arguments.toolchain_lock,
+            merged_toolchain_provenance_path=arguments.toolchain_provenance,
+            benchmark_artifact_path=arguments.benchmark_artifact,
+            started_at=arguments.started_at,
+            finished_at=arguments.finished_at,
+        )
+    except (ContractError, GateError, OSError, KeyError, TypeError, ValueError) as exc:
+        print(f"HASKELL_NATIVE_PRODUCER_FAIL:{exc}", file=sys.stderr)
+        return 2
+    print(json.dumps(result, allow_nan=False, sort_keys=True))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
-    arguments = _parser().parse_args(argv)
+    command_arguments = list(sys.argv[1:] if argv is None else argv)
+    if (
+        command_arguments
+        and command_arguments[0] == "produce-haskell-native"
+    ):
+        return _haskell_producer_main(command_arguments[1:])
+    arguments = _parser().parse_args(command_arguments)
     try:
         repo = arguments.repo_root.resolve(strict=True)
         plan_path = arguments.plan.resolve(strict=True)
