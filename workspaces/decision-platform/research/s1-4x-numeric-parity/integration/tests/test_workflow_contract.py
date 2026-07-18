@@ -328,6 +328,18 @@ class NumericParityBenchmarkWorkflowTests(unittest.TestCase):
             self.assertIn(token, source)
         self.assertIn("--output-dir", source)
         self.assertIn("ghc-9.14.1-compatibility.v1.json", source)
+        self.assertEqual(
+            source.count(
+                '"$SCALA/tools/run-oci-correctness.sh" \\\n'
+            ),
+            1,
+        )
+        self.assertEqual(
+            source.count(
+                '"$HASKELL/tools/run-oci-correctness.sh" '
+            ),
+            1,
+        )
 
     def test_full_mode_binds_exact_v3_runtime_and_evidence_roles(self) -> None:
         timing = self.jobs["bounded-timing"]
