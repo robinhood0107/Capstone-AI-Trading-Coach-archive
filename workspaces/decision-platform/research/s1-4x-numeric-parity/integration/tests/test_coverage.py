@@ -21,7 +21,11 @@ def _load(name: str) -> dict[str, Any]:
     return json.loads((CONTRACT / name).read_text(encoding="utf-8"))
 
 
-def _candidate_reports() -> tuple[dict[str, Any], dict[str, Any]]:
+def _candidate_reports() -> tuple[
+    dict[str, Any],
+    dict[str, Any],
+    dict[str, Any],
+]:
     plan = _load("property-plan.v1.json")
     functions = _load("function-registry.v1.json")
     errors = _load("error-registry.v1.json")
