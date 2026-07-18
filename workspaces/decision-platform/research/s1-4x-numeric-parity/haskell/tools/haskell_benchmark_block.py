@@ -29,6 +29,7 @@ NATIVE_CONTRACT_RELATIVE = "native-contract-validation.json"
 NATIVE_STATISTICS_RELATIVE = "native-statistics.json"
 NATIVE_RELATIVE = "native.json"
 BLOCK_RESULT_RELATIVE = "block-result.json"
+RUNTIME_IDENTITY_RELATIVE = "benchmark-runtime-identity.json"
 THREAD_ENVIRONMENT = {
     "OMP_NUM_THREADS": "1",
     "OPENBLAS_NUM_THREADS": "1",
@@ -178,6 +179,47 @@ def _required_environment(name: str) -> str:
     if value is None or not value:
         raise BlockError(f"REQUIRED_ENVIRONMENT_MISSING:{name}")
     return value
+
+
+def validate_runtime_identity(
+    path: Path,
+    *,
+    selector_id: str,
+) -> tuple[Path, str]:
+    """Benchmark process가 self-report한 executable exact-object를 검증한다."""
+
+    _require_absolute_regular(path, label="BENCHMARK_RUNTIME_IDENTITY")
+    document = strict_json_load(path)
+    expected_fields = {
+        "schemaVersion",
+        "boundaryId",
+        "selectorId",
+        "executedBenchmarkPath",
+        "executedBenchmarkSha256",
+        "status",
+    }
+    if (
+        not isinstance(document, dict)
+        or set(document) != expected_fields
+        or document.get("schemaVersion")
+        != "s1.4x-haskell-benchmark-runtime-identity-v1"
+        or document.get("boundaryId") != "haskell"
+        or document.get("selectorId") != selector_id
+        or document.get("status") != "PASS"
+    ):
+        raise BlockError("BENCHMARK_RUNTIME_IDENTITY_INVALID")
+    executed = _require_absolute_regular(
+        Path(str(document["executedBenchmarkPath"])),
+        label="EXECUTED_BENCHMARK",
+    )
+    expected_sha256 = document["executedBenchmarkSha256"]
+    if (
+        not isinstance(expected_sha256, str)
+        or SHA256_PATTERN.fullmatch(expected_sha256) is None
+        or sha256_file(executed) != expected_sha256
+    ):
+        raise BlockError("EXECUTED_BENCHMARK_SHA256_MISMATCH")
+    return executed, expected_sha256
 
 
 def _verified_environment_executable(
@@ -578,6 +620,7 @@ def run_block(arguments: argparse.Namespace) -> dict[str, Any]:
     native_statistics_path = block_dir / NATIVE_STATISTICS_RELATIVE
     native_path = block_dir / NATIVE_RELATIVE
     result_path = block_dir / BLOCK_RESULT_RELATIVE
+    runtime_identity_path = block_dir / RUNTIME_IDENTITY_RELATIVE
     output_paths = (
         raw_path,
         receipt_path,
@@ -586,6 +629,7 @@ def run_block(arguments: argparse.Namespace) -> dict[str, Any]:
         native_statistics_path,
         native_path,
         result_path,
+        runtime_identity_path,
         raw_path.parent,
         receipt_path.parent,
     )
@@ -649,6 +693,11 @@ def run_block(arguments: argparse.Namespace) -> dict[str, Any]:
         "S1_4X_STACK_BIN",
         "S1_4X_STACK_SHA256",
         label="STACK",
+    )
+    authoritative_ghc, authoritative_ghc_sha256 = _verified_environment_executable(
+        "S1_4X_AUTHORITATIVE_GHC_BIN",
+        "S1_4X_AUTHORITATIVE_GHC_SHA256",
+        label="AUTHORITATIVE_GHC",
     )
     marker_python, marker_python_sha256 = _verified_environment_executable(
         "S1_4X_BENCHMARK_PYTHON_BIN",
@@ -723,6 +772,7 @@ def run_block(arguments: argparse.Namespace) -> dict[str, Any]:
             ),
             "S1_4X_BENCHMARK_QUALIFICATION": str(qualification_path),
             "S1_4X_BENCHMARK_SELECTOR_ID": arguments.selector,
+            "S1_4X_BENCHMARK_RUNTIME_IDENTITY": str(runtime_identity_path),
             "S1_4X_BENCHMARK_MARKER_PYTHON": str(marker_python),
             "S1_4X_BENCHMARK_MARKER_PYTHON_SHA256": marker_python_sha256,
             "S1_4X_BENCHMARK_MARKER_SCRIPT": str(marker_script),
@@ -750,7 +800,16 @@ def run_block(arguments: argparse.Namespace) -> dict[str, Any]:
     ):
         raise BlockError("MARKER_IDENTITY_CHANGED_DURING_RUN")
     _require_absolute_regular(raw_path, label="CRITERION_FAMILY_RAW")
+    executed_benchmark, executed_benchmark_sha256 = validate_runtime_identity(
+        runtime_identity_path,
+        selector_id=arguments.selector,
+    )
     artifact = _find_benchmark_artifact(haskell_root)
+    if (
+        artifact != executed_benchmark
+        or sha256_file(artifact) != executed_benchmark_sha256
+    ):
+        raise BlockError("BENCHMARK_ARTIFACT_RUNTIME_IDENTITY_MISMATCH")
     fixture_root = _require_absolute_directory(
         numeric_root / "contract/fixtures",
         label="FIXTURE_ROOT",
@@ -776,8 +835,8 @@ def run_block(arguments: argparse.Namespace) -> dict[str, Any]:
             "inputLedgerSha256": sha256_file(input_ledger_path),
             "selectorId": arguments.selector,
             "caseIds": selector["expectedCaseIds"],
-            "benchmarkExecutablePath": str(artifact),
-            "benchmarkExecutableSha256": sha256_file(artifact),
+            "benchmarkExecutablePath": str(executed_benchmark),
+            "benchmarkExecutableSha256": executed_benchmark_sha256,
             "effectiveRuntimeArgumentsSha256": profile["optionsSha256"],
             "candidateProvenance": {
                 "kind": "haskell",
@@ -787,6 +846,12 @@ def run_block(arguments: argparse.Namespace) -> dict[str, Any]:
                 "sourceInputManifestPath": str(source_manifest_path),
                 "sourceInputManifestSha256": sha256_file(source_manifest_path),
                 "effectiveCompilerFlagsSha256": profile["optionsSha256"],
+                "runtimeIdentityPath": str(runtime_identity_path),
+                "runtimeIdentitySha256": sha256_file(runtime_identity_path),
+                "executedBenchmarkPath": str(executed_benchmark),
+                "executedBenchmarkSha256": executed_benchmark_sha256,
+                "authoritativeGhcPath": str(authoritative_ghc),
+                "authoritativeGhcSha256": authoritative_ghc_sha256,
                 "markerPythonPath": str(marker_python),
                 "markerPythonSha256": marker_python_sha256,
                 "markerScriptPath": str(marker_script),

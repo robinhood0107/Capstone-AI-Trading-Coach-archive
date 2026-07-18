@@ -3,17 +3,18 @@ module S14X.BenchmarkMain (main) where
 import           Control.DeepSeq (NFData (rnf))
 import           Control.Monad (unless)
 import           Criterion.Main (Benchmark, bench, bgroup, defaultMain, env, nf)
-import           Data.Aeson (FromJSON (parseJSON), Value, eitherDecodeFileStrict', object,
-                             withObject, (.:), (.=))
+import           Data.Aeson (FromJSON (parseJSON), Value, eitherDecodeFileStrict', encode,
+                             object, withObject, (.:), (.=))
 import           Data.Binary.Get (getDoublele, runGet)
 import           Data.List (find)
 import           Data.Maybe (fromMaybe)
 import           Data.Text (Text)
 import           System.Directory (canonicalizePath, doesDirectoryExist, doesFileExist,
                                    pathIsSymbolicLink)
-import           System.Environment (lookupEnv)
+import           System.Environment (getExecutablePath, lookupEnv)
 import           System.Exit (ExitCode (ExitSuccess))
 import           System.FilePath (isAbsolute, takeDirectory, takeFileName, (</>))
+import           System.IO.Error (catchIOError, isDoesNotExistError)
 import           System.Process (readProcessWithExitCode)
 
 import qualified Data.ByteString as BS
@@ -22,6 +23,7 @@ import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
 import qualified Data.Vector.Unboxed as U
 
+import           S14X.Contract.AtomicOutput (PublishResult (Published), exclusiveAtomicWrite)
 import           S14X.Contract.BenchmarkValidation (BenchmarkResultShape (ConditionalCoverageBatch, IndependenceBatch, LikelihoodBatch, ScalarBatch, VectorBatch),
                                                     validateBenchmarkResults)
 import           S14X.Contract.Process (sha256Hex)
@@ -212,11 +214,45 @@ main = do
   plan <- decodeFile planPath
   either fail pure (validatePlan plan)
   selectedCases <- selectedBenchmarkCases plan
+  publishRuntimeIdentity
   defaultMain
     [ env
         (setupBenchmarkEnvironment fixtureRoot qualificationPath selectedCases)
         (bgroup "" . zipWith benchmark selectedCases)
     ]
+
+-- | Full rotation에서만 설정되는 출력 경로에 실제 Criterion process identity를 기록한다.
+-- Profile qualification은 이 경계를 설정하지 않으므로 기존 4x2x7 argv와 실행을 바꾸지 않는다.
+publishRuntimeIdentity :: IO ()
+publishRuntimeIdentity = do
+  configured <- lookupEnv "S1_4X_BENCHMARK_RUNTIME_IDENTITY"
+  case configured of
+    Nothing -> pure ()
+    Just _ -> do
+      output <- requiredConfiguredOutputPath "S1_4X_BENCHMARK_RUNTIME_IDENTITY"
+      selectorIdText <- Text.pack <$> requiredConfiguredValue "S1_4X_BENCHMARK_SELECTOR_ID"
+      executablePath <- getExecutablePath >>= canonicalizePath
+      executableExists <- doesFileExist executablePath
+      executableSymbolic <- pathIsSymbolicLink executablePath
+      unless
+        (executableExists && not executableSymbolic)
+        (fail "benchmark executable identity is unsafe")
+      executablePayload <- BS.readFile executablePath
+      let executableSha256 = TextEncoding.decodeUtf8 (sha256Hex executablePayload)
+          identity =
+            object
+              [ "schemaVersion"
+                  .= ("s1.4x-haskell-benchmark-runtime-identity-v1" :: Text),
+                "boundaryId" .= ("haskell" :: Text),
+                "selectorId" .= selectorIdText,
+                "executedBenchmarkPath" .= executablePath,
+                "executedBenchmarkSha256" .= executableSha256,
+                "status" .= ("PASS" :: Text)
+              ]
+      published <- exclusiveAtomicWrite output (LBS.toStrict (encode identity))
+      unless
+        (published == Published)
+        (fail "benchmark runtime identity already exists")
 
 selectedBenchmarkCases :: BenchmarkPlan -> IO [BenchmarkCase]
 selectedBenchmarkCases (BenchmarkPlan selectors cases) = do
@@ -304,6 +340,27 @@ requiredConfiguredValue variable = do
   case configured of
     Just value | not (null value) -> pure value
     _ -> fail (variable <> " is required")
+
+requiredConfiguredOutputPath :: String -> IO FilePath
+requiredConfiguredOutputPath variable = do
+  configured <- requiredConfiguredValue variable
+  unless (isAbsolute configured) (fail (variable <> " must be absolute"))
+  fileExists <- doesFileExist configured
+  directoryExists <- doesDirectoryExist configured
+  symbolic <-
+    pathIsSymbolicLink configured
+      `catchIOError` \exception ->
+        if isDoesNotExistError exception
+          then pure False
+          else ioError exception
+  unless
+    (not fileExists && not directoryExists && not symbolic)
+    (fail (variable <> " must not already exist"))
+  parent <- canonicalizePath (takeDirectory configured)
+  unless
+    (takeDirectory configured == parent)
+    (fail (variable <> " parent must already be canonical"))
+  pure configured
 
 configuredPath :: String -> FilePath -> IO FilePath
 configuredPath variable fallback = do
