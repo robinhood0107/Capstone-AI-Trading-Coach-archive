@@ -369,22 +369,50 @@ def _verify_source_commit_binding(
     benchmark_subject_commit: str,
     candidate_source_commit: str,
 ) -> None:
-    completed = subprocess.run(
-        ["git", "rev-parse", "--verify", "HEAD"],
-        cwd=repo_root,
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=10,
-    )
-    actual = completed.stdout.strip()
+    try:
+        resolved_root = repo_root.resolve(strict=True)
+        completed = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel", "--verify", "HEAD"],
+            cwd=resolved_root,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ContractError("CURRENT_SOURCE_COMMIT_MISMATCH") from exc
+    lines = completed.stdout.splitlines()
     if (
         completed.returncode != 0
-        or COMMIT_PATTERN.fullmatch(actual) is None
-        or actual != benchmark_subject_commit
+        or len(lines) != 2
+        or Path(lines[0]).resolve(strict=True) != resolved_root
+        or COMMIT_PATTERN.fullmatch(lines[1]) is None
+        or lines[1] != benchmark_subject_commit
         or candidate_source_commit != benchmark_subject_commit
     ):
         raise ContractError("CURRENT_SOURCE_COMMIT_MISMATCH")
+    try:
+        status = subprocess.run(
+            [
+                "git",
+                "-c",
+                "core.quotepath=false",
+                "status",
+                "--porcelain=v1",
+                "-z",
+                "--untracked-files=all",
+            ],
+            cwd=resolved_root,
+            check=False,
+            capture_output=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ContractError("CURRENT_SOURCE_WORKTREE_STATUS_FAILED") from exc
+    if status.returncode != 0:
+        raise ContractError("CURRENT_SOURCE_WORKTREE_STATUS_FAILED")
+    if status.stdout:
+        raise ContractError("CURRENT_SOURCE_WORKTREE_DIRTY")
 
 
 def _expected_host_policy(plan: dict[str, Any], *, root_pid: int) -> dict[str, Any]:
@@ -810,6 +838,11 @@ def execute_schedule(
             remaining_total = total_deadline - time.monotonic()
             if remaining_total < block.timeout_seconds:
                 raise ContractError("TOTAL_RUN_DEADLINE_INSUFFICIENT_FOR_FROZEN_BLOCK")
+            _verify_source_commit_binding(
+                repo_root,
+                benchmark_subject_commit=benchmark_subject_commit,
+                candidate_source_commit=candidate_source_commit,
+            )
             native_command = _render_command(
                 manifest["boundaryCommands"][block.boundary_id],
                 values,
@@ -842,6 +875,11 @@ def execute_schedule(
                     environment=environment,
                 )
             except ContractError as exc:
+                _verify_source_commit_binding(
+                    repo_root,
+                    benchmark_subject_commit=benchmark_subject_commit,
+                    candidate_source_commit=candidate_source_commit,
+                )
                 if str(exc) != "PERFORMANCE_DEADLINE_EXCEEDED":
                     raise
                 qualification_sha256 = _verify_measurement_qualification(
@@ -857,6 +895,11 @@ def execute_schedule(
                 )
                 valid_performance_timeouts += 1
                 continue
+            _verify_source_commit_binding(
+                repo_root,
+                benchmark_subject_commit=benchmark_subject_commit,
+                candidate_source_commit=candidate_source_commit,
+            )
             _verify_measurement_qualification(
                 qualification_path,
                 expected=qualification,
