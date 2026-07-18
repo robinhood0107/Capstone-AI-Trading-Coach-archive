@@ -27,16 +27,16 @@ noForbiddenForms = do
   files <- candidateSources
   contents <- traverse readFile files
   let forbidden =
-        [ "foreign import",
-          "foreign export",
-          "unsafePerformIO",
-          "unsafeCoerce",
-          "System.IO.Unsafe",
-          "GHC.IO.Unsafe",
-          "Debug.Trace",
-          "{-# OPTIONS_GHC",
-          "{-# LANGUAGE Trustworthy",
-          "{-# LANGUAGE Unsafe"
+        [ "foreign " <> "import",
+          "foreign " <> "export",
+          "unsafe" <> "PerformIO",
+          "unsafe" <> "Coerce",
+          "System.IO." <> "Unsafe",
+          "GHC.IO." <> "Unsafe",
+          "Debug." <> "Trace",
+          "{-# " <> "OPTIONS_GHC",
+          "{-# LANGUAGE " <> "Trustworthy",
+          "{-# LANGUAGE " <> "Unsafe"
         ]
       violations =
         [ file <> ": " <> token
@@ -155,7 +155,7 @@ formatterAndLintConfiguration = do
           "maximum",
           "minimum",
           "Foreign",
-          "System.IO.Unsafe",
+          "System.IO." <> "Unsafe",
           "GeneralizedNewtypeDeriving",
           "DerivingVia",
           "DeriveAnyClass"

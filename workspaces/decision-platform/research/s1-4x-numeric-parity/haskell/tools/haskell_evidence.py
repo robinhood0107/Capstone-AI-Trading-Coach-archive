@@ -83,6 +83,115 @@ FORBIDDEN_CORE_IMPORT_PREFIXES = (
     "Debug.Trace",
 )
 FORBIDDEN_SAFE_SCALAR_IMPORT_PREFIXES = ("Data.Vector.Unboxed",)
+MODULE_SAFETY_POLICY_FIELDS = {
+    "schemaVersion",
+    "language",
+    "categories",
+    "everyModuleExactlyOneCategory",
+    "mandatoryCoreExtensions",
+    "forbiddenCorePositiveExtensions",
+    "candidateSourceSuffixPolicy",
+    "candidateDerivingPolicy",
+    "forbiddenCandidateModuleDeclarations",
+    "forbiddenCoreTypesAndUses",
+    "forbiddenPartialAndUnsafeSymbols",
+    "forbiddenSourceLocalControls",
+    "vectorProvenance",
+    "candidateGraphInvariants",
+    "resultEdgePartitions",
+    "resultEdgeCategoryContract",
+    "conditionalOptimizations",
+    "authoritativeProfiles",
+    "forbiddenOptimizationFlags",
+    "hardFailureConditions",
+}
+EXPECTED_CORE_NEGATIVE_EXTENSIONS = (
+    "NoForeignFunctionInterface",
+    "NoTemplateHaskell",
+    "NoCPP",
+    "NoRebindableSyntax",
+    "NoLinearTypes",
+    "NoMagicHash",
+    "NoStrict",
+    "NoGeneralizedNewtypeDeriving",
+    "NoDerivingVia",
+    "NoDeriveAnyClass",
+)
+EXPECTED_CORE_POSITIVE_EXTENSIONS = (
+    "ForeignFunctionInterface",
+    "TemplateHaskell",
+    "CPP",
+    "RebindableSyntax",
+    "LinearTypes",
+    "MagicHash",
+    "Strict",
+    "GeneralizedNewtypeDeriving",
+    "DerivingVia",
+    "DeriveAnyClass",
+)
+EXPECTED_CORE_TYPES_AND_USES = (
+    "IO",
+    "MonadIO",
+    "environment access",
+    "clock",
+    "random",
+    "network",
+    "Control.Exception.throw",
+    "Control.Exception.throwIO",
+    "foreign import",
+    "foreign export",
+)
+EXPECTED_SOURCE_LOCAL_CONTROLS = (
+    "OPTIONS_GHC",
+    "HLint ignore",
+    "global Strict",
+    "LinearTypes",
+    "TemplateHaskell",
+    "CPP",
+    "MagicHash",
+)
+EXPECTED_PARTIAL_AND_UNSAFE_SYMBOLS = (
+    "Prelude.head",
+    "Prelude.tail",
+    "Prelude.init",
+    "Prelude.last",
+    "Prelude.!!",
+    "Text.Read.read",
+    "Data.Maybe.fromJust",
+    "Data.Either.fromLeft",
+    "Data.Either.fromRight",
+    "Data.List.foldl1",
+    "Data.List.maximum",
+    "Data.List.minimum",
+    "Debug.Trace",
+    "System.IO.Unsafe",
+    "GHC.IO.Unsafe",
+    "Foreign.*",
+)
+CORE_CAPABILITY_IMPORT_PREFIXES = {
+    "IO": ("System.IO",),
+    "MonadIO": ("Control.Monad.IO.Class",),
+    "environment access": ("System.Environment",),
+    "clock": ("Data.Time", "System.Clock", "GHC.Clock", "System.CPUTime"),
+    "random": ("System.Random",),
+    "network": ("Network",),
+}
+CORE_CAPABILITY_USE_PATTERNS = {
+    "IO": r"\bIO\b",
+    "MonadIO": r"\bMonadIO\b",
+    "environment access": (
+        r"\b(?:getArgs|getEnv|getEnvironment|lookupEnv|setEnv|unsetEnv|"
+        r"withArgs|withProgName)\b"
+    ),
+    "clock": (
+        r"\b(?:getCurrentTime|getZonedTime|getMonotonicTime|getCPUTime|"
+        r"getPOSIXTime)\b"
+    ),
+    "random": r"\b(?:randomIO|randomRIO|newStdGen|mkStdGen|splitGen)\b",
+    "network": r"\b(?:socket|connect|listen|accept|send|recv|getAddrInfo)\b",
+    "Control.Exception.throw": r"\bthrow\b",
+    "Control.Exception.throwIO": r"\bthrowIO\b",
+}
 PROFILE_OPTIONS = {
     "baseline-o0-fasm": ["-O0", "-fasm"],
     "optimized-o2-fasm": ["-O2", "-fasm"],
@@ -610,7 +719,9 @@ def _parse_default_extensions(package_text: str) -> tuple[str, ...]:
     return tuple(extensions)
 
 
-def _module_category(relative: str, module_name: str) -> str:
+def module_category(relative: str, module_name: str) -> str:
+    """Frozen path/module identity로 candidate category를 단 하나 결정한다."""
+
     if relative.startswith("src/core/"):
         return "safe-scalar" if module_name in SAFE_SCALAR_MODULES else "audited-pure-vector"
     if relative.startswith(("src/contract/", "app/")):
@@ -620,6 +731,305 @@ def _module_category(relative: str, module_name: str) -> str:
     if relative.startswith("benchmark/"):
         return "benchmark"
     raise EvidenceError(f"module path has no category: {relative}")
+
+
+def _policy_string_tuple(
+    policy: Mapping[str, Any],
+    key: str,
+) -> tuple[str, ...]:
+    value = policy.get(key)
+    if (
+        not isinstance(value, list)
+        or not value
+        or any(not isinstance(item, str) or not item for item in value)
+        or len(value) != len(set(value))
+    ):
+        raise EvidenceError(f"module-safety policy {key} must be unique strings")
+    return tuple(value)
+
+
+def validate_module_safety_policy(policy: Mapping[str, Any]) -> None:
+    """정책의 top-level/nested contract와 모든 executable control을 exact 검증한다."""
+
+    if set(policy) != MODULE_SAFETY_POLICY_FIELDS:
+        raise EvidenceError("module-safety policy field set drift")
+    if (
+        policy.get("schemaVersion") != "s1.4x-haskell-module-safety-policy-v1"
+        or policy.get("language") != "GHC2024"
+        or policy.get("everyModuleExactlyOneCategory") is not True
+    ):
+        raise EvidenceError("module-safety policy identity drift")
+
+    categories = policy.get("categories")
+    expected_category_fields = {
+        "safe-scalar": {"mandatoryCompileMode", "allowedRoles", "forbiddenImports"},
+        "audited-pure-vector": {
+            "mandatoryCompileMode",
+            "allowedRoles",
+            "allowedDirectExternalImports",
+            "forbiddenDirectImports",
+        },
+        "io-shell": {"mandatoryCompileMode", "allowedRoles", "coreMayDependOnCategory"},
+        "test": {"mandatoryCompileMode", "allowedRoles"},
+        "benchmark": {"mandatoryCompileMode", "allowedRoles"},
+    }
+    expected_compile_modes = {
+        "safe-scalar": "Safe",
+        "audited-pure-vector": "SafeHaskell-None-with-audited-purity-gate",
+        "io-shell": "ordinary",
+        "test": "ordinary",
+        "benchmark": "ordinary",
+    }
+    if not isinstance(categories, Mapping) or set(categories) != set(
+        expected_category_fields
+    ):
+        raise EvidenceError("module-safety category set drift")
+    for category, expected_fields in expected_category_fields.items():
+        configuration = categories.get(category)
+        if (
+            not isinstance(configuration, Mapping)
+            or set(configuration) != expected_fields
+            or configuration.get("mandatoryCompileMode")
+            != expected_compile_modes[category]
+            or not isinstance(configuration.get("allowedRoles"), list)
+            or not configuration["allowedRoles"]
+        ):
+            raise EvidenceError(f"module-safety category contract drift: {category}")
+    if categories["io-shell"].get("coreMayDependOnCategory") is not False:
+        raise EvidenceError("module-safety core-to-shell category policy drift")
+
+    mandatory = _policy_string_tuple(policy, "mandatoryCoreExtensions")
+    positive = _policy_string_tuple(policy, "forbiddenCorePositiveExtensions")
+    if (
+        mandatory != EXPECTED_CORE_NEGATIVE_EXTENSIONS
+        or positive != EXPECTED_CORE_POSITIVE_EXTENSIONS
+        or tuple(
+            extension.removeprefix("No")
+            for extension in mandatory
+        )
+        != positive
+    ):
+        raise EvidenceError("module-safety core extension policy drift")
+
+    suffix_policy = policy.get("candidateSourceSuffixPolicy")
+    if suffix_policy != {
+        "allowedSourceSuffixes": [".hs"],
+        "forbiddenCompilableSuffixes": [".lhs", ".hsc", ".hs-boot"],
+        "allowedNonHsConfigurationPaths": [
+            "selected-profile.v1.json",
+            "package.yaml",
+        ],
+        "nonHsEntriesMustHaveRole": "configuration",
+    }:
+        raise EvidenceError("module-safety candidate suffix policy drift")
+    if policy.get("candidateDerivingPolicy") != "deriving stock only":
+        raise EvidenceError("module-safety candidate deriving policy drift")
+    if policy.get("forbiddenCandidateModuleDeclarations") != [
+        "Trustworthy",
+        "Unsafe",
+    ]:
+        raise EvidenceError("module-safety declaration policy drift")
+    if _policy_string_tuple(
+        policy,
+        "forbiddenCoreTypesAndUses",
+    ) != EXPECTED_CORE_TYPES_AND_USES:
+        raise EvidenceError("module-safety core capability policy drift")
+    if _policy_string_tuple(
+        policy,
+        "forbiddenPartialAndUnsafeSymbols",
+    ) != EXPECTED_PARTIAL_AND_UNSAFE_SYMBOLS:
+        raise EvidenceError("module-safety partial/unsafe policy drift")
+    if _policy_string_tuple(
+        policy,
+        "forbiddenSourceLocalControls",
+    ) != EXPECTED_SOURCE_LOCAL_CONTROLS:
+        raise EvidenceError("module-safety source-local control policy drift")
+
+    vector = policy.get("vectorProvenance")
+    if not isinstance(vector, Mapping) or set(vector) != {
+        "package",
+        "version",
+        "module",
+        "safeHaskell",
+        "sourceSha256Semantics",
+        "officialArchiveUri",
+        "officialArchiveSha256",
+        "stackageSnapshotUri",
+        "stackageCabalRevisionSha256",
+        "stackageCabalRevisionSize",
+        "pantryTreeSha256",
+        "sourceSha256RequiredAtGate2",
+        "upstreamTransitiveAllowlistRequiredFields",
+        "upstreamTransitiveAllowedEdgeKinds",
+        "upstreamTransitiveAllowlistMode",
+        "upstreamTransitiveAllowlist",
+        "upstreamTransitiveEdgesMayExist",
+        "candidateDirectUnsafeOrPrimopUseCount",
+    }:
+        raise EvidenceError("module-safety vector provenance field set drift")
+
+    invariants = policy.get("candidateGraphInvariants")
+    if not isinstance(invariants, Mapping) or set(invariants) != {
+        "candidateDirectForeignImportCount",
+        "candidateDirectUnsafeImportCount",
+        "candidateHomeCoreToShellEdgeCount",
+        "candidateTrustworthyDeclarationCount",
+        "candidateUnsafeDeclarationCount",
+        "unclassifiedModuleCount",
+        "newUnknownUpstreamTransitiveEdgeCount",
+    } or any(value != 0 for value in invariants.values()):
+        raise EvidenceError("module-safety graph invariant drift")
+    if policy.get("resultEdgePartitions") != [
+        "candidateDirectImports",
+        "candidateHomeModuleEdges",
+        "upstreamTransitiveEdges",
+    ]:
+        raise EvidenceError("module-safety edge partition policy drift")
+
+    edge_contract = policy.get("resultEdgeCategoryContract")
+    if not isinstance(edge_contract, Mapping) or set(edge_contract) != {
+        "candidateDirectImportsRequiredCategoryFields",
+        "candidateHomeModuleEdgesRequiredCategoryFields",
+        "embeddedCategoriesMustMatchModuleInventory",
+        "coreCategories",
+        "shellCategories",
+        "allowedHomeClassifications",
+        "coreToShellAllowed",
+        "allCandidateForbiddenDirectImportPatterns",
+        "allCoreAdditionalForbiddenDirectImports",
+        "safeScalarAdditionalForbiddenDirectImports",
+    }:
+        raise EvidenceError("module-safety edge-category contract field set drift")
+    if (
+        edge_contract.get("coreCategories") != ["safe-scalar", "audited-pure-vector"]
+        or edge_contract.get("shellCategories") != ["io-shell", "test", "benchmark"]
+        or edge_contract.get("coreToShellAllowed") is not False
+        or edge_contract.get("allCandidateForbiddenDirectImportPatterns")
+        != ["Foreign.*", "Unsafe.*", "System.IO.Unsafe", "GHC.IO.Unsafe"]
+        or edge_contract.get("allCoreAdditionalForbiddenDirectImports")
+        != ["System.IO", "Control.Monad.IO.Class", "Debug.Trace"]
+        or edge_contract.get("safeScalarAdditionalForbiddenDirectImports")
+        != ["Data.Vector.Unboxed"]
+    ):
+        raise EvidenceError("module-safety edge-category executable policy drift")
+
+    conditional = policy.get("conditionalOptimizations")
+    if not isinstance(conditional, Mapping) or set(conditional) != {
+        "runSTAndMutableUnboxedVector",
+        "strictDataUnpackInlineSpecialise",
+    }:
+        raise EvidenceError("module-safety conditional optimization field set drift")
+    if policy.get("authoritativeProfiles") != {
+        "baseline": ["-O0", "-fasm"],
+        "optimized": ["-O2", "-fasm"],
+        "runtime": ["+RTS", "-N1", "-RTS"],
+        "fallbackProfile": "baseline-o0-fasm",
+    }:
+        raise EvidenceError("module-safety authoritative profile policy drift")
+    _policy_string_tuple(policy, "forbiddenOptimizationFlags")
+    _policy_string_tuple(policy, "hardFailureConditions")
+
+
+def audit_candidate_source(
+    *,
+    relative: str,
+    parsed: ParsedModule,
+    payload: bytes,
+    category: str,
+    default_extensions: Sequence[str],
+    policy: Mapping[str, Any],
+) -> None:
+    """모든 candidate local control과 core capability/deriving 경계를 fail-closed한다."""
+
+    text = payload.decode("utf-8")
+    code = _strip_comments_and_literals(text)
+    core = category in CORE_CATEGORIES
+    positive_extensions = set(
+        _policy_string_tuple(policy, "forbiddenCorePositiveExtensions")
+    )
+    if core:
+        enabled_forbidden = sorted(
+            positive_extensions.intersection((*default_extensions, *parsed.extensions)),
+            key=str.encode,
+        )
+        if enabled_forbidden:
+            raise EvidenceError(
+                f"forbidden core positive extension in {relative}: {enabled_forbidden}"
+            )
+
+    source_controls = set(_policy_string_tuple(policy, "forbiddenSourceLocalControls"))
+    local_violations: list[str] = []
+    if "OPTIONS_GHC" in source_controls and re.search(
+        r"\{-#\s*OPTIONS_GHC\b",
+        text,
+    ):
+        local_violations.append("OPTIONS_GHC")
+    if "HLint ignore" in source_controls and re.search(
+        r"(?i)\bHLint\s*:?\s*ignore\b",
+        text,
+    ):
+        local_violations.append("HLint ignore")
+    extension_controls = {
+        "global Strict": "Strict",
+        "LinearTypes": "LinearTypes",
+        "TemplateHaskell": "TemplateHaskell",
+        "CPP": "CPP",
+        "MagicHash": "MagicHash",
+    }
+    for control, extension in extension_controls.items():
+        if control in source_controls and extension in parsed.extensions:
+            local_violations.append(control)
+    if local_violations:
+        raise EvidenceError(
+            f"forbidden source-local control in {relative}: {sorted(local_violations)}"
+        )
+
+    forbidden_declarations = set(
+        _policy_string_tuple(policy, "forbiddenCandidateModuleDeclarations")
+    )
+    declarations = forbidden_declarations.intersection(parsed.extensions)
+    if declarations:
+        raise EvidenceError(
+            f"forbidden Safe Haskell declaration in {relative}: {sorted(declarations)}"
+        )
+    if re.search(r"\b(?:foreign\s+import|foreign\s+export)\b", code):
+        raise EvidenceError(f"candidate native interop form in {relative}")
+    if not core:
+        return
+
+    forbidden_capabilities = set(
+        _policy_string_tuple(policy, "forbiddenCoreTypesAndUses")
+    )
+    for capability, prefixes in CORE_CAPABILITY_IMPORT_PREFIXES.items():
+        if capability not in forbidden_capabilities:
+            continue
+        if any(_has_prefix(imported, prefixes) for imported in parsed.imports):
+            raise EvidenceError(
+                f"forbidden core capability import/use in {relative}: {capability}"
+            )
+    for capability, pattern in CORE_CAPABILITY_USE_PATTERNS.items():
+        if capability in forbidden_capabilities and re.search(pattern, code):
+            raise EvidenceError(
+                f"forbidden core capability import/use in {relative}: {capability}"
+            )
+    deriving_occurrences = re.findall(r"(?m)^\s*deriving\b([^\n]*)", code)
+    if (
+        policy.get("candidateDerivingPolicy") == "deriving stock only"
+        and any(
+            not occurrence.lstrip().startswith("stock")
+            for occurrence in deriving_occurrences
+        )
+    ):
+        raise EvidenceError(f"candidate core deriving must be stock in {relative}")
+    categories = policy["categories"]
+    compile_mode = categories[category]["mandatoryCompileMode"]
+    if compile_mode == "Safe" and "Safe" not in parsed.extensions:
+        raise EvidenceError(f"safe-scalar module omits Safe: {relative}")
+    if (
+        compile_mode == "SafeHaskell-None-with-audited-purity-gate"
+        and "Safe" in parsed.extensions
+    ):
+        raise EvidenceError(f"audited-pure-vector must not claim Safe: {relative}")
 
 
 def _has_prefix(module_name: str, prefixes: Iterable[str]) -> bool:
@@ -894,32 +1304,6 @@ def collect_interface_home_imports(
     return results
 
 
-def _audit_core_source(
-    *,
-    relative: str,
-    parsed: ParsedModule,
-    payload: bytes,
-    category: str,
-) -> None:
-    text = payload.decode("utf-8")
-    code = _strip_comments_and_literals(text)
-    if re.search(r"\b(?:foreign\s+import|foreign\s+export)\b", code):
-        raise EvidenceError(f"candidate native interop form in {relative}")
-    if category not in CORE_CATEGORIES:
-        return
-    if re.search(r"\bIO\b", code):
-        raise EvidenceError(f"candidate core IO type/use in {relative}")
-    if re.search(r"\b(?:throw|throwIO|unsafeCoerce|unsafePerformIO)\b", code):
-        raise EvidenceError(f"candidate core exception/unsafe use in {relative}")
-    deriving_occurrences = re.findall(r"(?m)^\s*deriving\b([^\n]*)", code)
-    if any(not occurrence.lstrip().startswith("stock") for occurrence in deriving_occurrences):
-        raise EvidenceError(f"candidate core deriving must be stock in {relative}")
-    if category == "safe-scalar" and "Safe" not in parsed.extensions:
-        raise EvidenceError(f"safe-scalar module omits Safe: {relative}")
-    if category == "audited-pure-vector" and "Safe" in parsed.extensions:
-        raise EvidenceError(f"audited-pure-vector must not claim Safe: {relative}")
-
-
 def build_module_safety_result(
     root: Path,
     *,
@@ -938,7 +1322,8 @@ def build_module_safety_result(
     policy = strict_json_load(policy_path)
     if not isinstance(policy, dict):
         raise EvidenceError("module-safety policy must be an object")
-    mandatory = tuple(policy.get("mandatoryCoreExtensions", []))
+    validate_module_safety_policy(policy)
+    mandatory = _policy_string_tuple(policy, "mandatoryCoreExtensions")
     default_extensions = _parse_default_extensions(
         (root / "package.yaml").read_text(encoding="utf-8")
     )
@@ -958,25 +1343,17 @@ def build_module_safety_result(
         if parsed.module_name in module_names:
             raise EvidenceError(f"duplicate candidate module name: {parsed.module_name}")
         module_names.add(parsed.module_name)
-        category = _module_category(relative, parsed.module_name)
-        _audit_core_source(
+        category = module_category(relative, parsed.module_name)
+        audit_candidate_source(
             relative=relative,
             parsed=parsed,
             payload=payload,
             category=category,
+            default_extensions=default_extensions,
+            policy=policy,
         )
         effective_extensions = tuple(dict.fromkeys((*default_extensions, *parsed.extensions)))
-        if any(extension in {"Trustworthy", "Unsafe"} for extension in effective_extensions):
-            raise EvidenceError(f"forbidden Safe Haskell declaration in {relative}")
-        compile_mode = (
-            "Safe"
-            if category == "safe-scalar"
-            else (
-                "SafeHaskell-None-with-audited-purity-gate"
-                if category == "audited-pure-vector"
-                else "ordinary"
-            )
-        )
+        compile_mode = policy["categories"][category]["mandatoryCompileMode"]
         source_sha256 = sha256_file(path)
         if manifest_files.get(relative, {}).get("sha256") != source_sha256:
             raise EvidenceError(f"module/source manifest hash mismatch: {relative}")
