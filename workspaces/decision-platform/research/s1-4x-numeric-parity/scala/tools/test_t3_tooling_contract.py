@@ -225,6 +225,12 @@ def main() -> int:
         "PropertyEvidenceMain",
     ):
         assert marker in property_evidence
+    property_evidence_main = (
+        SCALA_ROOT
+        / "src/test/scala/ai/trading/coach/s14x/shell/PropertyEvidenceMain.scala"
+    ).read_text(encoding="utf-8")
+    assert ".set[ArrayNode]" not in property_evidence_main
+    assert property_evidence_main.count(".set[JsonNode]") == 5
 
     qualification = script("run-profile-qualification.sh")
     selector = script("select-proven-profile.sh")
