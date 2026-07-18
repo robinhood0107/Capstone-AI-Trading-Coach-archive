@@ -5,12 +5,15 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import subprocess
+import sys
 from pathlib import Path
 
 S1_4X = Path(__file__).resolve().parents[2]
 CONTRACT_MANIFEST = S1_4X / "contract/contract-manifest.v1.json"
 BASELINE_REPORT = S1_4X / "reports/integration-baseline.v1.json"
 INTEGRATION_README = S1_4X / "integration/README.md"
+INTEGRATION = S1_4X / "integration"
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -86,3 +89,23 @@ def test_official_full_rotation_uses_integration_runtime_only() -> None:
     documentation = INTEGRATION_README.read_text(encoding="utf-8")
     assert 'python "$S1_4X/integration/run_rotated_blocks.py" run \\' in documentation
     assert 'python "$S1_4X/benchmarks/run_rotated_blocks.py" run \\' not in documentation
+
+
+def test_official_runtime_keeps_the_internal_compatibility_surface() -> None:
+    # 통합 runtime과 frozen runner의 동명 모듈 충돌이 있어도 기존 호출자는 같은 경계를 본다.
+    script = (
+        "import sys;"
+        f"sys.path.insert(0, {str(INTEGRATION)!r});"
+        "import run_rotated_blocks as runner;"
+        "assert runner.ScheduledBlock;"
+        "assert callable(runner.build_schedule);"
+        "assert callable(runner.mark_measurement_entered);"
+        "assert callable(runner.main)"
+    )
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr
