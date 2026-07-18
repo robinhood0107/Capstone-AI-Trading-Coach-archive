@@ -142,7 +142,7 @@ sortinoRatio rawReturns targetReturn periodsPerYear = do
   target <- validateFiniteScalar TargetReturnInvalid targetReturn
   periods <- validatePositiveInteger PeriodsPerYearInvalid periodsPerYear
   let excess = U.map (\value -> value - target) returns
-      downside = U.map (\value -> min value 0.0) excess
+      downside = U.map (`min` 0.0) excess
       denominator = sqrt (sumVector (U.map (\value -> value * value) downside) / fromIntegral (U.length downside))
   if denominator == 0.0
     then Left DenominatorZero

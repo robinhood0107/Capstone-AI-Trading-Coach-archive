@@ -14,6 +14,7 @@ import Data.Aeson.Types (Pair)
 import Data.Binary.Get (getDoublele, runGet)
 import Data.ByteString (ByteString)
 import Data.Digest.Pure.SHA (sha256, showDigest)
+import Data.Either (lefts, rights)
 import Data.Map.Strict (Map)
 import Data.Set (Set)
 import Data.Text (Text)
@@ -228,7 +229,7 @@ runRequest fixtureRoot (RequestBatch _ requestId cases) = do
             ( ResultBatch
                 requestId
                 implementationLabel
-                [value | Right value <- evaluated]
+                (rights evaluated)
             )
     )
 
@@ -457,7 +458,7 @@ classifyInlineVector :: Bool -> [RawJson] -> Either StableError [Double]
 classifyInlineVector production values
   | any isNested values = Left (if production then InputShapeInvalid else ResearchInputInvalid)
   | any isBoolean values = Left (if production then InputBoolInvalid else ResearchInputInvalid)
-  | any (not . isNumber) values =
+  | not (all isNumber values) =
       Left (if production then InputTypeInvalid else ResearchInputInvalid)
   | otherwise =
       case traverse rawDouble values of
@@ -888,7 +889,7 @@ firstTransportFailure ::
   [Either TransportError CaseResult] ->
   Maybe TransportError
 firstTransportFailure values =
-  case [transport | Left transport <- values] of
+  case lefts values of
     [] -> Nothing
     first : _ -> Just first
 

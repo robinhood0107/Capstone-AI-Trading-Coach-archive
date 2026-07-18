@@ -13,6 +13,7 @@ import Data.Aeson
     (.=),
   )
 import Data.Binary.Get (getDoublele, runGet)
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import System.Directory
   ( canonicalizePath,
@@ -256,7 +257,7 @@ main = do
 configuredPath :: String -> FilePath -> IO FilePath
 configuredPath variable fallback = do
   configured <- lookupEnv variable
-  canonicalizePath (maybe fallback id configured)
+  canonicalizePath (fromMaybe fallback configured)
 
 decodeFile :: FromJSON value => FilePath -> IO value
 decodeFile path = do
@@ -349,11 +350,7 @@ benchmark :: FrozenInputs -> BenchmarkCase -> Benchmark
 benchmark inputs benchmarkCase =
   env
     (setupPreparedCase inputs benchmarkCase)
-    (\prepared ->
-        bench
-          (Text.unpack (benchmarkCaseId benchmarkCase))
-          (nf runPrepared prepared)
-    )
+    (bench (Text.unpack (benchmarkCaseId benchmarkCase)) . nf runPrepared)
 
 setupPreparedCase :: FrozenInputs -> BenchmarkCase -> IO PreparedCase
 setupPreparedCase inputs benchmarkCase = do

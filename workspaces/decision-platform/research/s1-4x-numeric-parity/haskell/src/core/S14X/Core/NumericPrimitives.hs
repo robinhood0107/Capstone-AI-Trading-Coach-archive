@@ -196,7 +196,7 @@ finiteResearchResult :: Double -> Either StableError Double
 finiteResearchResult = ensureFinite ResearchResultNonFinite
 
 normalCdf :: Double -> Double
-normalCdf value = 0.5 * erfc (-value / sqrt 2.0)
+normalCdf value = 0.5 * erfc (-(value / sqrt 2.0))
 
 -- CPython 3.12 NormalDist와 같은 Wichura AS241 branch/coefficient를 직접 보존한다.
 -- statistics package 결과는 구현 입력이 아니라 cross-check에만 사용할 수 있다.
@@ -294,7 +294,7 @@ chiSquareOneSurvival :: Double -> Either StableError Double
 chiSquareOneSurvival statistic = finiteProbability (erfc (sqrt (statistic / 2.0)))
 
 chiSquareTwoSurvival :: Double -> Either StableError Double
-chiSquareTwoSurvival statistic = finiteProbability (exp (-statistic / 2.0))
+chiSquareTwoSurvival statistic = finiteProbability (exp (-(statistic / 2.0)))
 
 anyNonFinite :: [Double] -> Bool
 anyNonFinite = any (\value -> isNaN value || isInfinite value)

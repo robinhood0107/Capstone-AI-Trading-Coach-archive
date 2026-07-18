@@ -66,10 +66,10 @@ import S14X.PropertyCases
 data SeedCorpus = SeedCorpus Text [Int]
   deriving stock (Eq, Show)
 
-data FunctionRegistry = FunctionRegistry [Text]
+newtype FunctionRegistry = FunctionRegistry [Text]
   deriving stock (Eq, Show)
 
-data ErrorRegistry = ErrorRegistry [ErrorEntry]
+newtype ErrorRegistry = ErrorRegistry [ErrorEntry]
   deriving stock (Eq, Show)
 
 data ErrorEntry = ErrorEntry

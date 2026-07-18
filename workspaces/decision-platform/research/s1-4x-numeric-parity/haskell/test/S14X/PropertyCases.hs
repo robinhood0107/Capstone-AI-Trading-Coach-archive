@@ -4,6 +4,7 @@ module S14X.PropertyCases
   )
 where
 
+import Data.List (foldl')
 import Data.Text (Text)
 import Test.QuickCheck
   ( Gen,
@@ -29,7 +30,7 @@ import S14X.Contract.Types
         KupiecUnconditionalCoverageTest,
         LogReturns,
         SimpleReturns
-      ),
+    ),
     ResultBatch (ResultBatch),
   )
 import S14X.Core.AdvancedRisk
@@ -206,13 +207,18 @@ varHf7ObservationRange :: Property
 varHf7ObservationRange =
   forAll quantileSamples $ \samples ->
     forAll frozenConfidence $ \confidence ->
-      let values = U.fromList samples
-       in case historicalVar values confidence of
-            Left stableError -> counterexample (show stableError) False
-            Right value ->
-              counterexample
-                (show (value, minimum samples, maximum samples))
-                (finite value && value >= minimum samples && value <= maximum samples)
+      case samples of
+        [] -> counterexample "quantile generator returned an empty sample" False
+        first : remaining ->
+          let values = U.fromList samples
+              sampleMinimum = foldl' min first remaining
+              sampleMaximum = foldl' max first remaining
+           in case historicalVar values confidence of
+                Left stableError -> counterexample (show stableError) False
+                Right value ->
+                  counterexample
+                    (show (value, sampleMinimum, sampleMaximum))
+                    (finite value && value >= sampleMinimum && value <= sampleMaximum)
 
 varCvarShiftAndPositiveScale :: Property
 varCvarShiftAndPositiveScale =

@@ -1,6 +1,7 @@
 module S14X.BenchmarkStaticSpec (tests) where
 
 import Data.Aeson (FromJSON (parseJSON), eitherDecodeFileStrict', withObject, (.:))
+import Data.Bifunctor (second)
 import Data.List (isInfixOf)
 import Data.Map.Strict (Map)
 import Data.Text (Text)
@@ -64,7 +65,7 @@ exactCaseClosure = do
         ]
   length cases @?= 89
   caseFamilies @?= expectedFamilyCounts
-  Map.fromList (fmap (\(familyId, caseIds) -> (familyId, length caseIds)) haskellSelectors)
+  Map.fromList (fmap (second length) haskellSelectors)
     @?= expectedFamilyCounts
 
 frozenFixtureHarness :: IO ()
@@ -92,7 +93,7 @@ frozenFixtureHarness = do
     (all (`isInfixOf` source) required)
   assertBool
     "Criterion harness retains synthetic or stale fixture construction"
-    (all (not . (`isInfixOf` source)) forbidden)
+    (not (any (`isInfixOf` source) forbidden))
 
 batchConstruction :: IO ()
 batchConstruction = do
@@ -112,7 +113,7 @@ batchConstruction = do
     (all (`isInfixOf` source) required)
   assertBool
     "timed batch path retains modulo or per-call forecast allocation"
-    (all (not . (`isInfixOf` source)) forbidden)
+    (not (any (`isInfixOf` source) forbidden))
 
 decodePlan :: IO BenchmarkPlan
 decodePlan = do

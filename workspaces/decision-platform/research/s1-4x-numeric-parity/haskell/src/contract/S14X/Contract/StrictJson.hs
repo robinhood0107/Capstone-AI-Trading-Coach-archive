@@ -7,6 +7,7 @@ module S14X.Contract.StrictJson
 where
 
 import Control.Applicative ((<|>))
+import Control.Monad (replicateM_)
 import Data.Aeson (eitherDecodeStrict')
 import Data.Attoparsec.ByteString.Char8
   ( Parser,
@@ -24,6 +25,7 @@ import Data.Attoparsec.ByteString.Char8
   )
 import Data.ByteString (ByteString)
 import Data.Foldable (traverse_)
+import Data.Functor (($>))
 import Data.Map.Strict (Map)
 import Data.Scientific (Scientific, toRealFloat)
 import Data.Set (Set)
@@ -98,9 +100,9 @@ rawValue =
     <|> rawArray
     <|> (RawString <$> jsonString)
     <|> rawNumber
-    <|> (string "true" *> pure (RawBool True))
-    <|> (string "false" *> pure (RawBool False))
-    <|> (string "null" *> pure RawNull)
+    <|> (string "true" $> RawBool True)
+    <|> (string "false" $> RawBool False)
+    <|> (string "null" $> RawNull)
 
 rawObject :: Parser RawJson
 rawObject =
@@ -143,7 +145,7 @@ jsonNumber = do
   where
     integerPart =
       (char '0' *> rejectFollowingDigit)
-        <|> (satisfy isNonZeroDigit *> many' (satisfy isDigit) *> pure ())
+        <|> ((satisfy isNonZeroDigit *> many' (satisfy isDigit)) $> ())
     fractionalPart = do
       _ <- char '.'
       _ <- satisfy isDigit
@@ -176,7 +178,7 @@ jsonString = do
 
 stringCharacter :: Parser ()
 stringCharacter =
-  (satisfy (\character -> character >= ' ' && character /= '"' && character /= '\\') *> pure ())
+  (satisfy (\character -> character >= ' ' && character /= '"' && character /= '\\') $> ())
     <|> escapedCharacter
 
 escapedCharacter :: Parser ()
@@ -185,11 +187,10 @@ escapedCharacter = do
   simpleEscape <|> unicodeEscape
   where
     simpleEscape =
-      satisfy (`elem` ['"', '\\', '/', 'b', 'f', 'n', 'r', 't']) *> pure ()
+      satisfy (`elem` ['"', '\\', '/', 'b', 'f', 'n', 'r', 't']) $> ()
     unicodeEscape = do
       _ <- char 'u'
-      _ <- sequenceA (replicate 4 (satisfy isHex))
-      pure ()
+      replicateM_ 4 (satisfy isHex)
     isHex character =
       isDigit character
         || (character >= 'a' && character <= 'f')
