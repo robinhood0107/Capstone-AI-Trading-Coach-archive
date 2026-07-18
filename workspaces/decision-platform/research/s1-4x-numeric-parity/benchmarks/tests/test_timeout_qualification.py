@@ -151,7 +151,7 @@ def test_runner_manifest_hash_and_parse_share_one_snapshot(
     forged["boundaryCommands"]["scala"].extend(["--override", "forged"])
     replacement = tmp_path / "replacement.json"
     replacement.write_text(json.dumps(forged), encoding="utf-8")
-    real_sha256_file = runner.sha256_file
+    real_sha256_file = sha256_file
     swapped = False
 
     def replace_after_hash(candidate: Path) -> str:
@@ -415,7 +415,7 @@ def test_timeout_termination_reaps_leader_and_remaining_process_group(
     class FinishedLeader:
         pid = 12345
 
-        def wait(self, timeout: float) -> int:
+        def wait(self, timeout: float | None = None) -> int:
             assert timeout == 5
             return -signal.SIGTERM
 
@@ -441,7 +441,7 @@ def test_timeout_termination_has_stable_leaf_when_group_survives_sigkill(
     class FinishedLeader:
         pid = 12345
 
-        def wait(self, timeout: float) -> int:
+        def wait(self, timeout: float | None = None) -> int:
             return -signal.SIGKILL
 
     monkeypatch.setattr(runner, "_signal_process_group", lambda *args: None)
@@ -476,6 +476,9 @@ def test_completed_native_process_rejects_and_cleans_surviving_descendants(
 
     class FinishedLeader:
         pid = 12345
+
+        def wait(self, timeout: float | None = None) -> int:
+            return 0
 
     monkeypatch.setattr(runner, "_process_group_exists", lambda process_group_id: True)
     monkeypatch.setattr(

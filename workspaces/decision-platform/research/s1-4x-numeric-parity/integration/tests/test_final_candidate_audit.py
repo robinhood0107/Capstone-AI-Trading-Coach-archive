@@ -8,8 +8,9 @@ import json
 import subprocess
 import sys
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from unittest import TestCase
 from unittest.mock import patch
 
@@ -321,7 +322,10 @@ class FinalCandidateAuditTests(TestCase):
             evidence_root=self.evidence_root,
             output_path=self.ledger_path,
         )
-        return json.loads(self.ledger_path.read_text(encoding="utf-8"))
+        return cast(
+            dict[str, Any],
+            json.loads(self.ledger_path.read_text(encoding="utf-8")),
+        )
 
     def _rewrite_ledger(self, document: dict[str, Any]) -> None:
         self.ledger_path.write_text(
@@ -470,7 +474,10 @@ class FinalCandidateAuditTests(TestCase):
             },
             sort_keys=True,
         ).encode("utf-8")
-        original_loader = audit_module.strict_json_load
+        original_loader = cast(
+            Callable[[bytes | str | Path], Any],
+            getattr(audit_module, "strict_json_load"),
+        )
         swapped = False
 
         def replace_after_snapshot(value: bytes | str | Path) -> Any:

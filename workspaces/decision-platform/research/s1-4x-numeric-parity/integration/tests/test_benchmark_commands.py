@@ -8,6 +8,7 @@ import os
 import sys
 import tempfile
 from pathlib import Path
+from typing import cast
 from unittest import TestCase
 from unittest.mock import patch
 
@@ -268,7 +269,7 @@ class BenchmarkCommandManifestTests(TestCase):
             "sha256": hashlib.sha256(executable.read_bytes()).hexdigest(),
         }
         manifest = self._manifest_for_identity(identity)
-        commands = manifest["boundaryCommands"]
+        commands = cast(dict[str, list[str]], manifest["boundaryCommands"])
         commands["scala"] = [str(executable), "{qualification}", "{qualification}"]
         with self.assertRaisesRegex(
             CommandManifestError,
