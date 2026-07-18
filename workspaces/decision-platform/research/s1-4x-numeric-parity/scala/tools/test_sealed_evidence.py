@@ -58,14 +58,21 @@ def main() -> int:
             "path substitution after sealed capture passed",
         )
 
-        # 원래 inode를 pathname에 되돌리는 ABA는 snapshot bytes와 pathname identity가
-        # 다시 정확히 같을 때만 허용된다. 중간 B bytes는 selector 입력이 될 수 없다.
+        # 원래 inode를 pathname에 되돌리는 ABA도 ctime identity가 달라지므로
+        # fail-closed한다. 중간 B bytes는 selector 입력이 될 수 없다.
         evidence.unlink()
         original.rename(evidence)
-        snapshot.verify_unchanged()
-        assert snapshot.capture(evidence, root=root, label="unit").json_value()[
-            "value"
-        ] == 1
+        expect_error(
+            module,
+            snapshot.verify_unchanged,
+            "ABA restore after sealed capture passed",
+        )
+        fresh_snapshot = module.SealedEvidenceSnapshot()
+        assert fresh_snapshot.capture(
+            evidence,
+            root=root,
+            label="fresh-unit",
+        ).json_value()["value"] == 1
 
         link = root / "link.json"
         link.symlink_to(evidence.name)
