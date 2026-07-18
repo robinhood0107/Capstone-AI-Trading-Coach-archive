@@ -81,7 +81,7 @@ final class ProductionMetricsSuite extends FunSuite:
       StableError.InputBoolInvalid
     )
     assertEquals(
-      errorOf(ProductionMetrics.simpleReturnsRaw(Vector(Vector(100.0), true))),
+      errorOf(ProductionMetrics.simpleReturnsRaw(Vector[Any](Vector(100.0), true))),
       StableError.InputShapeInvalid
     )
     assertEquals(

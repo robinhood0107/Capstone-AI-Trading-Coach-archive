@@ -19,8 +19,17 @@ final class ContractShellSuite extends FunSuite:
     request match
       case Right(value) =>
         val result = CandidateRunner.execute(value, Files.createTempDirectory("s14x-fixtures"))
-        assertEquals(result.results.size, 1)
-        assertEquals(result.results(0).errorCode, Some(StableError.PeriodsPerYearInvalid.code))
+        result match
+          case Right(batch) =>
+            assertEquals(batch.results.size, 1)
+            val first = batch.results.take(1).foldLeft(Option.empty[CandidateCaseResult]) {
+              (_, item) => Some(item)
+            }
+            assertEquals(
+              first.flatMap(_.errorCode),
+              Some(StableError.PeriodsPerYearInvalid.code),
+            )
+          case Left(error) => fail(s"semantic case는 transport error가 아니어야 한다: ${error.code}")
       case Left(error) => fail(s"request envelope는 valid여야 한다: ${error.code}")
 
   test("recursive normalizer는 nested -0.0을 positive zero로 바꾼다"):
