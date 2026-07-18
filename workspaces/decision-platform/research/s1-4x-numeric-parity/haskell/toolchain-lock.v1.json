@@ -101,14 +101,16 @@
     ]
   },
   "compatibilityPlan": {
-    "status": "PENDING_SOLVE",
-    "acceptedMode": false,
+    "status": "FAIL_FROZEN_DEPENDENCY",
+    "acceptedMode": true,
     "stackYamlPath": "haskell/stack-ghc-9.14.1.yaml",
     "stackYamlSha256": "7e9effb7194df42a50fac175b079fbb07ce9edd7f09a048fe428bf20cec299da",
     "stackLockPath": "haskell/stack-ghc-9.14.1.yaml.lock",
-    "stackLockSha256": null,
-    "failureResultPath": null,
-    "failureResultSha256": null
+    "stackLockSha256": "e376d075c33c8bc14aebc6f27c6de3a6be81056354a1fc332d71f959f4870154",
+    "failureEvidencePath": "haskell/ghc-compatibility-solve-failure.v1.json",
+    "failureEvidenceSha256": "ffbef3c6eb36499272568f7d024763903fcea3fd3e9f14de7e7963d5b20e7ac6",
+    "failureResultPath": "reports/ghc-compatibility-result.v1.json",
+    "failureResultSha256": "3740de97d4fe93ee43d042b764b9e3e7c97536425941b80f53d97561e9b285fb"
   },
   "stackConfigurations": {
     "authoritativePath": "haskell/stack.yaml",
@@ -116,7 +118,7 @@
     "compatibilityPath": "haskell/stack-ghc-9.14.1.yaml",
     "compatibilitySha256": "7e9effb7194df42a50fac175b079fbb07ce9edd7f09a048fe428bf20cec299da",
     "compatibilityLockPath": "haskell/stack-ghc-9.14.1.yaml.lock",
-    "compatibilityLockSha256": null,
+    "compatibilityLockSha256": "e376d075c33c8bc14aebc6f27c6de3a6be81056354a1fc332d71f959f4870154",
     "authoritativeLockPath": "haskell/stack.yaml.lock",
     "authoritativeLockSha256": "e376d075c33c8bc14aebc6f27c6de3a6be81056354a1fc332d71f959f4870154"
   }

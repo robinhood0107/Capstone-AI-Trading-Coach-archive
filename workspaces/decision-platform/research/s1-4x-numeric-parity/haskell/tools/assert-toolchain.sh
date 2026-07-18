@@ -1,11 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ALLOW_PENDING_COMPATIBILITY=0
-if [[ "$#" -eq 1 && "$1" == "--allow-pending-compatibility" ]]; then
-  ALLOW_PENDING_COMPATIBILITY=1
-elif [[ "$#" -ne 0 ]]; then
-  echo "usage: assert-toolchain.sh [--allow-pending-compatibility]" >&2
+if [[ "$#" -ne 0 ]]; then
+  echo "usage: assert-toolchain.sh" >&2
   exit 64
 fi
 
@@ -114,6 +111,13 @@ assert_regular_executable \
 PROVENANCE="$NUMERIC_ROOT/contract/toolchain-provenance.v1.json"
 PROVENANCE_SCHEMA="$NUMERIC_ROOT/contract/schemas/toolchain-provenance.schema.json"
 LOCK="$HASKELL_ROOT/toolchain-lock.v1.json"
+COMPATIBILITY_EVIDENCE="$HASKELL_ROOT/ghc-compatibility-solve-failure.v1.json"
+COMPATIBILITY_RESULT="$NUMERIC_ROOT/reports/ghc-compatibility-result.v1.json"
+
+# 실패 승인도 성공 승인과 동일하게 raw solve, companion, canonical result의 exact closure를 검증한다.
+python3 "$HASKELL_ROOT/tools/compatibility_evidence.py" validate \
+  --evidence "$COMPATIBILITY_EVIDENCE" \
+  --result "$COMPATIBILITY_RESULT" >/dev/null
 
 compatibility_status="$(
 python3 - \
@@ -122,7 +126,9 @@ python3 - \
   "$PROVENANCE_SCHEMA" \
   "$HASKELL_ROOT/stack.yaml" \
   "$HASKELL_ROOT/stack-ghc-9.14.1.yaml" \
-  "$HASKELL_ROOT/stack.yaml.lock" <<'PY'
+  "$HASKELL_ROOT/stack.yaml.lock" \
+  "$COMPATIBILITY_EVIDENCE" \
+  "$COMPATIBILITY_RESULT" <<'PY'
 import hashlib
 import json
 import sys
@@ -153,9 +159,16 @@ def strict_json(path: Path):
     )
 
 
-lock_path, provenance_path, schema_path, stack_path, compatibility_path, stack_lock_path = (
-    map(Path, sys.argv[1:])
-)
+(
+    lock_path,
+    provenance_path,
+    schema_path,
+    stack_path,
+    compatibility_path,
+    stack_lock_path,
+    compatibility_evidence_path,
+    compatibility_result_path,
+) = map(Path, sys.argv[1:])
 lock = strict_json(lock_path)
 provenance = strict_json(provenance_path)
 
@@ -292,17 +305,19 @@ if lock["resolverAssertions"] != expected_resolvers:
     raise SystemExit("GHCup run resolver assertion drift")
 
 expected_compatibility_plan = {
-    "status": "PENDING_SOLVE",
-    "acceptedMode": False,
+    "status": "FAIL_FROZEN_DEPENDENCY",
+    "acceptedMode": True,
     "stackYamlPath": "haskell/stack-ghc-9.14.1.yaml",
     "stackYamlSha256": sha256(compatibility_path),
     "stackLockPath": "haskell/stack-ghc-9.14.1.yaml.lock",
-    "stackLockSha256": None,
-    "failureResultPath": None,
-    "failureResultSha256": None,
+    "stackLockSha256": "e376d075c33c8bc14aebc6f27c6de3a6be81056354a1fc332d71f959f4870154",
+    "failureEvidencePath": "haskell/ghc-compatibility-solve-failure.v1.json",
+    "failureEvidenceSha256": sha256(compatibility_evidence_path),
+    "failureResultPath": "reports/ghc-compatibility-result.v1.json",
+    "failureResultSha256": sha256(compatibility_result_path),
 }
 if lock["compatibilityPlan"] != expected_compatibility_plan:
-    raise SystemExit("provisional GHC 9.14 compatibility plan drift")
+    raise SystemExit("accepted GHC 9.14 compatibility failure plan drift")
 
 expected_configurations = {
     "authoritativePath": "haskell/stack.yaml",
@@ -310,7 +325,7 @@ expected_configurations = {
     "compatibilityPath": "haskell/stack-ghc-9.14.1.yaml",
     "compatibilitySha256": sha256(compatibility_path),
     "compatibilityLockPath": "haskell/stack-ghc-9.14.1.yaml.lock",
-    "compatibilityLockSha256": None,
+    "compatibilityLockSha256": "e376d075c33c8bc14aebc6f27c6de3a6be81056354a1fc332d71f959f4870154",
     "authoritativeLockPath": "haskell/stack.yaml.lock",
     "authoritativeLockSha256": sha256(stack_lock_path),
 }
@@ -330,17 +345,11 @@ grep -Fx 'compiler-check: match-exact' "$HASKELL_ROOT/stack-ghc-9.14.1.yaml" >/d
 grep -Fx 'system-ghc: true' "$HASKELL_ROOT/stack-ghc-9.14.1.yaml" >/dev/null
 grep -Fx 'install-ghc: false' "$HASKELL_ROOT/stack-ghc-9.14.1.yaml" >/dev/null
 
-if [[ "$compatibility_status" == "PENDING_SOLVE" \
-  && "$ALLOW_PENDING_COMPATIBILITY" -ne 1 ]]; then
-  echo "HASKELL_TOOLCHAIN_PENDING: GHC 9.14 compatibility solve is not acceptance-eligible" >&2
-  exit 78
-fi
-
 printf 'HASKELL_TOOLCHAIN_PASS ghcup=%s stack=%s ghc=%s compatibilityGhc=%s compatibilityStatus=%s acceptedMode=%s lockSha256=%s\n' \
   "$GHCUP_BIN" \
   "$STACK_BIN" \
   "$AUTHORITATIVE_GHC_BIN" \
   "$LATEST_GHC_BIN" \
   "$compatibility_status" \
-  "$([[ "$compatibility_status" == "PENDING_SOLVE" ]] && printf false || printf true)" \
+  "true" \
   "$(sha256sum "$LOCK" | awk '{print $1}')"
