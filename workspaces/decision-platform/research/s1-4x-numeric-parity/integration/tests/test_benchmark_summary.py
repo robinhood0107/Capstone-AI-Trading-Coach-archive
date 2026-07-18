@@ -4,18 +4,26 @@ from __future__ import annotations
 
 import math
 import sys
+import tempfile
 from pathlib import Path
 from unittest import TestCase
 
 INTEGRATION = Path(__file__).resolve().parents[1]
+BENCHMARKS = INTEGRATION.parent / "benchmarks"
 sys.path.insert(0, str(INTEGRATION))
+sys.path.insert(0, str(BENCHMARKS))
 
+from benchmark_contract import sha256_file, strict_json_load  # noqa: E402
 from finalize_benchmark_run import (  # noqa: E402
     BenchmarkSummaryError,
+    _validate_performance_timeout,
     distribution,
     nearest_rank_p95,
     score_candidate_performance,
 )
+from run_rotated_blocks import build_schedule  # noqa: E402
+
+PLAN = BENCHMARKS / "benchmark-plan.v1.json"
 
 
 class BenchmarkSummaryTests(TestCase):
@@ -68,6 +76,97 @@ class BenchmarkSummaryTests(TestCase):
         self.assertEqual(scores["scala"]["familyRatios"]["family-b"], 0.0)
         self.assertEqual(scores["scala"]["aggregateRatio"], 0.0)
         self.assertEqual(scores["scala"]["performancePoints"], 0.0)
+        self.assertEqual(scores["haskell"]["familyRatios"]["family-b"], 1.0)
+        self.assertAlmostEqual(scores["haskell"]["aggregateRatio"], math.sqrt(0.5))
+
+    def test_timeout_evidence_requires_exact_frozen_identity_and_artifacts(self) -> None:
+        temporary = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        qualification_path = temporary / "timeout-qualification.json"
+        qualification_path.write_text('{"qualified":true}\n', encoding="utf-8")
+        qualification_sha256 = sha256_file(qualification_path)
+        plan = strict_json_load(PLAN)
+        block = build_schedule(plan)[0]
+        qualification = {
+            "run": {
+                "runId": "run-001",
+                "rotationId": block.rotation_id,
+                "outerRepetition": block.outer_repetition,
+                "timeoutSeconds": block.timeout_seconds,
+            }
+        }
+        evidence = {
+            "schemaVersion": "s1.4x-valid-performance-timeout-v1",
+            "planId": plan["planId"],
+            "runId": "run-001",
+            "rotationId": block.rotation_id,
+            "outerRepetition": block.outer_repetition,
+            "boundaryId": block.boundary_id,
+            "familyId": block.family_id,
+            "selectorId": block.selector_id,
+            "timeoutSeconds": block.timeout_seconds,
+            "measurementEntered": True,
+            "timeoutQualificationSha256": qualification_sha256,
+            "terminationSequence": [
+                "SIGTERM",
+                "bounded-grace-5s",
+                "SIGKILL-if-needed",
+            ],
+            "partialArtifactsUsedForScoring": False,
+            "scoreDisposition": "candidate-family-ratio-zero",
+            "continueRemainingPredeclaredMatrix": True,
+            "artifacts": [
+                {
+                    "path": "timeout-qualification.json",
+                    "sha256": qualification_sha256,
+                    "sizeBytes": qualification_path.stat().st_size,
+                }
+            ],
+        }
+        _validate_performance_timeout(
+            evidence,
+            plan=plan,
+            block=block,
+            qualification=qualification,
+            qualification_sha256=qualification_sha256,
+        )
+
+        invalid_variants = {
+            "extra-field": {**evidence, "benchmarkSubjectCommit": "a" * 40},
+            "wrong-plan": {**evidence, "planId": "wrong"},
+            "wrong-run": {**evidence, "runId": "wrong"},
+            "wrong-repetition": {**evidence, "outerRepetition": 2},
+            "wrong-timeout": {**evidence, "timeoutSeconds": 1},
+            "wrong-qualification-hash": {
+                **evidence,
+                "timeoutQualificationSha256": "0" * 64,
+            },
+            "wrong-termination": {**evidence, "terminationSequence": ["SIGKILL"]},
+            "stop-matrix": {
+                **evidence,
+                "continueRemainingPredeclaredMatrix": False,
+            },
+            "bad-artifact": {
+                **evidence,
+                "artifacts": [
+                    {
+                        "path": "../timeout-qualification.json",
+                        "sha256": "not-a-hash",
+                        "sizeBytes": -1,
+                    }
+                ],
+            },
+        }
+        for label, invalid in invalid_variants.items():
+            with self.subTest(label=label), self.assertRaises(
+                BenchmarkSummaryError
+            ):
+                _validate_performance_timeout(
+                    invalid,
+                    plan=plan,
+                    block=block,
+                    qualification=qualification,
+                    qualification_sha256=qualification_sha256,
+                )
 
     def test_missing_candidate_case_is_fail_closed(self) -> None:
         with self.assertRaisesRegex(BenchmarkSummaryError, "CANDIDATE_CASE_SET_MISMATCH"):
