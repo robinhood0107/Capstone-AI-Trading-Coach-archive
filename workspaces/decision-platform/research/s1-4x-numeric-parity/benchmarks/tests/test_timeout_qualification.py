@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -152,6 +153,54 @@ def test_runner_executes_sealed_verified_bytes_after_supplier_path_replacement(
             )
             assert stdout.read_text(encoding="utf-8") == "A\n"
             assert stderr.read_bytes() == b""
+
+
+def test_source_commit_binding_rejects_tracked_and_untracked_worktree_drift(
+    tmp_path: Path,
+) -> None:
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "config", "user.name", "S1.4X Test"],
+        cwd=tmp_path,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "s1.4x-test@example.invalid"],
+        cwd=tmp_path,
+        check=True,
+    )
+    tracked = tmp_path / "tracked.txt"
+    tracked.write_text("frozen\n", encoding="utf-8")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-qm", "frozen"], cwd=tmp_path, check=True)
+    commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    runner._verify_source_commit_binding(
+        tmp_path,
+        benchmark_subject_commit=commit,
+        candidate_source_commit=commit,
+    )
+    tracked.write_text("mutated\n", encoding="utf-8")
+    with pytest.raises(ContractError, match="CURRENT_SOURCE_WORKTREE_DIRTY"):
+        runner._verify_source_commit_binding(
+            tmp_path,
+            benchmark_subject_commit=commit,
+            candidate_source_commit=commit,
+        )
+    tracked.write_text("frozen\n", encoding="utf-8")
+    (tmp_path / "untracked.txt").write_text("untracked\n", encoding="utf-8")
+    with pytest.raises(ContractError, match="CURRENT_SOURCE_WORKTREE_DIRTY"):
+        runner._verify_source_commit_binding(
+            tmp_path,
+            benchmark_subject_commit=commit,
+            candidate_source_commit=commit,
+        )
 
 
 def test_command_renderer_rejects_unbound_or_formatted_placeholders() -> None:
@@ -364,6 +413,40 @@ def test_valid_measurement_timeout_binds_qualification_and_continues(
         assert evidence["measurementEntered"] is True
         assert evidence["timeoutQualificationSha256"] == sha256_file(qualification)
         assert strict_json_load(qualification)["measurementEntered"] is True
+
+
+def test_execute_rechecks_source_binding_around_every_native_block(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    plan: dict[str, Any],
+) -> None:
+    schedule = _install_execute_fakes(
+        monkeypatch,
+        plan,
+        native_marks_measurement=True,
+    )
+    checks: list[tuple[str, str]] = []
+
+    def record_source_check(
+        _repo_root: Path,
+        *,
+        benchmark_subject_commit: str,
+        candidate_source_commit: str,
+    ) -> None:
+        checks.append((benchmark_subject_commit, candidate_source_commit))
+
+    monkeypatch.setattr(
+        runner,
+        "_verify_source_commit_binding",
+        record_source_check,
+    )
+    manifest_path = tmp_path / "commands.json"
+    manifest_sha256 = _write_manifest(manifest_path)
+
+    summary = _execute(tmp_path, manifest_path, manifest_sha256)
+
+    assert summary["validPerformanceTimeoutCount"] == len(schedule)
+    assert checks == [(COMMIT, COMMIT)] * (1 + 2 * len(schedule))
 
 
 @pytest.mark.parametrize(
