@@ -22,9 +22,8 @@ module S14X.Core.NumericPrimitives
   )
 where
 
+import Data.List (foldl')
 import Numeric.SpecFunctions (erfc, log1p)
-import Statistics.Distribution (cumulative, quantile)
-import Statistics.Distribution.Normal (standard)
 
 import qualified Data.Vector.Unboxed as U
 
@@ -182,10 +181,99 @@ finiteResearchResult :: Double -> Either StableError Double
 finiteResearchResult = ensureFinite ResearchResultNonFinite
 
 normalCdf :: Double -> Double
-normalCdf = cumulative standard
+normalCdf value = 0.5 * erfc (-value / sqrt 2.0)
 
+-- CPython 3.12 NormalDist와 같은 Wichura AS241 branch/coefficient를 직접 보존한다.
+-- statistics package 결과는 구현 입력이 아니라 cross-check에만 사용할 수 있다.
 normalInverseCdf :: Double -> Double
-normalInverseCdf = quantile standard
+normalInverseCdf probability
+  | probability <= 0.0 = negate (1.0 / 0.0)
+  | probability >= 1.0 = 1.0 / 0.0
+  | abs centered <= 0.425 =
+      let argument = 0.180625 - centered * centered
+       in centered
+            * horner
+              argument
+              [ 2.5090809287301227e3,
+                3.3430575583588128e4,
+                6.72657709270087e4,
+                4.592195393154987e4,
+                1.373169376550946e4,
+                1.9715909503065514e3,
+                1.3314166789178438e2,
+                3.3871328727963665
+              ]
+            / horner
+              argument
+              [ 5.226495278852855e3,
+                2.872908573572194e4,
+                3.930789580009271e4,
+                2.1213794301586597e4,
+                5.394196021424751e3,
+                6.871870074920579e2,
+                4.231333070160091e1,
+                1.0
+              ]
+  | otherwise =
+      if centered < 0.0 then negate positive else positive
+  where
+    centered = probability - 0.5
+    tailProbability =
+      if centered <= 0.0 then probability else 1.0 - probability
+    root = sqrt (negate (log tailProbability))
+    positive
+      | root <= 5.0 =
+          let argument = root - 1.6
+           in horner
+                argument
+                [ 7.745450142783414e-4,
+                  2.2723844989269185e-2,
+                  2.417807251774506e-1,
+                  1.2704582524523684,
+                  3.6478483247632045,
+                  5.769497221460691,
+                  4.630337846156545,
+                  1.4234371107496835
+                ]
+                / horner
+                  argument
+                  [ 1.0507500716444169e-9,
+                    5.475938084995345e-4,
+                    1.5198666563616457e-2,
+                    1.4810397642748007e-1,
+                    6.897673349851e-1,
+                    1.6763848301838038,
+                    2.0531916266377588,
+                    1.0
+                  ]
+      | otherwise =
+          let argument = root - 5.0
+           in horner
+                argument
+                [ 2.010334399292288e-7,
+                  2.7115555687434876e-5,
+                  1.2426609473880784e-3,
+                  2.6532189526576123e-2,
+                  2.965605718285049e-1,
+                  1.7848265399172913,
+                  5.463784911164114,
+                  6.657904643501103
+                ]
+                / horner
+                  argument
+                  [ 2.0442631033899397e-15,
+                    1.4215117583164459e-7,
+                    1.8463183175100548e-5,
+                    7.868691311456133e-4,
+                    1.4875361290850615e-2,
+                    1.369298809227358e-1,
+                    5.99832206555888e-1,
+                    1.0
+                  ]
+
+horner :: Double -> [Double] -> Double
+horner argument =
+  foldl' (\accumulator coefficient -> accumulator * argument + coefficient) 0.0
 
 chiSquareOneSurvival :: Double -> Either StableError Double
 chiSquareOneSurvival statistic = finiteProbability (erfc (sqrt (statistic / 2.0)))
