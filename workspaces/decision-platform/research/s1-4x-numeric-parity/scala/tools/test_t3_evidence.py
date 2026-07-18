@@ -506,6 +506,8 @@ def selector_fixture(
                 "ns",
                 "-t",
                 "1",
+                "-jvm",
+                "PINNED_JAVA_FD",
                 "-f",
                 "3",
                 "-wi",
@@ -536,7 +538,12 @@ def selector_fixture(
                 *[str(SCALA_ROOT / path) for path in jmh_inputs],
                 "--workspace",
                 str(module.isolated_scala_workspace(case_root)),
-                *common_tail[2:],
+                *[
+                    os.environ["S1_4X_SCALA_JAVA_PINNED_FD_PATH"]
+                    if item == "PINNED_JAVA_FD"
+                    else item
+                    for item in common_tail[2:]
+                ],
                 "-rff",
                 str(native_path),
                 include_regex,
@@ -919,6 +926,10 @@ def feature_evidence(planned: dict) -> dict:
 
 def main() -> int:
     module = load_module()
+    os.environ.setdefault(
+        "S1_4X_SCALA_JAVA_PINNED_FD_PATH",
+        f"/proc/{os.getpid()}/fd/999",
+    )
     temporary_root = os.environ.get("S1_4X_TEST_TMP_ROOT")
     with tempfile.TemporaryDirectory(dir=temporary_root) as directory:
         duplicate_json = Path(directory) / "duplicate.json"

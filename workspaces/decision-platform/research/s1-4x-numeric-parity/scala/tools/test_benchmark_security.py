@@ -108,7 +108,7 @@ def main() -> int:
         )
 
         tool = root / "tool"
-        tool.write_bytes(b"#!/bin/sh\nexit 0\n")
+        tool.write_bytes(Path("/usr/bin/dash").read_bytes())
         tool.chmod(0o755)
         expected_sha = hashlib.sha256(tool.read_bytes()).hexdigest()
         with module.PinnedExecutable(
@@ -120,18 +120,20 @@ def main() -> int:
             assert pinned.fd in pinned.pass_fds
             pinned.verify_path_identity()
             replacement = root / "replacement"
-            replacement.write_bytes(b"#!/bin/sh\nexit 1\n")
+            replacement.write_bytes(Path("/usr/bin/false").read_bytes())
             replacement.chmod(0o755)
             tool.unlink()
             replacement.rename(tool)
             pinned_execution = subprocess.run(
-                [str(pinned.proc_path)],
+                [str(pinned.proc_path), "-c", "exit 0"],
                 check=False,
                 pass_fds=pinned.pass_fds,
             )
             pathname_execution = subprocess.run(
-                [str(tool)],
+                [str(tool), "-c", "exit 0"],
                 check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
             )
             assert pinned_execution.returncode == 0
             assert pathname_execution.returncode == 1
