@@ -6,7 +6,7 @@ import hashlib
 import json
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from unittest import TestCase
 
 INTEGRATION = Path(__file__).resolve().parents[1]
@@ -18,7 +18,10 @@ from coverage_gate import CoverageError, validate_candidate_coverage  # noqa: E4
 
 
 def _load(name: str) -> dict[str, Any]:
-    return json.loads((CONTRACT / name).read_text(encoding="utf-8"))
+    return cast(
+        dict[str, Any],
+        json.loads((CONTRACT / name).read_text(encoding="utf-8")),
+    )
 
 
 def _candidate_reports() -> tuple[

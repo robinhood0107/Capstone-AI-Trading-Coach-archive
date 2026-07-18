@@ -13,7 +13,10 @@ BENCHMARKS = INTEGRATION.parent / "benchmarks"
 sys.path.insert(0, str(INTEGRATION))
 sys.path.insert(0, str(BENCHMARKS))
 
-from benchmark_contract import sha256_file, strict_json_load  # noqa: E402
+from benchmark_contract import (  # type: ignore[import-not-found]  # noqa: E402
+    sha256_file,
+    strict_json_load,
+)
 from finalize_benchmark_run import (  # noqa: E402
     BenchmarkSummaryError,
     _validate_performance_timeout,
@@ -21,7 +24,7 @@ from finalize_benchmark_run import (  # noqa: E402
     nearest_rank_p95,
     score_candidate_performance,
 )
-from run_rotated_blocks import build_schedule  # noqa: E402
+from run_rotated_blocks import build_schedule  # type: ignore[import-not-found]  # noqa: E402
 
 PLAN = BENCHMARKS / "benchmark-plan.v1.json"
 
@@ -128,6 +131,7 @@ class BenchmarkSummaryTests(TestCase):
             block=block,
             qualification=qualification,
             qualification_sha256=qualification_sha256,
+            block_directory=temporary,
         )
 
         invalid_variants = {
@@ -166,6 +170,7 @@ class BenchmarkSummaryTests(TestCase):
                     block=block,
                     qualification=qualification,
                     qualification_sha256=qualification_sha256,
+                    block_directory=temporary,
                 )
 
     def test_missing_candidate_case_is_fail_closed(self) -> None:

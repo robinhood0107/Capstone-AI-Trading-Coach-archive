@@ -12,7 +12,7 @@ BENCHMARKS = INTEGRATION.parent / "benchmarks"
 sys.path.insert(0, str(INTEGRATION))
 sys.path.insert(0, str(BENCHMARKS))
 
-from benchmark_contract import strict_json_load  # noqa: E402
+from benchmark_contract import strict_json_load  # type: ignore[import-not-found]  # noqa: E402
 from gate import GateError  # noqa: E402
 from python_benchmark_block import _prepare_operations_for_measurement  # noqa: E402
 from python_benchmark_smoke import (  # noqa: E402
@@ -74,9 +74,18 @@ class PythonBenchmarkSmokeTests(TestCase):
 
     def test_measurement_marker_follows_compile_force_and_all_warmups(self) -> None:
         events: list[str] = []
+
+        def case_a() -> float:
+            events.append("case-a")
+            return 1.0
+
+        def case_b() -> float:
+            events.append("case-b")
+            return 2.0
+
         operations = [
-            ({"caseId": "case-a"}, lambda: events.append("case-a") or 1.0),
-            ({"caseId": "case-b"}, lambda: events.append("case-b") or 2.0),
+            ({"caseId": "case-a"}, case_a),
+            ({"caseId": "case-b"}, case_b),
         ]
 
         _prepare_operations_for_measurement(
