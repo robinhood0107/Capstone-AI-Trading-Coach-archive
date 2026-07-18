@@ -128,5 +128,9 @@ HASKELL_IMAGE="s1-4x-haskell-correctness:$(git rev-parse --short=12 HEAD)"
   "$UV_BIN" sync --frozen --all-groups
   "$UV_BIN" run --frozen ruff check .
   "$UV_BIN" run --frozen mypy src benchmarks
-  "$UV_BIN" run --frozen pytest -q
+  # S1.4R 전용 branch allowlist 한 건은 S1.4X의 더 좁은 replacement gate로 대체한다.
+  "$UV_BIN" run --frozen --project "$ORACLE" pytest -q \
+    "$S1_4X/integration/tests/test_s1_4r_regression_boundary.py"
+  "$UV_BIN" run --frozen pytest -q \
+    --deselect="tests/test_production_isolation.py::test_branch_diff_is_confined_to_the_research_project_and_two_workflows"
 )
