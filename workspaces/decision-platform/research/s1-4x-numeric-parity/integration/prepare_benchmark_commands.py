@@ -4,29 +4,23 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import subprocess
 import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-from benchmark_commands import BOUNDARY_IDS, build_manifest, write_manifest_exclusive
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for block in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
+from benchmark_commands import (
+    BOUNDARY_IDS,
+    build_manifest,
+    inspect_executable_path,
+    write_manifest_exclusive,
+)
 
 
 def _identity(path: Path) -> dict[str, str]:
-    resolved = path.resolve(strict=True)
-    if not resolved.is_file() or not resolved.stat().st_mode & 0o111:
-        raise ValueError(f"wrapper is not executable: {resolved}")
-    return {"path": str(resolved), "sha256": _sha256(resolved)}
+    inspected = inspect_executable_path(path, role="prepare")
+    return {"path": inspected.path, "sha256": inspected.sha256}
 
 
 def _boundary_command(path: str, boundary: str) -> list[str]:

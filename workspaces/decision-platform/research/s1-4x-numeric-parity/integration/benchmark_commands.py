@@ -8,10 +8,22 @@ import hashlib
 import json
 import os
 import re
-import stat
+import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
+
+BENCHMARKS_DIRECTORY = Path(__file__).resolve().parents[1] / "benchmarks"
+if str(BENCHMARKS_DIRECTORY) not in sys.path:
+    sys.path.insert(0, str(BENCHMARKS_DIRECTORY))
+
+from executable_identity import (  # noqa: E402
+    ExecutableIdentityError as CommandManifestError,
+)
+from executable_identity import (  # noqa: E402
+    inspect_executable_identity,
+    inspect_executable_path,
+)
 
 BOUNDARY_IDS = (
     "python-numpy-s1-4",
@@ -23,10 +35,6 @@ BOUNDARY_IDS = (
 )
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 COMMIT = re.compile(r"^[0-9a-f]{40}$")
-
-
-class CommandManifestError(ValueError):
-    """Benchmark command identity/closure 위반을 나타낸다."""
 
 
 def _strict_json_load(path: Path) -> Any:
@@ -75,46 +83,7 @@ def _validate_identity(
         or command[0] != identity["path"]
     ):
         raise CommandManifestError(f"COMMAND_EXECUTABLE_MISMATCH:{role}")
-    executable = Path(identity["path"])
-    try:
-        path_stat = executable.lstat()
-    except OSError as exc:
-        raise CommandManifestError(
-            f"COMMAND_EXECUTABLE_UNAVAILABLE:{role}"
-        ) from exc
-    if stat.S_ISLNK(path_stat.st_mode) or not stat.S_ISREG(path_stat.st_mode):
-        raise CommandManifestError(f"COMMAND_EXECUTABLE_NOT_REGULAR:{role}")
-    if path_stat.st_mode & 0o111 == 0:
-        raise CommandManifestError(f"COMMAND_EXECUTABLE_NOT_EXECUTABLE:{role}")
-    try:
-        descriptor = os.open(
-            executable,
-            os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
-        )
-    except OSError as exc:
-        raise CommandManifestError(
-            f"COMMAND_EXECUTABLE_CHANGED_DURING_VALIDATION:{role}"
-        ) from exc
-    try:
-        with os.fdopen(descriptor, "rb") as stream:
-            opened_stat = os.fstat(stream.fileno())
-            if (
-                not stat.S_ISREG(opened_stat.st_mode)
-                or (path_stat.st_dev, path_stat.st_ino)
-                != (opened_stat.st_dev, opened_stat.st_ino)
-            ):
-                raise CommandManifestError(
-                    f"COMMAND_EXECUTABLE_CHANGED_DURING_VALIDATION:{role}"
-                )
-            digest = hashlib.sha256()
-            for block in iter(lambda: stream.read(1024 * 1024), b""):
-                digest.update(block)
-    except OSError as exc:
-        raise CommandManifestError(
-            f"COMMAND_EXECUTABLE_CHANGED_DURING_VALIDATION:{role}"
-        ) from exc
-    if digest.hexdigest() != identity["sha256"]:
-        raise CommandManifestError(f"COMMAND_EXECUTABLE_SHA256_MISMATCH:{role}")
+    inspect_executable_identity(identity, role=role)
 
 
 def validate_manifest(value: Any) -> dict[str, Any]:

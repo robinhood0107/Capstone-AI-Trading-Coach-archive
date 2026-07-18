@@ -278,8 +278,8 @@ class BenchmarkCommandManifestTests(TestCase):
                 opened.append(descriptor)
                 return descriptor
 
-            with patch("benchmark_commands.os.open", side_effect=tracking_open), patch(
-                "benchmark_commands.os.read",
+            with patch("executable_identity.os.open", side_effect=tracking_open), patch(
+                "executable_identity.os.read",
                 side_effect=OSError("forced read failure"),
             ), self.assertRaisesRegex(
                 CommandManifestError,

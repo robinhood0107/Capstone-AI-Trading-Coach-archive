@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
+import fcntl
 import hashlib
 import json
 import os
@@ -12,12 +14,18 @@ import signal
 import subprocess
 import sys
 import time
+from collections.abc import Iterator
+from contextlib import ExitStack, contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from string import Formatter
 from typing import Any
 
 from benchmark_contract import ContractError, sha256_file, strict_json_load
+from executable_identity import (
+    ExecutableIdentityError,
+    inspect_executable_identity,
+)
 from validate_benchmark_report import DEFAULT_PLAN, validate_block_result, validate_plan
 
 THREAD_ENVIRONMENT = {
@@ -49,6 +57,12 @@ HOST_CHECK_IDS = {
     "load.normalized-load1-window",
     "process.external-cpu",
 }
+F_ADD_SEALS = getattr(fcntl, "F_ADD_SEALS", 1033)
+F_GET_SEALS = getattr(fcntl, "F_GET_SEALS", 1034)
+F_SEAL_SEAL = getattr(fcntl, "F_SEAL_SEAL", 0x0001)
+F_SEAL_SHRINK = getattr(fcntl, "F_SEAL_SHRINK", 0x0002)
+F_SEAL_GROW = getattr(fcntl, "F_SEAL_GROW", 0x0004)
+F_SEAL_WRITE = getattr(fcntl, "F_SEAL_WRITE", 0x0008)
 
 
 @dataclass(frozen=True)
@@ -65,6 +79,34 @@ class ScheduledBlock:
     selector_id: str
     timeout_seconds: int
     expected_case_count: int
+
+
+@dataclass(frozen=True)
+class PinnedExecutable:
+    """검증한 exact bytes를 sealed memfd에 고정한 실행 객체다."""
+
+    binding: dict[str, str]
+    descriptor: int
+    required_seals: int
+
+
+def _create_memfd(name: str, flags: int) -> int:
+    """CPython 노출 여부와 무관하게 Linux memfd_create를 호출한다."""
+
+    python_memfd_create = getattr(os, "memfd_create", None)
+    if callable(python_memfd_create):
+        return int(python_memfd_create(name, flags))
+    try:
+        function: Any = ctypes.CDLL(None, use_errno=True).memfd_create
+    except (AttributeError, OSError) as exc:
+        raise OSError("memfd_create unavailable") from exc
+    function.argtypes = (ctypes.c_char_p, ctypes.c_uint)
+    function.restype = ctypes.c_int
+    descriptor = int(function(name.encode("ascii", errors="strict"), flags))
+    if descriptor < 0:
+        error_number = ctypes.get_errno()
+        raise OSError(error_number, os.strerror(error_number))
+    return descriptor
 
 
 def build_schedule(plan: dict[str, Any]) -> list[ScheduledBlock]:
@@ -228,19 +270,62 @@ def _validate_executable_identity(
         raise ContractError(f"INVALID_ALLOWED_EXECUTABLE_IDENTITY:{role}")
 
 
-def _verify_executable(identity: dict[str, str]) -> dict[str, str]:
-    configured = Path(identity["path"])
-    if not configured.is_file() or not os.access(configured, os.X_OK):
-        raise ContractError(f"ALLOWED_EXECUTABLE_UNAVAILABLE:{configured}")
-    resolved = configured.resolve(strict=True)
-    actual_sha256 = sha256_file(configured)
-    if actual_sha256 != identity["sha256"]:
-        raise ContractError(f"ALLOWED_EXECUTABLE_SHA256_MISMATCH:{configured}")
-    return {
-        "path": str(configured),
-        "resolvedPath": str(resolved),
-        "sha256": actual_sha256,
-    }
+@contextmanager
+def _pin_executable(
+    identity: dict[str, str],
+    *,
+    role: str,
+) -> Iterator[PinnedExecutable]:
+    """공급 경로가 바뀌어도 검증한 동일 바이트만 실행하도록 sealed memfd에 고정한다."""
+
+    try:
+        inspected = inspect_executable_identity(identity, role=role)
+    except ExecutableIdentityError as exc:
+        raise ContractError(str(exc)) from exc
+    # Linux uapi constants; CPython builds do not expose both names consistently.
+    memfd_cloexec = getattr(os, "MFD_CLOEXEC", 0x0001)
+    memfd_allow_sealing = getattr(os, "MFD_ALLOW_SEALING", 0x0002)
+    required_seals = (
+        F_SEAL_WRITE
+        | F_SEAL_GROW
+        | F_SEAL_SHRINK
+        | F_SEAL_SEAL
+    )
+    descriptor = -1
+    try:
+        descriptor = _create_memfd(
+            f"s1-4x-{role}",
+            memfd_cloexec | memfd_allow_sealing,
+        )
+        view = memoryview(inspected.payload)
+        written = 0
+        while written < len(view):
+            count = os.write(descriptor, view[written:])
+            if count <= 0:
+                raise OSError("short write while pinning executable")
+            written += count
+        os.fchmod(descriptor, 0o500)
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        fcntl.fcntl(descriptor, F_ADD_SEALS, required_seals)
+        actual_seals = fcntl.fcntl(descriptor, F_GET_SEALS)
+        if actual_seals & required_seals != required_seals:
+            raise ContractError(f"SEALED_EXECUTABLE_INCOMPLETE:{role}")
+        yield PinnedExecutable(
+            binding={
+                "path": inspected.path,
+                "resolvedPath": inspected.resolved_path,
+                "sha256": inspected.sha256,
+            },
+            descriptor=descriptor,
+            required_seals=required_seals,
+        )
+    except ContractError:
+        raise
+    except OSError as exc:
+        raise ContractError(f"SEALED_EXECUTABLE_PIN_FAILED:{role}") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
 
 
 def _render_command(template: list[str], values: dict[str, str]) -> list[str]:
@@ -502,22 +587,36 @@ def _verify_measurement_qualification(
 def _run_process(
     command: list[str],
     *,
+    executable: PinnedExecutable,
     cwd: Path,
     timeout_seconds: int,
     stdout_path: Path,
     stderr_path: Path,
     environment: dict[str, str],
 ) -> None:
+    if command[0] != executable.binding["path"]:
+        raise ContractError("PINNED_EXECUTABLE_BINDING_MISMATCH")
+    try:
+        actual_seals = fcntl.fcntl(executable.descriptor, F_GET_SEALS)
+    except OSError as exc:
+        raise ContractError("PINNED_EXECUTABLE_UNAVAILABLE") from exc
+    if actual_seals & executable.required_seals != executable.required_seals:
+        raise ContractError("PINNED_EXECUTABLE_SEALS_CHANGED")
     with stdout_path.open("xb") as stdout, stderr_path.open("xb") as stderr:
-        process = subprocess.Popen(
-            command,
-            cwd=cwd,
-            env=environment,
-            stdin=subprocess.DEVNULL,
-            stdout=stdout,
-            stderr=stderr,
-            start_new_session=True,
-        )
+        try:
+            process = subprocess.Popen(
+                command,
+                executable=f"/proc/self/fd/{executable.descriptor}",
+                cwd=cwd,
+                env=environment,
+                stdin=subprocess.DEVNULL,
+                stdout=stdout,
+                stderr=stderr,
+                start_new_session=True,
+                pass_fds=(executable.descriptor,),
+            )
+        except OSError as exc:
+            raise ContractError("PINNED_EXECUTABLE_LAUNCH_FAILED") from exc
         deadline = time.monotonic() + timeout_seconds
         while True:
             remaining = deadline - time.monotonic()
@@ -637,141 +736,154 @@ def execute_schedule(
     command_manifest_sha256 = sha256_file(command_manifest_path)
     if command_manifest_sha256 != expected_command_manifest_sha256:
         raise ContractError("COMMAND_MANIFEST_CHANGED_DURING_VALIDATION")
-    host_executable = _verify_executable(
-        manifest["allowedExecutables"]["hostValidator"]
-    )
-    boundary_executables = {
-        boundary_id: _verify_executable(identity)
-        for boundary_id, identity in manifest["allowedExecutables"]["boundaries"].items()
-    }
-    run_directory = reserve_directory(output_root / run_id)
-    _pin_current_process(set(plan["execution"]["cpuSet"]))
-    total_deadline = time.monotonic() + plan["execution"]["totalRunTimeoutSeconds"]
-    valid_performance_timeouts = 0
-    environment = dict(os.environ)
-    environment.update(THREAD_ENVIRONMENT)
-    environment["S1_4X_THREAD_COUNT"] = "1"
-    for block in schedule:
-        remaining_total = total_deadline - time.monotonic()
-        if remaining_total <= 0:
-            raise ContractError("TOTAL_RUN_DEADLINE_EXCEEDED")
-        output_directory = reserve_directory(block_directory(run_directory, block))
-        host_report_path = output_directory / "host-validity.json"
-        qualification_path = output_directory / "timeout-qualification.json"
-        values = {
-            "plan": str(plan_path.resolve()),
-            "run_dir": str(run_directory.resolve()),
-            "block_dir": str(output_directory.resolve()),
-            "host_report": str(host_report_path.resolve()),
-            "qualification": str(qualification_path.resolve()),
-            "allowed_process_root_pid": str(os.getpid()),
-            "benchmark_subject_commit": benchmark_subject_commit,
-            "candidate_source_commit": candidate_source_commit,
-            "boundary_id": block.boundary_id,
-            "selector_id": block.selector_id,
-            "family_id": block.family_id,
-            "rotation_id": block.rotation_id,
-            "outer_repetition": str(block.outer_repetition),
-            "run_id": run_id,
+    executable_stack = ExitStack()
+    try:
+        host_executable = executable_stack.enter_context(
+            _pin_executable(
+                manifest["allowedExecutables"]["hostValidator"],
+                role="hostValidator",
+            )
+        )
+        boundary_executables = {
+            boundary_id: executable_stack.enter_context(
+                _pin_executable(identity, role=boundary_id)
+            )
+            for boundary_id, identity in manifest["allowedExecutables"][
+                "boundaries"
+            ].items()
         }
-        host_command = _render_command(manifest["hostValidatorCommand"], values)
-        if host_command[0] != host_executable["path"]:
-            raise ContractError("HOST_EXECUTABLE_BINDING_MISMATCH")
-        try:
-            _run_process(
-                host_command,
-                cwd=repo_root,
-                timeout_seconds=min(
-                    plan["environmentValidity"]["maxQuietWaitSeconds"],
-                    max(1, int(remaining_total)),
-                ),
-                stdout_path=output_directory / "host-validator.stdout",
-                stderr_path=output_directory / "host-validator.stderr",
-                environment=environment,
-            )
-        except ContractError as exc:
-            if str(exc) == "PERFORMANCE_DEADLINE_EXCEEDED":
-                raise ContractError("HOST_PREFLIGHT_DEADLINE_EXCEEDED") from exc
-            raise
-        host_validity = _verify_host_validity_report(
-            host_report_path,
-            plan=plan,
-            root_pid=os.getpid(),
-        )
-        remaining_total = total_deadline - time.monotonic()
-        if remaining_total < block.timeout_seconds:
-            raise ContractError("TOTAL_RUN_DEADLINE_INSUFFICIENT_FOR_FROZEN_BLOCK")
-        native_command = _render_command(
-            manifest["boundaryCommands"][block.boundary_id],
-            values,
-        )
-        native_executable = boundary_executables[block.boundary_id]
-        if native_command[0] != native_executable["path"]:
-            raise ContractError("NATIVE_EXECUTABLE_BINDING_MISMATCH")
-        qualification = _qualification_document(
-            plan=plan,
-            plan_sha256=plan_sha256,
-            command_manifest_sha256=command_manifest_sha256,
-            benchmark_subject_commit=benchmark_subject_commit,
-            candidate_source_commit=candidate_source_commit,
-            run_id=run_id,
-            block=block,
-            host_validity=host_validity,
-            executable=native_executable,
-            command=native_command,
-            measurement_entered=False,
-        )
-        _write_json_exclusive(qualification_path, qualification)
-        try:
-            _run_process(
-                native_command,
-                cwd=repo_root,
-                timeout_seconds=block.timeout_seconds,
-                stdout_path=output_directory / "native-wrapper.stdout",
-                stderr_path=output_directory / "native-wrapper.stderr",
-                environment=environment,
-            )
-        except ContractError as exc:
-            if str(exc) != "PERFORMANCE_DEADLINE_EXCEEDED":
+        run_directory = reserve_directory(output_root / run_id)
+        _pin_current_process(set(plan["execution"]["cpuSet"]))
+        total_deadline = time.monotonic() + plan["execution"]["totalRunTimeoutSeconds"]
+        valid_performance_timeouts = 0
+        environment = dict(os.environ)
+        environment.update(THREAD_ENVIRONMENT)
+        environment["S1_4X_THREAD_COUNT"] = "1"
+        for block in schedule:
+            remaining_total = total_deadline - time.monotonic()
+            if remaining_total <= 0:
+                raise ContractError("TOTAL_RUN_DEADLINE_EXCEEDED")
+            output_directory = reserve_directory(block_directory(run_directory, block))
+            host_report_path = output_directory / "host-validity.json"
+            qualification_path = output_directory / "timeout-qualification.json"
+            values = {
+                "plan": str(plan_path.resolve()),
+                "run_dir": str(run_directory.resolve()),
+                "block_dir": str(output_directory.resolve()),
+                "host_report": str(host_report_path.resolve()),
+                "qualification": str(qualification_path.resolve()),
+                "allowed_process_root_pid": str(os.getpid()),
+                "benchmark_subject_commit": benchmark_subject_commit,
+                "candidate_source_commit": candidate_source_commit,
+                "boundary_id": block.boundary_id,
+                "selector_id": block.selector_id,
+                "family_id": block.family_id,
+                "rotation_id": block.rotation_id,
+                "outer_repetition": str(block.outer_repetition),
+                "run_id": run_id,
+            }
+            host_command = _render_command(manifest["hostValidatorCommand"], values)
+            if host_command[0] != host_executable.binding["path"]:
+                raise ContractError("HOST_EXECUTABLE_BINDING_MISMATCH")
+            try:
+                _run_process(
+                    host_command,
+                    executable=host_executable,
+                    cwd=repo_root,
+                    timeout_seconds=min(
+                        plan["environmentValidity"]["maxQuietWaitSeconds"],
+                        max(1, int(remaining_total)),
+                    ),
+                    stdout_path=output_directory / "host-validator.stdout",
+                    stderr_path=output_directory / "host-validator.stderr",
+                    environment=environment,
+                )
+            except ContractError as exc:
+                if str(exc) == "PERFORMANCE_DEADLINE_EXCEEDED":
+                    raise ContractError("HOST_PREFLIGHT_DEADLINE_EXCEEDED") from exc
                 raise
-            qualification_sha256 = _verify_measurement_qualification(
+            host_validity = _verify_host_validity_report(
+                host_report_path,
+                plan=plan,
+                root_pid=os.getpid(),
+            )
+            remaining_total = total_deadline - time.monotonic()
+            if remaining_total < block.timeout_seconds:
+                raise ContractError("TOTAL_RUN_DEADLINE_INSUFFICIENT_FOR_FROZEN_BLOCK")
+            native_command = _render_command(
+                manifest["boundaryCommands"][block.boundary_id],
+                values,
+            )
+            native_executable = boundary_executables[block.boundary_id]
+            if native_command[0] != native_executable.binding["path"]:
+                raise ContractError("NATIVE_EXECUTABLE_BINDING_MISMATCH")
+            qualification = _qualification_document(
+                plan=plan,
+                plan_sha256=plan_sha256,
+                command_manifest_sha256=command_manifest_sha256,
+                benchmark_subject_commit=benchmark_subject_commit,
+                candidate_source_commit=candidate_source_commit,
+                run_id=run_id,
+                block=block,
+                host_validity=host_validity,
+                executable=native_executable.binding,
+                command=native_command,
+                measurement_entered=False,
+            )
+            _write_json_exclusive(qualification_path, qualification)
+            try:
+                _run_process(
+                    native_command,
+                    executable=native_executable,
+                    cwd=repo_root,
+                    timeout_seconds=block.timeout_seconds,
+                    stdout_path=output_directory / "native-wrapper.stdout",
+                    stderr_path=output_directory / "native-wrapper.stderr",
+                    environment=environment,
+                )
+            except ContractError as exc:
+                if str(exc) != "PERFORMANCE_DEADLINE_EXCEEDED":
+                    raise
+                qualification_sha256 = _verify_measurement_qualification(
+                    qualification_path,
+                    expected=qualification,
+                )
+                _record_performance_timeout(
+                    output_directory,
+                    plan=plan,
+                    run_id=run_id,
+                    block=block,
+                    qualification_sha256=qualification_sha256,
+                )
+                valid_performance_timeouts += 1
+                continue
+            _verify_measurement_qualification(
                 qualification_path,
                 expected=qualification,
             )
-            _record_performance_timeout(
-                output_directory,
-                plan=plan,
-                run_id=run_id,
-                block=block,
-                qualification_sha256=qualification_sha256,
+            native_path = output_directory / "native.json"
+            result_path = output_directory / "block-result.json"
+            if not native_path.is_file() or not result_path.is_file():
+                raise ContractError(f"NATIVE_OUTPUT_MISSING:{block.selector_id}")
+            validate_block_result(
+                result_path,
+                plan_path=plan_path,
+                native_report_path=native_path,
+                expected_boundary_id=block.boundary_id,
+                expected_selector_id=block.selector_id,
             )
-            valid_performance_timeouts += 1
-            continue
-        _verify_measurement_qualification(
-            qualification_path,
-            expected=qualification,
-        )
-        native_path = output_directory / "native.json"
-        result_path = output_directory / "block-result.json"
-        if not native_path.is_file() or not result_path.is_file():
-            raise ContractError(f"NATIVE_OUTPUT_MISSING:{block.selector_id}")
-        validate_block_result(
-            result_path,
-            plan_path=plan_path,
-            native_report_path=native_path,
-            expected_boundary_id=block.boundary_id,
-            expected_selector_id=block.selector_id,
-        )
-    return {
-        "schemaVersion": "s1.4x-rotated-run-summary-v1",
-        "status": (
-            "PASS"
-            if valid_performance_timeouts == 0
-            else "PASS_WITH_VALID_PERFORMANCE_TIMEOUTS"
-        ),
-        "scheduledBlockCount": len(schedule),
-        "validPerformanceTimeoutCount": valid_performance_timeouts,
-    }
+        return {
+            "schemaVersion": "s1.4x-rotated-run-summary-v1",
+            "status": (
+                "PASS"
+                if valid_performance_timeouts == 0
+                else "PASS_WITH_VALID_PERFORMANCE_TIMEOUTS"
+            ),
+            "scheduledBlockCount": len(schedule),
+            "validPerformanceTimeoutCount": valid_performance_timeouts,
+        }
+    finally:
+        executable_stack.close()
 
 
 def _parser() -> argparse.ArgumentParser:

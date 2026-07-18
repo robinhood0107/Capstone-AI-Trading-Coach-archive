@@ -48,7 +48,7 @@ def _host_report(plan: dict[str, Any], *, status: str = "PASS") -> dict[str, Any
 
 
 def _command_manifest() -> dict[str, Any]:
-    executable = str(Path(sys.executable).absolute())
+    executable = str(Path(sys.executable).resolve())
     identity = {"path": executable, "sha256": sha256_file(Path(executable))}
     return {
         "schemaVersion": "s1.4x-benchmark-command-manifest-v2",
@@ -271,13 +271,14 @@ def _install_execute_fakes(
     def fake_process(
         command: list[str],
         *,
+        executable: runner.PinnedExecutable,
         cwd: Path,
         timeout_seconds: int,
         stdout_path: Path,
         stderr_path: Path,
         environment: dict[str, str],
     ) -> None:
-        del cwd, timeout_seconds, stdout_path, stderr_path, environment
+        del executable, cwd, timeout_seconds, stdout_path, stderr_path, environment
         if command[2] == "host-validator":
             if host_times_out:
                 raise ContractError("PERFORMANCE_DEADLINE_EXCEEDED")
