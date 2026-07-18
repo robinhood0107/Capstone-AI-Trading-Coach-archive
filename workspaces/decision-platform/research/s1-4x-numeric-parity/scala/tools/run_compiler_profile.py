@@ -23,6 +23,12 @@ class CompilerProfileError(ValueError):
     """Frozen compiler/profile 입력이나 실행 evidence가 어긋났음을 나타낸다."""
 
 
+TEST_DEPENDENCY_DIRECTIVE = re.compile(
+    r"//> using test\.dep "
+    r"([A-Za-z0-9_.-]+:{1,3}[A-Za-z0-9_.-]+:[A-Za-z0-9_.+-]+)"
+)
+
+
 def sha256_bytes(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
@@ -104,6 +110,53 @@ def compiler_arguments(
     for group in option_groups:
         command.extend(f"--scalac-option={option}" for option in group)
     return command
+
+
+def project_test_dependencies(project_source: Path) -> list[str]:
+    """명시 source compile에서 빠지는 test dependency 핀을 project.scala에서 읽는다."""
+
+    dependencies: list[str] = []
+    for line in project_source.read_text(encoding="utf-8").splitlines():
+        if not line.startswith("//> using test.dep"):
+            continue
+        matched = TEST_DEPENDENCY_DIRECTIVE.fullmatch(line)
+        if matched is None:
+            raise CompilerProfileError("TEST_DEPENDENCY_DIRECTIVE_INVALID")
+        dependency = matched.group(1)
+        if dependency in dependencies:
+            raise CompilerProfileError("TEST_DEPENDENCY_DIRECTIVE_DUPLICATE")
+        dependencies.append(dependency)
+    if not dependencies:
+        raise CompilerProfileError("TEST_DEPENDENCY_DIRECTIVE_MISSING")
+    return dependencies
+
+
+def project_compiler_arguments(
+    scala_cli: Path,
+    sources: list[Path],
+    *,
+    profile_arguments: list[str],
+    test_dependencies: list[str],
+) -> list[str]:
+    """전체 source closure를 test scope 오인 없이 한 compile 입력으로 만든다."""
+
+    dependency_arguments = [
+        argument
+        for dependency in test_dependencies
+        for argument in ("--dependency", dependency)
+    ]
+    return [
+        str(scala_cli),
+        "--power",
+        "compile",
+        *map(str, sources),
+        "--server=false",
+        "--jvm",
+        "system",
+        "--coursier-validate-checksums",
+        *dependency_arguments,
+        *profile_arguments,
+    ]
 
 
 def project_directive_options(project: Path) -> list[str]:
@@ -342,18 +395,14 @@ def main() -> int:
             negative.append(result)
 
         profile = profiles["profiles"][arguments.profile]
-        full_command = [
-            str(scala_cli),
-            "--power",
-            "compile",
-            *map(str, sources),
-            "--test",
-            "--server=false",
-            "--jvm",
-            "system",
-            "--coursier-validate-checksums",
-            *profile["scalaCliArguments"],
-        ]
+        full_command = project_compiler_arguments(
+            scala_cli,
+            sources,
+            profile_arguments=profile["scalaCliArguments"],
+            test_dependencies=project_test_dependencies(
+                scala_root / "project.scala"
+            ),
+        )
         full_compile = run_process(
             command=full_command,
             process_id=f"profile-{arguments.profile}-full-compile",
