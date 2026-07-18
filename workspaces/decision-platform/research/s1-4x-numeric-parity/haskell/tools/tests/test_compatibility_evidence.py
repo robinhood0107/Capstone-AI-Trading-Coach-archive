@@ -18,7 +18,6 @@ HASKELL_ROOT = TOOLS_ROOT.parent
 NUMERIC_ROOT = HASKELL_ROOT.parent
 MODULE_PATH = TOOLS_ROOT / "compatibility_evidence.py"
 EVIDENCE_PATH = HASKELL_ROOT / "ghc-compatibility-solve-failure.v1.json"
-RESULT_PATH = NUMERIC_ROOT / "reports/ghc-compatibility-result.v1.json"
 RESULT_SCHEMA_PATH = (
     NUMERIC_ROOT / "contract/schemas/ghc-compatibility-result.schema.json"
 )
@@ -34,7 +33,7 @@ class CompatibilityEvidenceTests(unittest.TestCase):
     def setUp(self) -> None:
         self.evidence = compatibility_evidence.strict_json_load(EVIDENCE_PATH)
         compatibility_evidence.validate_failure_evidence(self.evidence)
-        self.result = compatibility_evidence.strict_json_load(RESULT_PATH)
+        self.result = compatibility_evidence.build_result(self.evidence)
         compatibility_evidence.validate_result_binding(self.result, self.evidence)
 
     def test_unknown_field_is_rejected(self) -> None:
