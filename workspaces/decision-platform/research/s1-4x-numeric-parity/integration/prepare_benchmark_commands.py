@@ -33,6 +33,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--python-wrapper", type=Path, required=True)
     parser.add_argument("--scala-wrapper", type=Path, required=True)
     parser.add_argument("--haskell-wrapper", type=Path, required=True)
+    parser.add_argument("--uv", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--sidecar", type=Path, required=True)
     return parser
@@ -84,6 +85,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "python": _identity(arguments.python_wrapper),
             "scala": _identity(arguments.scala_wrapper),
             "haskell": _identity(arguments.haskell_wrapper),
+            "uv": _identity(arguments.uv),
         }
         boundary_identity = {
             boundary: (
@@ -109,6 +111,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             allowed_executables={
                 "hostValidator": identities["host"],
                 "boundaries": boundary_identity,
+                "runtimeDependencies": {"uv": identities["uv"]},
             },
         )
         digest = write_manifest_exclusive(

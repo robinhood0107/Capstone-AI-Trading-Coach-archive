@@ -12,7 +12,11 @@ export GIT_CONFIG_GLOBAL=/dev/null
 export GIT_OPTIONAL_LOCKS=0
 export GIT_TERMINAL_PROMPT=0
 readonly GIT_BIN=/usr/bin/git
-readonly UV_BIN=/home/pjjpj/.local/bin/uv
+readonly UV_BIN="${S1_4X_UV_BIN:?S1_4X_UV_BIN is required}"
+if [[ ! "$UV_BIN" =~ ^/proc/self/fd/[0-9]+$ ]]; then
+  echo "UV executable must be inherited through a sealed fd" >&2
+  exit 69
+fi
 
 ROOT="$("$GIT_BIN" -c core.fsmonitor=false rev-parse --show-toplevel)"
 S1_4X="$ROOT/workspaces/decision-platform/research/s1-4x-numeric-parity"

@@ -99,6 +99,18 @@ def _validate_identity(
     inspect_executable_identity(identity, role=role)
 
 
+def _validate_runtime_identity(identity: Any, *, role: str) -> None:
+    if (
+        not isinstance(identity, dict)
+        or set(identity) != {"path", "sha256"}
+        or not isinstance(identity["path"], str)
+        or not Path(identity["path"]).is_absolute()
+        or SHA256.fullmatch(str(identity["sha256"])) is None
+    ):
+        raise CommandManifestError(f"COMMAND_EXECUTABLE_MISMATCH:{role}")
+    inspect_executable_identity(identity, role=role)
+
+
 def host_command_template(executable: str) -> list[str]:
     """Host validator wrapper의 frozen shell-free argv다."""
 
@@ -201,12 +213,19 @@ def validate_manifest(value: Any) -> dict[str, Any]:
         or not isinstance(boundaries, dict)
         or set(boundaries) != set(BOUNDARY_IDS)
         or not isinstance(identities, dict)
-        or set(identities) != {"hostValidator", "boundaries"}
+        or set(identities)
+        != {"hostValidator", "boundaries", "runtimeDependencies"}
         or not isinstance(identities["boundaries"], dict)
         or set(identities["boundaries"]) != set(BOUNDARY_IDS)
+        or not isinstance(identities["runtimeDependencies"], dict)
+        or set(identities["runtimeDependencies"]) != {"uv"}
     ):
         raise CommandManifestError("MANIFEST_COMMANDS_INVALID")
     _validate_identity(host, identities["hostValidator"], role="hostValidator")
+    _validate_runtime_identity(
+        identities["runtimeDependencies"]["uv"],
+        role="runtime:uv",
+    )
     _validate_placeholder_grammar(host, error="HOST_COMMAND_TEMPLATE_MISMATCH")
     if host != host_command_template(host[0]):
         raise CommandManifestError("HOST_COMMAND_TEMPLATE_MISMATCH")
