@@ -300,6 +300,16 @@ class BenchmarkCommandManifestTests(TestCase):
         self.assertIn("S1_4X_BENCHMARK_PYTHON_SHA256", python_source)
         self.assertIn("export UV_PYTHON=", python_source)
 
+    def test_supporting_gates_require_the_verified_uv_path(self) -> None:
+        for wrapper in (
+            INTEGRATION / "tools/run-integration-correctness.sh",
+            INTEGRATION / "tools/run-python-benchmark-smoke.sh",
+        ):
+            with self.subTest(wrapper=wrapper.name):
+                source = wrapper.read_text(encoding="utf-8")
+                self.assertNotIn("command -v", source)
+                self.assertIn("S1_4X_UV_BIN:?", source)
+
     def test_prepare_command_does_not_embed_a_local_user_home(self) -> None:
         source = (INTEGRATION / "prepare_benchmark_commands.py").read_text(
             encoding="utf-8"
