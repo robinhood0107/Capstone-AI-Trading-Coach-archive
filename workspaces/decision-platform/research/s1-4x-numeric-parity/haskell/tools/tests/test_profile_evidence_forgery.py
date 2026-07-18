@@ -14,6 +14,7 @@ from pathlib import Path
 
 TOOLS_ROOT = Path(__file__).resolve().parents[1]
 HELPER_PATH = TOOLS_ROOT / "profile_workflow.py"
+PLAN_PATH = TOOLS_ROOT.parent.parent / "benchmarks/benchmark-plan.v1.json"
 CASE_ORDER = tuple(f"family/case-{index}" for index in range(7))
 
 
@@ -43,6 +44,47 @@ def raw_reports(multiplier: float) -> list[dict[str, object]]:
 
 
 class ProfileEvidenceForgeryTests(unittest.TestCase):
+    def test_receipt_and_qualification_require_exact_top_level_schema(
+        self,
+    ) -> None:
+        helper = load_helper()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            correctness = root / "correctness.json"
+            qualification = root / "qualification.json"
+            correctness.write_bytes(
+                helper.canonical_json_bytes(
+                    {"schemaVersion": helper.CORRECTNESS_SCHEMA_VERSION},
+                    trailing_newline=True,
+                )
+            )
+            qualification.write_bytes(
+                helper.canonical_json_bytes(
+                    {"schemaVersion": helper.QUALIFICATION_SCHEMA_VERSION},
+                    trailing_newline=True,
+                )
+            )
+            with self.assertRaisesRegex(
+                helper.WorkflowError,
+                "CORRECTNESS_RECEIPT_INVALID",
+            ):
+                helper._validate_correctness_receipt(
+                    correctness,
+                    expected_profile_id="baseline-o0-fasm",
+                    expected_source_tree_sha256="1" * 64,
+                    expected_commit="2" * 40,
+                )
+            with self.assertRaisesRegex(
+                helper.WorkflowError,
+                "QUALIFICATION_ARTIFACT_INVALID",
+            ):
+                helper._validate_qualification_artifact(
+                    qualification,
+                    plan=helper.strict_json_load(PLAN_PATH),
+                    expected_source_tree_sha256="1" * 64,
+                    expected_commit="2" * 40,
+                )
+
     def test_logged_command_reopens_logs_and_rejects_forged_argv(self) -> None:
         helper = load_helper()
         with tempfile.TemporaryDirectory() as temporary:
