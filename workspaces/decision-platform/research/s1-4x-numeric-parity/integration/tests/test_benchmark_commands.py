@@ -238,12 +238,13 @@ class BenchmarkCommandManifestTests(TestCase):
                 return digest
 
             with patch(
-                "benchmark_commands._file_sha256",
+                "benchmark_commands._strict_json_load",
                 side_effect=replace_after_hash,
             ):
                 validated = validate_manifest_file(path, expected)
 
             self.assertEqual(validated, manifest)
+            self.assertFalse(swapped)
 
     def test_official_benchmark_wrappers_use_absolute_frozen_tools(self) -> None:
         numeric_root = INTEGRATION.parent

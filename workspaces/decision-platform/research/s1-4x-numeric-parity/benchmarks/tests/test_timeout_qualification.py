@@ -172,6 +172,7 @@ def test_runner_manifest_hash_and_parse_share_one_snapshot(
         )
 
     assert validated == manifest
+    assert swapped is False
 
 
 def test_runner_manifest_rejects_escaped_placeholder_and_extra_argv(
