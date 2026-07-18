@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import importlib.util
 import sys
+import tempfile
 from pathlib import Path
 
 
@@ -63,6 +64,40 @@ def main() -> int:
     assert all("src/test/scala" not in item for item in apply_command)
     assert all(item != str(SCALA_ROOT / "benchmarks") for item in apply_command)
 
+    with tempfile.TemporaryDirectory(prefix="s1-4x-scalafmt-patch.") as directory:
+        root = Path(directory)
+        source_root = root / "source"
+        formatted_root = root / "formatted"
+        source_one = source_root / "one.scala"
+        source_two = source_root / "nested/two.scala"
+        formatted_one = formatted_root / "one.scala"
+        formatted_two = formatted_root / "nested/two.scala"
+        for path in (source_one, source_two, formatted_one, formatted_two):
+            path.parent.mkdir(parents=True, exist_ok=True)
+        source_one.write_text("object One{def value:Int=1}\n", encoding="utf-8")
+        formatted_one.write_text("object One { def value: Int = 1 }\n", encoding="utf-8")
+        source_two.write_text("object Two{def value:Int=2}\n", encoding="utf-8")
+        formatted_two.write_text("object Two { def value: Int = 2 }\n", encoding="utf-8")
+        patch = runner.formatted_source_patch(
+            scala_root=source_root,
+            sources=[source_one, source_two],
+            temporary=formatted_root,
+            temporary_sources=[formatted_one, formatted_two],
+        )
+        repeated = runner.formatted_source_patch(
+            scala_root=source_root,
+            sources=[source_one, source_two],
+            temporary=formatted_root,
+            temporary_sources=[formatted_one, formatted_two],
+        )
+        assert patch == repeated
+        assert "--- a/one.scala\n" in patch
+        assert "+++ b/one.scala\n" in patch
+        assert "--- a/nested/two.scala\n" in patch
+        assert "+++ b/nested/two.scala\n" in patch
+        assert str(source_root) not in patch
+        assert str(formatted_root) not in patch
+
     runner_source = (TOOLS_ROOT / "run_scalafmt.py").read_text(encoding="utf-8")
     for required in (
         '"firstApply"',
@@ -77,10 +112,15 @@ def main() -> int:
         '"resolvedVersionOutput"',
         '"resolutionLogUri"',
         '"networkPolicy"',
+        '"formatted-source.patch"',
+        '"formattedSourcePatchSha256"',
     ):
         assert required in runner_source
     assert '"OFFLINE_PINNED_LAUNCHER"' in runner_source
     assert "open(\"x\"" in runner_source
+    assert runner_source.index('"formatted-source.patch"') < runner_source.index(
+        '"real-source-non-mutating-check"'
+    )
 
     print("SCALA_SCALAFMT_RUNNER_CONTRACT_TEST_PASS commands=2")
     return 0
