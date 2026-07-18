@@ -29,6 +29,16 @@ import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
 import qualified Data.Vector.Unboxed as U
 
+import S14X.Contract.BenchmarkValidation
+  ( BenchmarkResultShape
+      ( ConditionalCoverageBatch,
+        IndependenceBatch,
+        LikelihoodBatch,
+        ScalarBatch,
+        VectorBatch
+      ),
+    validateBenchmarkResults,
+  )
 import S14X.Contract.Process (sha256Hex)
 import S14X.Core.AdvancedRisk
   ( christoffersenConditionalCoverageTest,
@@ -338,12 +348,38 @@ require condition message =
 benchmark :: FrozenInputs -> BenchmarkCase -> Benchmark
 benchmark inputs benchmarkCase =
   env
-    (pure (prepareCase inputs benchmarkCase))
+    (setupPreparedCase inputs benchmarkCase)
     (\prepared ->
         bench
           (Text.unpack (benchmarkCaseId benchmarkCase))
           (nf runPrepared prepared)
     )
+
+setupPreparedCase :: FrozenInputs -> BenchmarkCase -> IO PreparedCase
+setupPreparedCase inputs benchmarkCase = do
+  let prepared = prepareCase inputs benchmarkCase
+      evaluated = runPrepared prepared
+  case validateBenchmarkResults (expectedResultShape benchmarkCase) evaluated of
+    Left failure ->
+      fail
+        ( "benchmark setup validation failed for "
+            <> Text.unpack (benchmarkCaseId benchmarkCase)
+            <> ": "
+            <> failure
+        )
+    Right () -> pure prepared
+
+expectedResultShape :: BenchmarkCase -> BenchmarkResultShape
+expectedResultShape benchmarkCase =
+  case benchmarkFunctionId benchmarkCase of
+    "simple_returns" -> VectorBatch 1 (benchmarkVectorLength benchmarkCase - 1)
+    "log_returns" -> VectorBatch 1 (benchmarkVectorLength benchmarkCase - 1)
+    "probabilistic_sharpe_ratio" -> ScalarBatch 16384
+    "deflated_sharpe_ratio" -> ScalarBatch 16384
+    "kupiec_unconditional_coverage_test" -> LikelihoodBatch 32
+    "christoffersen_independence_test" -> IndependenceBatch 32
+    "christoffersen_conditional_coverage_test" -> ConditionalCoverageBatch 32
+    _ -> ScalarBatch 1
 
 prepareCase :: FrozenInputs -> BenchmarkCase -> PreparedCase
 prepareCase inputs benchmarkCase =
