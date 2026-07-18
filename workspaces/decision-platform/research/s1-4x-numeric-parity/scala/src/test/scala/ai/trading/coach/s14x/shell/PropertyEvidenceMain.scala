@@ -222,7 +222,7 @@ object PropertyEvidenceMain:
       val seeds = value.seedExecutions.foldLeft(ContractDecoder.mapper.createArrayNode()) {
         (array, execution) => array.add(seedNode(execution))
       }
-      val _ = node.set[ArrayNode]("seedExecutions", seeds)
+      val _: JsonNode = node.set[JsonNode]("seedExecutions", seeds)
     node.put("status", value.status)
     node
 
@@ -277,8 +277,8 @@ object PropertyEvidenceMain:
         entry.put("status", if actualErrors.contains(code) then "PASS" else "FAIL")
         array.add(entry)
     }
-    root.set[ArrayNode]("functions", functions)
-    root.set[ArrayNode]("errors", errors)
+    val _: JsonNode = root.set[JsonNode]("functions", functions)
+    val _: JsonNode = root.set[JsonNode]("errors", errors)
     root.put("status", if functionStatus && errorStatus then "PASS" else "FAIL")
     root
 
@@ -340,7 +340,8 @@ object PropertyEvidenceMain:
     propertyReport.put("schemaVersion", "s1.4x-candidate-property-coverage-v1")
     propertyReport.put("implementation", Implementation)
     propertyReport.put("propertyPlanSha256", propertyPlanSha)
-    propertyReport.set[ArrayNode]("properties", propertyArray(executions, detailed = false))
+    val _: JsonNode =
+      propertyReport.set[JsonNode]("properties", propertyArray(executions, detailed = false))
     propertyReport.put("status", if propertyStatus then "PASS" else "FAIL")
 
     val executionReport = ContractDecoder.mapper.createObjectNode()
@@ -363,7 +364,8 @@ object PropertyEvidenceMain:
     executionReport.put("startedAt", startedAt)
     executionReport.put("finishedAt", finishedAt)
     executionReport.put("exitCode", exitCode)
-    executionReport.set[ArrayNode]("properties", propertyArray(executions, detailed = true))
+    val _: JsonNode =
+      executionReport.set[JsonNode]("properties", propertyArray(executions, detailed = true))
     executionReport.put("status", if propertyStatus then "PASS" else "FAIL")
 
     Files.createDirectories(cli.outputDir)

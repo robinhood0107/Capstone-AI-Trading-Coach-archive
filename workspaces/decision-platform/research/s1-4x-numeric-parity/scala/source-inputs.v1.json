@@ -116,7 +116,7 @@
     },
     "src/test/scala/ai/trading/coach/s14x/shell/PropertyEvidenceMain.scala": {
       "role": "test",
-      "sha256": "be5527119cb775e8f1f5c3ace7675e967f5af0c70310a179a9c82157a7c461f6"
+      "sha256": "8bb38fc2ec164632b0e5d6ac45e396a6055caff0a97014e869d88ce91f0908e7"
     }
   },
   "inputSets": {
@@ -127,5 +127,5 @@
     "lint": "files",
     "profileRun": "files"
   },
-  "canonicalManifestSha256": "7e02690a712c1fc9720b332b26c597789a9324e0c671a13df78c1de596abd0e6"
+  "canonicalManifestSha256": "54168e63eb1a51cfe4d2272687f30148dee0356340c90472269abfe2dbdd9add"
 }
