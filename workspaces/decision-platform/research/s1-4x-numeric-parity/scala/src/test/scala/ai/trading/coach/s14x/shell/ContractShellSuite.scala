@@ -26,7 +26,7 @@ final class ContractShellSuite extends FunSuite:
   private def binaryFixture(
       root: Path,
       argumentName: String,
-      expectedSemanticError: Option[String] = None,
+      expectedSemanticError: Option[String] = None
   ): Unit =
     val large = Files.createDirectories(root.resolve("large"))
     val generated = Files.createDirectories(large.resolve("generated"))
@@ -39,7 +39,9 @@ final class ContractShellSuite extends FunSuite:
     val _ = Files.write(generated.resolve("value.f64le"), payload)
     val semantic = expectedSemanticError.fold("")(value => s""","expectedSemanticError":"$value"""")
     val manifest =
-      s"""{"schemaVersion":"s1.4x-binary-array-v1","fixtureId":"binary-fixture","argumentName":"$argumentName","fileName":"value.f64le","encoding":"ieee754-binary64","dtype":"float64","byteOrder":"little","arrayOrder":"C","shape":[1],"count":1,"byteLength":8,"sha256":"${sha256(payload)}","generator":{"algorithm":"literal-ieee754-bits","generatorVersion":"s1.4x-literal-ieee754-bits-v1","payloadHex":"000000000000f03f"}$semantic}"""
+      s"""{"schemaVersion":"s1.4x-binary-array-v1","fixtureId":"binary-fixture","argumentName":"$argumentName","fileName":"value.f64le","encoding":"ieee754-binary64","dtype":"float64","byteOrder":"little","arrayOrder":"C","shape":[1],"count":1,"byteLength":8,"sha256":"${sha256(
+          payload
+        )}","generator":{"algorithm":"literal-ieee754-bits","generatorVersion":"s1.4x-literal-ieee754-bits-v1","payloadHex":"000000000000f03f"}$semantic}"""
     val _ = Files.writeString(large.resolve("value.manifest.json"), manifest)
 
   test("strict parser는 duplicate key와 decimal exact integer를 구분한다"):
@@ -64,7 +66,7 @@ final class ContractShellSuite extends FunSuite:
             }
             assertEquals(
               first.flatMap(_.errorCode),
-              Some(StableError.PeriodsPerYearInvalid.code),
+              Some(StableError.PeriodsPerYearInvalid.code)
             )
           case Left(error) => fail(s"semantic case는 transport error가 아니어야 한다: ${error.code}")
       case Left(error) => fail(s"request envelope는 valid여야 한다: ${error.code}")
@@ -87,7 +89,7 @@ final class ContractShellSuite extends FunSuite:
       )
     assertEquals(
       ContractDecoder.decode(request).map(_.cases.map(_.functionId).distinct),
-      Right(FunctionId.values.toVector),
+      Right(FunctionId.values.toVector)
     )
 
   test("binary manifest argument identity 불일치는 transport failure다"):
@@ -100,7 +102,7 @@ final class ContractShellSuite extends FunSuite:
     val result = BinaryArrayReader.read(descriptor, root, "binary-fixture", "prices")
     assertEquals(
       result.left.toOption.map(_.code),
-      Some("manifest_invalid"),
+      Some("manifest_invalid")
     )
 
   test("정상 hash의 non-finite binary는 동결 semantic error로 전달된다"):
@@ -113,7 +115,7 @@ final class ContractShellSuite extends FunSuite:
     val executed = request.flatMap(value => CandidateRunner.execute(value, root))
     assertEquals(
       executed.toOption.flatMap(_.results.take(1).flatMap(_.errorCode).headOption),
-      Some(StableError.InputNonFinite.code),
+      Some(StableError.InputNonFinite.code)
     )
 
   test("candidate output은 기존 파일을 덮어쓰지 않는다"):
@@ -123,7 +125,7 @@ final class ContractShellSuite extends FunSuite:
     val original = "do-not-overwrite\n"
     val _ = Files.writeString(
       request,
-      """{"schemaVersion":"s1.4x-request-v1","requestId":"exclusive-output","cases":[{"fixtureId":"simple","functionId":"simple_returns","arguments":{"prices":[100,101]}}]}""",
+      """{"schemaVersion":"s1.4x-request-v1","requestId":"exclusive-output","cases":[{"fixtureId":"simple","functionId":"simple_returns","arguments":{"prices":[100,101]}}]}"""
     )
     val _ = Files.writeString(output, original)
     val exit = Main.run(
@@ -133,7 +135,7 @@ final class ContractShellSuite extends FunSuite:
         "--fixture-root",
         fixtureRoot.toAbsolutePath.toString,
         "--output",
-        output.toAbsolutePath.toString,
+        output.toAbsolutePath.toString
       )
     )
     assertEquals(exit, 70)
