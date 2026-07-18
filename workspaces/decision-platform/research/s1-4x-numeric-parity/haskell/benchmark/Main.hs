@@ -1,4 +1,4 @@
-module Main (main) where
+module S14X.BenchmarkMain (main) where
 
 import Control.DeepSeq (NFData (rnf))
 import Control.Monad (unless)

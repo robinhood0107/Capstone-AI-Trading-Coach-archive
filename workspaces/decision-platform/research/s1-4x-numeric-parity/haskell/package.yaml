@@ -93,6 +93,8 @@ tests:
   s1-4x-haskell-test:
     main: Main.hs
     source-dirs: test
+    ghc-options:
+      - -main-is S14X.TestMain.main
     dependencies:
       - QuickCheck == 2.15.0.1
       - aeson == 2.2.5.0
@@ -114,6 +116,7 @@ benchmarks:
     main: Main.hs
     source-dirs: benchmark
     ghc-options:
+      - -main-is S14X.BenchmarkMain.main
       - -threaded
       - -rtsopts
     dependencies:

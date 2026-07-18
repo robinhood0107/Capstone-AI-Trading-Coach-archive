@@ -1,4 +1,4 @@
-module Main (main) where
+module S14X.TestMain (main) where
 
 import Test.Tasty (TestTree, defaultMain, localOption, testGroup)
 import Test.Tasty.QuickCheck (QuickCheckTests (QuickCheckTests))
