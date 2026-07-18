@@ -217,6 +217,14 @@ def main() -> int:
         "assemble_profile_correctness.py",
     ):
         assert marker in correctness
+    property_evidence = script("run-property-evidence.sh")
+    for marker in (
+        "source-inputs.v1.json",
+        "test_dependencies",
+        '"--dependency"',
+        "PropertyEvidenceMain",
+    ):
+        assert marker in property_evidence
 
     qualification = script("run-profile-qualification.sh")
     selector = script("select-proven-profile.sh")
