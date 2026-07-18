@@ -62,7 +62,7 @@ def main() -> int:
         sources=sources,
         test_dependencies=test_dependencies,
     )
-    assert "--test" in compile_command
+    assert "--test" not in compile_command
     assert compile_command.count("--dependency") == len(test_dependencies)
     for dependency in test_dependencies:
         offset = compile_command.index(dependency)
