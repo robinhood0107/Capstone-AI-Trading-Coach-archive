@@ -49,6 +49,282 @@ def _canonical_sha256(value: Any) -> str:
 
 
 class NativeBenchmarkBlockTests(TestCase):
+    def test_scala_effective_runtime_identity_binds_actual_case_receipts_in_order(
+        self,
+    ) -> None:
+        case_ids = ["family/case-a", "family/case-b"]
+        receipts = [
+            {
+                "caseId": "family/case-a",
+                "runtimeArgvSha256": "1" * 64,
+                "effectiveJvmArgsSha256": "2" * 64,
+                "portableArgvSha256": "3" * 64,
+            },
+            {
+                "caseId": "family/case-b",
+                "runtimeArgvSha256": "4" * 64,
+                "effectiveJvmArgsSha256": "5" * 64,
+                "portableArgvSha256": "6" * 64,
+            },
+        ]
+        expected = native_block_module._scala_effective_runtime_arguments_sha256(
+            selector_id="scala/family",
+            expected_case_ids=case_ids,
+            profile_id="B",
+            profile_options_sha256="7" * 64,
+            case_receipts=receipts,
+        )
+        tampered_runtime = copy.deepcopy(receipts)
+        tampered_runtime[0]["runtimeArgvSha256"] = "8" * 64
+        self.assertNotEqual(
+            native_block_module._scala_effective_runtime_arguments_sha256(
+                selector_id="scala/family",
+                expected_case_ids=case_ids,
+                profile_id="B",
+                profile_options_sha256="7" * 64,
+                case_receipts=tampered_runtime,
+            ),
+            expected,
+        )
+        tampered_jvm = copy.deepcopy(receipts)
+        tampered_jvm[1]["effectiveJvmArgsSha256"] = "9" * 64
+        self.assertNotEqual(
+            native_block_module._scala_effective_runtime_arguments_sha256(
+                selector_id="scala/family",
+                expected_case_ids=case_ids,
+                profile_id="B",
+                profile_options_sha256="7" * 64,
+                case_receipts=tampered_jvm,
+            ),
+            expected,
+        )
+        with self.assertRaisesRegex(
+            GateError,
+            "SCALA_NATIVE_RUNTIME_RECEIPT_ORDER_INVALID",
+        ):
+            native_block_module._scala_effective_runtime_arguments_sha256(
+                selector_id="scala/family",
+                expected_case_ids=case_ids,
+                profile_id="B",
+                profile_options_sha256="7" * 64,
+                case_receipts=list(reversed(receipts)),
+            )
+
+    def test_scala_artifact_identity_binds_source_profile_and_tool_bytes(self) -> None:
+        closure = {
+            "sourceTreeSha256": "1" * 64,
+            "selectedProfileResultSha256": "2" * 64,
+            "selectedProfileSourceSha256": "3" * 64,
+            "sourceInputManifestSha256": "4" * 64,
+            "compilerProfilesSha256": "5" * 64,
+            "scalaCliBinarySha256": "6" * 64,
+            "javaExecutableSha256": "7" * 64,
+            "toolchainLockSha256": "8" * 64,
+            "mergedToolchainProvenanceSha256": "9" * 64,
+            "effectiveJvmArgumentsCapabilitySha256": "a" * 64,
+        }
+        expected = native_block_module._scala_artifact_closure_sha256(closure)
+        for field in ("sourceTreeSha256", "scalaCliBinarySha256"):
+            with self.subTest(field=field):
+                substituted = dict(closure)
+                substituted[field] = "b" * 64
+                self.assertNotEqual(
+                    native_block_module._scala_artifact_closure_sha256(
+                        substituted
+                    ),
+                    expected,
+                )
+        invalid = dict(closure)
+        invalid["unexpected"] = "c" * 64
+        with self.assertRaisesRegex(
+            GateError,
+            "SCALA_NATIVE_ARTIFACT_CLOSURE_INVALID",
+        ):
+            native_block_module._scala_artifact_closure_sha256(invalid)
+
+    def test_scala_source_manifest_and_executable_substitution_fail_closed(
+        self,
+    ) -> None:
+        temporary = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        scala_root = temporary / "scala"
+        files: dict[str, dict[str, str]] = {}
+        for relative_path in native_block_module.SCALA_RUNTIME_SOURCE_PATHS:
+            path = scala_root / relative_path
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                f"// frozen source: {relative_path}\n",
+                encoding="utf-8",
+            )
+            role = (
+                "configuration"
+                if relative_path in {"project.scala", "selected-profile.scala"}
+                else "benchmark"
+                if relative_path.startswith("benchmarks/")
+                else "main"
+            )
+            files[relative_path] = {
+                "role": role,
+                "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            }
+        manifest = {
+            "schemaVersion": "s1.4x-source-input-manifest-v1",
+            "language": "scala",
+            "files": files,
+            "inputSets": native_block_module.SCALA_SOURCE_INPUT_SETS,
+            "canonicalManifestSha256": hashlib.sha256(
+                "".join(
+                    f"{metadata['sha256']}  {path}\n"
+                    for path, metadata in files.items()
+                ).encode()
+            ).hexdigest(),
+        }
+        native_block_module._validate_scala_source_manifest(
+            manifest,
+            scala_root=scala_root,
+            error="SCALA_SOURCE_SUBSTITUTION",
+        )
+        substituted_source = (
+            scala_root / native_block_module.SCALA_RUNTIME_SOURCE_PATHS[0]
+        )
+        substituted_source.write_text("// substituted\n", encoding="utf-8")
+        with self.assertRaisesRegex(
+            GateError,
+            "SCALA_SOURCE_SUBSTITUTION",
+        ):
+            native_block_module._validate_scala_source_manifest(
+                manifest,
+                scala_root=scala_root,
+                error="SCALA_SOURCE_SUBSTITUTION",
+            )
+
+        scala_cli = temporary / "scala-cli"
+        java = temporary / "java"
+        scala_cli.write_bytes(b"scala-cli frozen")
+        java.write_bytes(b"java frozen")
+        scala_cli.chmod(0o700)
+        java.chmod(0o700)
+        with (
+            patch.object(
+                native_block_module,
+                "FROZEN_SCALA_CLI_SHA256",
+                hashlib.sha256(scala_cli.read_bytes()).hexdigest(),
+            ),
+            patch.object(
+                native_block_module,
+                "FROZEN_JAVA_EXECUTABLE_SHA256",
+                hashlib.sha256(java.read_bytes()).hexdigest(),
+            ),
+        ):
+            native_block_module._validate_scala_executable_identities(
+                scala_cli_path=scala_cli,
+                java_executable_path=java,
+            )
+            scala_cli.write_bytes(b"scala-cli substituted")
+            with self.assertRaisesRegex(
+                GateError,
+                "SCALA_NATIVE_SCALA_CLI_IDENTITY_INVALID",
+            ):
+                native_block_module._validate_scala_executable_identities(
+                    scala_cli_path=scala_cli,
+                    java_executable_path=java,
+                )
+
+    def test_scala_producer_cli_dispatches_exact_outer_options(self) -> None:
+        producer_result = {
+            "boundaryId": "scala",
+            "selectorId": "scala/family",
+            "caseCount": 2,
+            "nativeContractValidationSha256": "1" * 64,
+            "nativeReportSha256": "2" * 64,
+            "nativeStatisticsSha256": "3" * 64,
+            "status": "PASS",
+        }
+        argv = [
+            "produce-scala-native",
+            "--repo-root",
+            "/repo",
+            "--plan",
+            "/repo/plan.json",
+            "--block-dir",
+            "/run/block",
+            "--selector",
+            "scala/family",
+            "--scala-jmh-root",
+            "/run/block/scala-jmh",
+            "--input-ledger",
+            "/run/block/input-ledger.json",
+            "--fixture-root",
+            "/repo/fixtures",
+            "--selected-profile-result",
+            "/evidence/selected.json",
+            "--selected-profile-source",
+            "/repo/scala/selected-profile.scala",
+            "--source-input-manifest",
+            "/repo/scala/source-inputs.v1.json",
+            "--compiler-profiles",
+            "/repo/scala/compiler-profiles.v1.json",
+            "--toolchain-lock",
+            "/repo/scala/toolchain-lock.v1.json",
+            "--toolchain-provenance",
+            "/repo/contract/toolchain-provenance.v1.json",
+            "--jvm-argument-capability",
+            "/evidence/jvm-allowlist.json",
+            "--scala-cli",
+            "/tools/scala-cli",
+            "--java-executable",
+            "/tools/java",
+            "--started-at",
+            "2026-07-18T00:00:00Z",
+            "--finished-at",
+            "2026-07-18T00:01:00Z",
+        ]
+        output = StringIO()
+        with (
+            patch.object(
+                native_block_module,
+                "produce_scala_native_evidence",
+                return_value=producer_result,
+            ) as producer,
+            redirect_stdout(output),
+        ):
+            self.assertEqual(native_block_module.main(argv), 0)
+        producer.assert_called_once()
+        self.assertEqual(json.loads(output.getvalue()), producer_result)
+
+    def test_scala_full_runtime_argv_uses_exact_22_source_order_and_checksums(
+        self,
+    ) -> None:
+        scala_root = Path("/repo/numeric/scala")
+        raw_path = Path("/run/block/scala-jmh/case-001/native.json")
+        argv = native_block_module._scala_full_runtime_argv(
+            scala_cli=Path("/tools/scala-cli"),
+            scala_root=scala_root,
+            source_paths=list(native_block_module.SCALA_RUNTIME_SOURCE_PATHS),
+            scala_cli_arguments=["--scalac-option=-opt"],
+            raw_path=raw_path,
+            jmh_include_regex=r"^s1_4x\.benchmarks\.family\.Benchmark\.benchmark$",
+        )
+        self.assertEqual(len(native_block_module.SCALA_RUNTIME_SOURCE_PATHS), 22)
+        source_start = 3
+        source_end = source_start + 22
+        self.assertEqual(
+            argv[source_start:source_end],
+            [
+                str(scala_root / relative)
+                for relative in native_block_module.SCALA_RUNTIME_SOURCE_PATHS
+            ],
+        )
+        self.assertEqual(
+            argv[source_end : source_end + 5],
+            [
+                "--server=false",
+                "--jvm",
+                "system",
+                "--coursier-validate-checksums",
+                "--scalac-option=-opt",
+            ],
+        )
+
     def test_native_json_snapshot_keeps_digest_and_payload_on_one_descriptor(
         self,
     ) -> None:
@@ -84,6 +360,38 @@ class NativeBenchmarkBlockTests(TestCase):
                 self.assertEqual(snapshot.sha256, original_sha256)
                 self.assertEqual(document, original)
                 self.assertEqual(strict_json_load(source), swapped)
+
+    def test_plan_snapshot_validation_rejects_path_substitution_and_symlinks(
+        self,
+    ) -> None:
+        temporary = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        plan_path = temporary / "benchmark-plan.v1.json"
+        plan_path.write_bytes(PLAN.read_bytes())
+        snapshot, original = native_block_module._snapshot_json_file(
+            plan_path,
+            role="plan-aba-regression",
+            error="PLAN_SNAPSHOT_INVALID",
+        )
+        replacement = temporary / "replacement.json"
+        replacement.write_text('{"forged":true}', encoding="utf-8")
+        os.replace(replacement, plan_path)
+        validated = native_block_module._validate_plan_snapshot(
+            snapshot,
+            error="PLAN_SNAPSHOT_INVALID",
+        )
+        self.assertEqual(validated, original)
+        self.assertEqual(strict_json_load(plan_path), {"forged": True})
+
+        target = temporary / "target.json"
+        target.write_text('{"status":"PASS"}', encoding="utf-8")
+        symlink = temporary / "symlink.json"
+        symlink.symlink_to(target)
+        with self.assertRaisesRegex(GateError, "SYMLINK_INPUT_INVALID"):
+            native_block_module._snapshot_json_file(
+                symlink,
+                role="symlink-input",
+                error="SYMLINK_INPUT_INVALID",
+            )
 
     def test_haskell_native_batch_seconds_are_normalized_from_frozen_ops(self) -> None:
         plan = strict_json_load(PLAN)
