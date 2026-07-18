@@ -13,7 +13,7 @@ from unittest import TestCase
 
 INTEGRATION = Path(__file__).resolve().parents[1]
 S1_4X = INTEGRATION.parent
-REPO = S1_4X.parents[4]
+REPO = S1_4X.parents[3]
 sys.path.insert(0, str(INTEGRATION))
 
 from final_candidate_audit import (  # noqa: E402
