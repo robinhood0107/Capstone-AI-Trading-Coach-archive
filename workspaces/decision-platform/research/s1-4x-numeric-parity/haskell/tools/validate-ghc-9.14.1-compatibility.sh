@@ -6,9 +6,21 @@ if [[ "$#" -ne 1 || "$1" != /* ]]; then
   exit 64
 fi
 RESULT_PATH="$1"
-EVIDENCE_PATH="${RESULT_PATH%/*}/compatibility-failure.v1.json"
+OUTPUT_DIRECTORY="${RESULT_PATH%/*}"
+FAILURE_EVIDENCE="$OUTPUT_DIRECTORY/compatibility-failure.v1.json"
+PASS_EVIDENCE="$OUTPUT_DIRECTORY/compatibility-pass.v1.json"
+CANDIDATE_FAILURE_EVIDENCE="$OUTPUT_DIRECTORY/compatibility-candidate-failure.v1.json"
+EVIDENCE_COUNT=0
+for evidence in \
+  "$FAILURE_EVIDENCE" \
+  "$PASS_EVIDENCE" \
+  "$CANDIDATE_FAILURE_EVIDENCE"; do
+  if [[ -f "$evidence" && ! -L "$evidence" ]]; then
+    EVIDENCE_COUNT=$((EVIDENCE_COUNT + 1))
+  fi
+done
 [[ -f "$RESULT_PATH" && ! -L "$RESULT_PATH" \
-  && -f "$EVIDENCE_PATH" && ! -L "$EVIDENCE_PATH" ]] || {
+  && "$EVIDENCE_COUNT" -eq 1 ]] || {
   echo "typed compatibility result and companion evidence are required" >&2
   exit 66
 }

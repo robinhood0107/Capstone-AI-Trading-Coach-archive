@@ -345,6 +345,390 @@ def atomic_write_json(path: Path, value: Any) -> None:
         raise
 
 
+def parse_current_configuration_ast(path: Path) -> dict[str, Any]:
+    """현재 compatibility Stack YAML의 compiler 외 설정을 좁은 AST로 다시 읽는다."""
+
+    if path.is_symlink() or not path.is_file():
+        raise CompatibilityEvidenceError("current Stack YAML is missing or unsafe")
+    scalar_values: dict[str, str] = {}
+    packages: list[str] = []
+    flags: dict[str, dict[str, bool]] = {}
+    section: str | None = None
+    current_flag_package: str | None = None
+    allowed_scalars = {
+        "snapshot",
+        "compiler",
+        "compiler-check",
+        "system-ghc",
+        "install-ghc",
+    }
+    for line_number, raw_line in enumerate(
+        path.read_text(encoding="utf-8").splitlines(),
+        start=1,
+    ):
+        if not raw_line.strip() or raw_line.lstrip().startswith("#"):
+            continue
+        if "\t" in raw_line:
+            raise CompatibilityEvidenceError("current Stack YAML contains a tab")
+        indentation = len(raw_line) - len(raw_line.lstrip(" "))
+        stripped = raw_line.strip()
+        if indentation == 0:
+            match = re.fullmatch(r"([a-z][a-z-]*):(?:\s*(.*))?", stripped)
+            if match is None:
+                raise CompatibilityEvidenceError(
+                    f"current Stack YAML syntax drift at line {line_number}"
+                )
+            key, value = match.groups()
+            if key in scalar_values or key in {"packages", "flags"} and section == key:
+                raise CompatibilityEvidenceError(
+                    f"duplicate current Stack YAML key: {key}"
+                )
+            if key in allowed_scalars:
+                if not value:
+                    raise CompatibilityEvidenceError(
+                        f"current Stack YAML scalar missing: {key}"
+                    )
+                scalar_values[key] = value
+                section = None
+                current_flag_package = None
+            elif key in {"packages", "flags"} and not value:
+                section = key
+                current_flag_package = None
+            else:
+                raise CompatibilityEvidenceError(
+                    f"current Stack YAML key forbidden: {key}"
+                )
+            continue
+        if section == "packages" and indentation == 2:
+            match = re.fullmatch(r"-\s+(\S+)", stripped)
+            if match is None:
+                raise CompatibilityEvidenceError("current Stack package syntax drift")
+            packages.append(match.group(1))
+            continue
+        if section == "flags" and indentation == 2:
+            match = re.fullmatch(r"([A-Za-z0-9][A-Za-z0-9-]*):", stripped)
+            if match is None or match.group(1) in flags:
+                raise CompatibilityEvidenceError("current Stack flag package drift")
+            current_flag_package = match.group(1)
+            flags[current_flag_package] = {}
+            continue
+        if (
+            section == "flags"
+            and indentation == 4
+            and current_flag_package is not None
+        ):
+            match = re.fullmatch(
+                r"([A-Za-z0-9][A-Za-z0-9-]*):\s+(true|false)",
+                stripped,
+            )
+            if match is None or match.group(1) in flags[current_flag_package]:
+                raise CompatibilityEvidenceError("current Stack flag value drift")
+            flags[current_flag_package][match.group(1)] = match.group(2) == "true"
+            continue
+        raise CompatibilityEvidenceError(
+            f"current Stack YAML indentation drift at line {line_number}"
+        )
+    if (
+        set(scalar_values) != allowed_scalars
+        or scalar_values["compiler"] != "ghc-9.14.1"
+        or not packages
+        or not flags
+        or len(packages) != len(set(packages))
+    ):
+        raise CompatibilityEvidenceError("current Stack YAML field set drift")
+
+    def parse_bool(key: str) -> bool:
+        value = scalar_values[key]
+        if value not in {"true", "false"}:
+            raise CompatibilityEvidenceError(f"current Stack boolean drift: {key}")
+        return value == "true"
+
+    return {
+        "compilerCheck": scalar_values["compiler-check"],
+        "flags": flags,
+        "installGhc": parse_bool("install-ghc"),
+        "packages": packages,
+        "snapshot": scalar_values["snapshot"],
+        "systemGhc": parse_bool("system-ghc"),
+    }
+
+
+def _boot_versions_from_dump(path: Path) -> dict[str, str]:
+    if path.is_symlink() or not path.is_file():
+        raise CompatibilityEvidenceError("boot dump is missing or unsafe")
+    versions: dict[str, str] = {}
+    for chunk in path.read_text(encoding="utf-8").split("\n---\n"):
+        fields: dict[str, str] = {}
+        for line in chunk.splitlines():
+            match = re.fullmatch(r"(name|version):\s+(.+?)\s*", line)
+            if match is not None:
+                fields[match.group(1)] = match.group(2)
+        if set(fields) == {"name", "version"}:
+            if fields["name"] in versions:
+                raise CompatibilityEvidenceError("duplicate boot package name")
+            versions[fields["name"]] = fields["version"]
+    if not versions:
+        raise CompatibilityEvidenceError("empty boot package dump")
+    return versions
+
+
+def parse_current_s4804_failure_leaf(
+    stderr_text: str,
+    *,
+    compatibility_boot_versions: Mapping[str, str],
+) -> dict[str, Any]:
+    """현재 stderr의 단일 exact S-4804 dependency leaf를 구조화한다."""
+
+    if stderr_text.count("Error: [S-4804]") != 1 or stderr_text.count(
+        "Stack failed to construct a build plan."
+    ) != 1:
+        raise CompatibilityEvidenceError("current exact S-4804 identity drift")
+    normalized = " ".join(stderr_text.split())
+    process_match = re.search(
+        r"In the dependencies for "
+        r"(?P<required_by>optparse-applicative-(?P<parent_version>[0-9.]+)): "
+        r"\* process must match (?P<required_range>.+?), but this GHC boot package "
+        r"has been pruned from the Stack configuration\..+?"
+        r"\(latest matching version is (?P<snapshot_version>[0-9.]+)\)\.",
+        normalized,
+    )
+    directory_match = re.search(
+        r"In the dependencies for s1-4x-haskell-[0-9.]+: "
+        r"\* directory needed, but this GHC boot package has been pruned from "
+        r"the Stack configuration\..+?"
+        r"\(latest matching version is (?P<snapshot_version>[0-9.]+)\)\.",
+        normalized,
+    )
+    suggestions = [
+        {
+            "package": match.group("package"),
+            "version": match.group("version"),
+            "cabalRevisionSha256": match.group("sha256"),
+            "cabalRevisionSize": int(match.group("size")),
+        }
+        for match in re.finditer(
+            r"(?m)^\s*-\s+"
+            r"(?P<package>[A-Za-z][A-Za-z0-9-]*)-"
+            r"(?P<version>[0-9]+(?:\.[0-9]+)+)@sha256:"
+            r"(?P<sha256>[0-9a-f]{64}),(?P<size>[0-9]+)\s*$",
+            stderr_text,
+        )
+    ]
+    suggestions.sort(key=lambda item: item["package"].encode())
+    if (
+        process_match is None
+        or directory_match is None
+        or set(compatibility_boot_versions) < {"directory", "process"}
+        or [item["package"] for item in suggestions] != ["directory", "process"]
+        or process_match.group("required_by") != "optparse-applicative-0.18.1.0"
+        or process_match.group("required_range") != ">=1.0 && <1.7"
+    ):
+        raise CompatibilityEvidenceError("current exact S-4804 leaf drift")
+    suggested_versions = {
+        item["package"]: item["version"] for item in suggestions
+    }
+    if (
+        suggested_versions["directory"]
+        != directory_match.group("snapshot_version")
+        or suggested_versions["process"]
+        != process_match.group("snapshot_version")
+    ):
+        raise CompatibilityEvidenceError("current exact S-4804 version drift")
+    return {
+        "message": "Stack failed to construct a build plan.",
+        "prunedBootPackages": [
+            {
+                "compatibilityBootVersion": compatibility_boot_versions[
+                    "directory"
+                ],
+                "package": "directory",
+                "snapshotVersion": suggested_versions["directory"],
+            },
+            {
+                "compatibilityBootVersion": compatibility_boot_versions["process"],
+                "package": "process",
+                "requiredBy": process_match.group("required_by"),
+                "requiredRange": process_match.group("required_range"),
+                "snapshotVersion": suggested_versions["process"],
+            },
+        ],
+        "stackErrorCode": "S-4804",
+        "suggestedExtraDeps": suggestions,
+    }
+
+
+def _direct_cabal_dependencies(path: Path) -> dict[str, set[str]]:
+    if path.is_symlink() or not path.is_file():
+        raise CompatibilityEvidenceError("candidate Cabal file is missing or unsafe")
+    dependencies: dict[str, set[str]] = {}
+    lines = path.read_text(encoding="utf-8").splitlines()
+    index = 0
+    while index < len(lines):
+        match = re.match(r"^(?P<indent>\s*)build-depends:\s*(?P<rest>.*)$", lines[index])
+        if match is None:
+            index += 1
+            continue
+        indentation = len(match.group("indent"))
+        entries = [match.group("rest")]
+        index += 1
+        while index < len(lines):
+            line = lines[index]
+            if not line.strip():
+                index += 1
+                continue
+            current_indentation = len(line) - len(line.lstrip(" "))
+            if current_indentation <= indentation:
+                break
+            entries.append(line.strip())
+            index += 1
+        for entry in ",".join(entries).split(","):
+            normalized = entry.strip()
+            if not normalized:
+                continue
+            dependency = re.fullmatch(
+                r"(?P<package>[A-Za-z][A-Za-z0-9-]*)"
+                r"(?:\s+(?P<constraint>.+))?",
+                normalized,
+            )
+            if dependency is None:
+                raise CompatibilityEvidenceError(
+                    f"candidate Cabal dependency syntax drift: {normalized}"
+                )
+            dependencies.setdefault(dependency.group("package"), set()).add(
+                dependency.group("constraint") or ""
+            )
+    if not dependencies:
+        raise CompatibilityEvidenceError("candidate Cabal direct parents missing")
+    return dependencies
+
+
+def _snapshot_package_versions(snapshot_text: str) -> dict[str, str]:
+    versions: dict[str, str] = {}
+    for match in re.finditer(
+        r"(?m)^-\s+hackage:\s+"
+        r"(?P<package>[A-Za-z][A-Za-z0-9-]*)-"
+        r"(?P<version>[0-9]+(?:\.[0-9]+)+)@sha256:"
+        r"[0-9a-f]{64},[0-9]+\s*$",
+        snapshot_text,
+    ):
+        package = match.group("package")
+        if package in versions:
+            raise CompatibilityEvidenceError("duplicate snapshot package")
+        versions[package] = match.group("version")
+    if not versions:
+        raise CompatibilityEvidenceError("snapshot package list missing")
+    return versions
+
+
+def derive_current_direct_non_boot_parents(
+    *,
+    cabal_path: Path,
+    snapshot_text: str,
+    pantry_db: Path,
+    boot_package_names: set[str],
+    local_package_names: set[str],
+    approved_flags: Mapping[str, Mapping[str, bool]],
+) -> list[dict[str, Any]]:
+    """현재 Cabal direct deps와 현재 snapshot/Pantry identity를 결합한다."""
+
+    dependencies = _direct_cabal_dependencies(cabal_path)
+    snapshot_versions = _snapshot_package_versions(snapshot_text)
+    selected_names = sorted(
+        set(dependencies) - boot_package_names - local_package_names,
+        key=str.encode,
+    )
+    if not selected_names:
+        raise CompatibilityEvidenceError("current direct non-boot parents missing")
+    connection = sqlite3.connect(f"file:{pantry_db}?mode=ro", uri=True)
+    query = """
+        SELECT lower(hex(tarball.sha))
+        FROM hackage_tarball AS tarball
+        JOIN package_name AS package ON package.id = tarball.name
+        JOIN version AS version ON version.id = tarball.version
+        WHERE package.name = ? AND version.version = ?
+    """
+    parents: list[dict[str, Any]] = []
+    try:
+        for package in selected_names:
+            version = snapshot_versions.get(package)
+            if version is None:
+                raise CompatibilityEvidenceError(
+                    f"direct parent absent from snapshot: {package}"
+                )
+            exact_constraints = {
+                match.group(1)
+                for constraint in dependencies[package]
+                if (
+                    match := re.fullmatch(
+                        r"==\s*([0-9]+(?:\.[0-9]+)+)",
+                        constraint,
+                    )
+                )
+                is not None
+            }
+            if exact_constraints and exact_constraints != {version}:
+                raise CompatibilityEvidenceError(
+                    f"direct parent exact constraint drift: {package}"
+                )
+            rows = list(connection.execute(query, (package, version)))
+            if len(rows) != 1 or re.fullmatch(r"[0-9a-f]{64}", rows[0][0]) is None:
+                raise CompatibilityEvidenceError(
+                    f"direct parent Pantry identity drift: {package}"
+                )
+            parents.append(
+                _parent(
+                    package,
+                    version,
+                    rows[0][0],
+                    approved_flags.get(package),
+                )
+            )
+    finally:
+        connection.close()
+    return parents
+
+
+def read_current_snapshot_from_pantry(
+    pantry_db: Path,
+    *,
+    snapshot_url: str,
+    expected_sha256: str,
+    expected_size: int,
+) -> str:
+    """현재 isolated Pantry DB에서 exact frozen snapshot bytes를 다시 읽는다."""
+
+    if pantry_db.is_symlink() or not pantry_db.is_file():
+        raise CompatibilityEvidenceError("current Pantry DB is missing or unsafe")
+    connection = sqlite3.connect(f"file:{pantry_db}?mode=ro", uri=True)
+    try:
+        rows = list(
+            connection.execute(
+                """
+SELECT blob.contents
+FROM url_blob AS url
+JOIN blob AS blob ON blob.id = url.blob
+WHERE url.url = ?
+ORDER BY url.time DESC
+""",
+                (snapshot_url,),
+            )
+        )
+    finally:
+        connection.close()
+    if len(rows) != 1:
+        raise CompatibilityEvidenceError("current frozen snapshot cardinality drift")
+    payload = bytes(rows[0][0])
+    if (
+        len(payload) != expected_size
+        or hashlib.sha256(payload).hexdigest() != expected_sha256
+    ):
+        raise CompatibilityEvidenceError("current frozen snapshot bytes drift")
+    try:
+        return payload.decode("utf-8")
+    except UnicodeError as exc:
+        raise CompatibilityEvidenceError("current frozen snapshot encoding drift") from exc
+
+
 def _parse_boot_dump(
     path: Path,
     *,
@@ -432,6 +816,127 @@ def _boot_set(
             "size": dump_path.stat().st_size,
         },
     }
+
+
+def _stack_lock_snapshot(path: Path) -> dict[str, Any]:
+    if path.is_symlink() or not path.is_file():
+        raise CompatibilityEvidenceError("compatibility Stack lock is missing or unsafe")
+    text = path.read_text(encoding="utf-8")
+    match = re.search(
+        r"(?ms)^snapshots:\s*\n"
+        r"- completed:\s*\n"
+        r"\s+sha256:\s+(?P<sha256>[0-9a-f]{64})\s*\n"
+        r"\s+size:\s+(?P<size>[0-9]+)\s*\n"
+        r"\s+url:\s+(?P<url>https://\S+)\s*\n"
+        r"\s+original:\s+(?P<snapshot>[A-Za-z0-9.-]+)\s*$",
+        text,
+    )
+    if match is None:
+        raise CompatibilityEvidenceError("compatibility Stack lock snapshot drift")
+    return {
+        "sha256": match.group("sha256"),
+        "size": int(match.group("size")),
+        "url": match.group("url"),
+        "snapshot": match.group("snapshot"),
+    }
+
+
+def build_current_plan_proof(
+    *,
+    haskell_root: Path,
+    stack_yaml: Path,
+    authoritative_boot_dump: Path,
+    compatibility_boot_dump: Path,
+    pantry_db: Path,
+) -> dict[str, Any]:
+    """현재 frozen config, snapshot, Cabal, boot dump에서 plan proof를 계산한다."""
+
+    configuration = parse_current_configuration_ast(stack_yaml)
+    lock_snapshot = _stack_lock_snapshot(
+        haskell_root / "stack-ghc-9.14.1.yaml.lock"
+    )
+    if configuration["snapshot"] != lock_snapshot["snapshot"]:
+        raise CompatibilityEvidenceError("current snapshot YAML/lock mismatch")
+    snapshot_text = read_current_snapshot_from_pantry(
+        pantry_db,
+        snapshot_url=lock_snapshot["url"],
+        expected_sha256=lock_snapshot["sha256"],
+        expected_size=lock_snapshot["size"],
+    )
+    authoritative_boot = _boot_set(
+        compiler_version="9.10.3",
+        dump_path=authoritative_boot_dump,
+        dump_path_id="CURRENT_GHC_9_10_3_GLOBAL_PACKAGE_DUMP",
+        pantry_db=pantry_db,
+        bindist_sha256=AUTHORITATIVE_BINDIST_SHA256,
+    )
+    compatibility_boot = _boot_set(
+        compiler_version="9.14.1",
+        dump_path=compatibility_boot_dump,
+        dump_path_id="CURRENT_GHC_9_14_1_GLOBAL_PACKAGE_DUMP",
+        pantry_db=pantry_db,
+        bindist_sha256=COMPATIBILITY_BINDIST_SHA256,
+    )
+    compatibility_boot_versions = {
+        item["package"]: item["version"]
+        for item in compatibility_boot["packages"]
+    }
+    direct_parents = derive_current_direct_non_boot_parents(
+        cabal_path=haskell_root / "s1-4x-haskell.cabal",
+        snapshot_text=snapshot_text,
+        pantry_db=pantry_db,
+        boot_package_names=set(compatibility_boot_versions),
+        local_package_names={"s1-4x-core", "s1-4x-haskell"},
+        approved_flags=configuration["flags"],
+    )
+    direct_parent_sha256 = canonical_sha256(direct_parents)
+    configuration_sha256 = canonical_sha256(configuration)
+    return {
+        "authoritativeBootSet": authoritative_boot,
+        "authoritativeBootSetSha256": authoritative_boot["manifestSha256"],
+        "authoritativeDirectNonBootParents": direct_parents,
+        "authoritativeNonBootPlanSha256": direct_parent_sha256,
+        "authoritativePackageSetSha256": lock_snapshot["sha256"],
+        "compatibilityBootSet": compatibility_boot,
+        "compatibilityBootSetSha256": compatibility_boot["manifestSha256"],
+        "compatibilityDirectNonBootParents": direct_parents,
+        "compatibilityNonBootPlanSha256": direct_parent_sha256,
+        "configurationAst": configuration,
+        "configurationAstSha256": configuration_sha256,
+        "directNonBootParentManifestSha256": direct_parent_sha256,
+        "snapshot": lock_snapshot,
+    }
+
+
+def build_current_failure_proof(
+    *,
+    haskell_root: Path,
+    stack_yaml: Path,
+    authoritative_boot_dump: Path,
+    compatibility_boot_dump: Path,
+    pantry_db: Path,
+    stderr_path: Path,
+) -> dict[str, Any]:
+    """현재 solve 입력과 raw dump만으로 frozen dependency 증명을 다시 계산한다."""
+
+    proof = build_current_plan_proof(
+        haskell_root=haskell_root,
+        stack_yaml=stack_yaml,
+        authoritative_boot_dump=authoritative_boot_dump,
+        compatibility_boot_dump=compatibility_boot_dump,
+        pantry_db=pantry_db,
+    )
+    compatibility_boot_versions = {
+        item["package"]: item["version"]
+        for item in proof["compatibilityBootSet"]["packages"]
+    }
+    failure_leaf = parse_current_s4804_failure_leaf(
+        stderr_path.read_text(encoding="utf-8"),
+        compatibility_boot_versions=compatibility_boot_versions,
+    )
+    proof["failedPartialPlanSha256"] = canonical_sha256(failure_leaf)
+    proof["failureLeaf"] = failure_leaf
+    return proof
 
 
 def _historical_execution() -> dict[str, Any]:

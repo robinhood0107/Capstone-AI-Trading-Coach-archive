@@ -39,6 +39,18 @@ FINAL_PROFILE_SCHEMA_VERSION = "s1.4x-haskell-selected-profile-v1"
 CURRENT_COMPATIBILITY_EVIDENCE_VERSION = (
     "s1.4x-ghc-current-frozen-dependency-evidence-v1"
 )
+CURRENT_COMPATIBILITY_PASS_EVIDENCE_VERSION = (
+    "s1.4x-ghc-current-full-replay-evidence-v1"
+)
+COMPATIBILITY_REPLAY_PHASES = (
+    "dependency",
+    "candidateCompile",
+    "fullCorrectness",
+    "stableErrorReplay",
+    "processReplay",
+    "oracleReplay",
+    "crossReplay",
+)
 PROFILE_MARKER_FIELDS = {
     "schemaVersion",
     "state",
@@ -640,6 +652,214 @@ def build_final_profile_document(
     }
 
 
+def current_compatibility_lock_hashes(haskell_root: Path) -> dict[str, str]:
+    """두 Stack lock을 각각의 regular-file bytes에서 독립적으로 계산한다."""
+
+    return {
+        "authoritativeStackLockSha256": sha256_file(
+            haskell_root / "stack.yaml.lock"
+        ),
+        "compatibilityStackLockSha256": sha256_file(
+            haskell_root / "stack-ghc-9.14.1.yaml.lock"
+        ),
+    }
+
+
+def _compatibility_result_base(
+    *,
+    candidate_source_tree_sha256: str,
+    command_records: Sequence[Mapping[str, Any]],
+    current_plan: Mapping[str, Any],
+    haskell_root: Path,
+) -> dict[str, Any]:
+    """현재 frozen inputs에서 typed compatibility result 공통 필드를 만든다."""
+
+    _require_sha256(candidate_source_tree_sha256, label="compatibility-source-tree")
+    plan_sha_fields = (
+        "authoritativeBootSetSha256",
+        "compatibilityBootSetSha256",
+        "authoritativeNonBootPlanSha256",
+        "compatibilityNonBootPlanSha256",
+        "authoritativePackageSetSha256",
+        "configurationAstSha256",
+    )
+    for field in plan_sha_fields:
+        _require_sha256(current_plan.get(field), label=f"current-plan-{field}")
+    if (
+        current_plan["authoritativeNonBootPlanSha256"]
+        != current_plan["compatibilityNonBootPlanSha256"]
+    ):
+        raise WorkflowError("CURRENT_NON_BOOT_PLAN_MISMATCH")
+    commands = [dict(record) for record in command_records]
+    if not commands:
+        raise WorkflowError("COMPATIBILITY_COMMANDS_EMPTY")
+    toolchain_lock_path = _absolute_regular(
+        haskell_root / "toolchain-lock.v1.json",
+        label="HASKELL_TOOLCHAIN_LOCK",
+    )
+    toolchain_lock = strict_json_load(toolchain_lock_path)
+    projection = toolchain_lock.get("contractProjection")
+    resolved = toolchain_lock.get("resolvedTools")
+    if not isinstance(projection, dict) or not isinstance(resolved, dict):
+        raise WorkflowError("HASKELL_TOOLCHAIN_LOCK_INVALID")
+    compatibility_ghc = resolved.get("compatibilityGhc")
+    stack_tool = resolved.get("stack")
+    ghcup_tool = resolved.get("ghcup")
+    if any(
+        not isinstance(tool, dict)
+        for tool in (compatibility_ghc, stack_tool, ghcup_tool)
+    ):
+        raise WorkflowError("HASKELL_TOOLCHAIN_RESOLUTION_INVALID")
+    merged_path = _absolute_regular(
+        haskell_root.parent / "contract/toolchain-provenance.v1.json",
+        label="MERGED_TOOLCHAIN_PROVENANCE",
+    )
+    merged_sha256 = sha256_file(merged_path)
+    if merged_sha256 != toolchain_lock["mergedToolchainProvenance"]["sha256"]:
+        raise WorkflowError("MERGED_TOOLCHAIN_PROVENANCE_DRIFT")
+    lock_hashes = current_compatibility_lock_hashes(haskell_root)
+    return {
+        "authoritativeBootSetSha256": current_plan[
+            "authoritativeBootSetSha256"
+        ],
+        "authoritativeNonBootPlanSha256": current_plan[
+            "authoritativeNonBootPlanSha256"
+        ],
+        "authoritativePackageSetSha256": current_plan[
+            "authoritativePackageSetSha256"
+        ],
+        **lock_hashes,
+        "authoritativeStackYamlSha256": sha256_file(haskell_root / "stack.yaml"),
+        "candidateSourceTreeSha256": candidate_source_tree_sha256,
+        "commands": commands,
+        "compatibilityBootSetSha256": current_plan[
+            "compatibilityBootSetSha256"
+        ],
+        "compatibilityNonBootPlanSha256": current_plan[
+            "compatibilityNonBootPlanSha256"
+        ],
+        "compatibilityPolicySha256": sha256_file(
+            haskell_root.parent / "contract/ghc-compatibility-policy.v1.json"
+        ),
+        "compatibilityStackYamlSha256": sha256_file(
+            haskell_root / "stack-ghc-9.14.1.yaml"
+        ),
+        "compilerPathId": compatibility_ghc["pathId"],
+        "compilerSha256": compatibility_ghc["sha256"],
+        "compilerVersion": compatibility_ghc["version"],
+        "configurationQualification": {
+            "evidenceSha256": current_plan["configurationAstSha256"],
+            "status": "PASS",
+        },
+        "expectedBootSetDifferenceOnly": True,
+        "forbiddenOverrideKeysPresent": [],
+        "ghcupMetadataCommit": projection["ghcupMetadataCommit"],
+        "ghcupMetadataUri": projection["ghcupMetadataUri"],
+        "ghcupSha256": ghcup_tool["sha256"],
+        "ghcupToolId": ghcup_tool["pathId"],
+        "ghcupVersion": ghcup_tool["version"],
+        "laneId": "ghc-9.14.1-non-scoring",
+        "nonBootPlanEquivalent": True,
+        "nonScoring": True,
+        "performanceInput": False,
+        "schemaVersion": "s1.4x-ghc-compatibility-result-v1",
+        "stackArchiveSha256": projection["stackArchiveSha256"],
+        "stackArchiveUri": projection["stackArchiveUri"],
+        "stackBinPathId": stack_tool["pathId"],
+        "stackBinSha256": stack_tool["sha256"],
+        "stackDistributionChannel": projection["stackDistributionChannel"],
+        "stackInstallCommand": projection["stackInstallCommand"],
+        "stackNumericVersion": stack_tool["version"],
+        "stackPolicy": projection["stackPolicy"],
+        "toolchainProvenanceSha256": merged_sha256,
+        "toolchainQualification": {
+            "evidenceSha256": canonical_sha256(resolved),
+            "status": "PASS",
+        },
+        "upstreamStandaloneAssetRole": projection[
+            "upstreamStandaloneAssetRole"
+        ],
+        "upstreamStandaloneAssetSha256": projection[
+            "upstreamStandaloneAssetSha256"
+        ],
+    }
+
+
+def build_current_compatibility_pass_result(
+    *,
+    candidate_source_tree_sha256: str,
+    command_records: Sequence[Mapping[str, Any]],
+    phase_evidence_sha256: Mapping[str, str],
+    current_plan: Mapping[str, Any],
+    haskell_root: Path,
+) -> dict[str, Any]:
+    """Solve 성공 뒤 여섯 downstream 단계가 모두 PASS인 typed result를 만든다."""
+
+    expected_phases = {
+        "dependency",
+        "candidateCompile",
+        "fullCorrectness",
+        "stableErrorReplay",
+        "processReplay",
+        "oracleReplay",
+        "crossReplay",
+    }
+    if set(phase_evidence_sha256) != expected_phases:
+        raise WorkflowError("COMPATIBILITY_PASS_PHASE_SET_INVALID")
+    for phase, digest in phase_evidence_sha256.items():
+        _require_sha256(digest, label=f"compatibility-{phase}")
+    result = _compatibility_result_base(
+        candidate_source_tree_sha256=candidate_source_tree_sha256,
+        command_records=command_records,
+        current_plan=current_plan,
+        haskell_root=haskell_root,
+    )
+    result.update(
+        {
+            "candidateCompile": {
+                "evidenceSha256": phase_evidence_sha256["candidateCompile"],
+                "status": "PASS",
+            },
+            "crossReplay": {
+                "evidenceSha256": phase_evidence_sha256["crossReplay"],
+                "mismatchCount": 0,
+                "status": "PASS",
+            },
+            "dependencyQualification": {
+                "evidenceSha256": phase_evidence_sha256["dependency"],
+                "status": "PASS",
+            },
+            "downstreamNotRun": [],
+            "failurePhase": None,
+            "fullCorrectness": {
+                "evidenceSha256": phase_evidence_sha256["fullCorrectness"],
+                "mismatchCount": 0,
+                "status": "PASS",
+            },
+            "minimalReproducerSha256": None,
+            "oracleReplay": {
+                "evidenceSha256": phase_evidence_sha256["oracleReplay"],
+                "mismatchCount": 0,
+                "status": "PASS",
+            },
+            "processReplay": {
+                "evidenceSha256": phase_evidence_sha256["processReplay"],
+                "mismatchCount": 0,
+                "status": "PASS",
+            },
+            "result": "PASS",
+            "stableErrorReplay": {
+                "evidenceSha256": phase_evidence_sha256[
+                    "stableErrorReplay"
+                ],
+                "mismatchCount": 0,
+                "status": "PASS",
+            },
+        }
+    )
+    return result
+
+
 def validate_current_compatibility_status(
     result: object,
     *,
@@ -656,28 +876,89 @@ def validate_current_compatibility_status(
         "oracleReplay",
         "crossReplay",
     ]
-    if (
+    common_invalid = (
         not isinstance(result, dict)
         or result.get("schemaVersion")
         != "s1.4x-ghc-compatibility-result-v1"
-        or result.get("result") != "FAIL_FROZEN_DEPENDENCY"
         or result.get("nonScoring") is not True
         or result.get("performanceInput") is not False
-        or result.get("failurePhase") != "dependency"
         or result.get("expectedBootSetDifferenceOnly") is not True
         or result.get("nonBootPlanEquivalent") is not True
         or result.get("forbiddenOverrideKeysPresent") != []
         or result.get("candidateSourceTreeSha256")
         != expected_source_tree_sha256
-        or result.get("downstreamNotRun") != expected_downstream
-        or not isinstance(result.get("dependencyQualification"), dict)
-        or result["dependencyQualification"].get("status") != "FAIL"
-    ):
-        raise WorkflowError("CURRENT_COMPATIBILITY_STATUS_INVALID")
-    _require_sha256(
-        result["dependencyQualification"].get("evidenceSha256"),
-        label="current-compatibility-evidence",
     )
+    if common_invalid:
+        raise WorkflowError("CURRENT_COMPATIBILITY_STATUS_INVALID")
+    if result.get("result") == "FAIL_FROZEN_DEPENDENCY":
+        if (
+            result.get("failurePhase") != "dependency"
+            or result.get("downstreamNotRun") != expected_downstream
+            or not isinstance(result.get("dependencyQualification"), dict)
+            or result["dependencyQualification"].get("status") != "FAIL"
+        ):
+            raise WorkflowError("CURRENT_COMPATIBILITY_STATUS_INVALID")
+        _require_sha256(
+            result["dependencyQualification"].get("evidenceSha256"),
+            label="current-compatibility-evidence",
+        )
+    elif result.get("result") == "PASS":
+        if (
+            result.get("failurePhase") is not None
+            or result.get("downstreamNotRun") != []
+            or result.get("minimalReproducerSha256") is not None
+            or any(
+                not isinstance(result.get(phase), dict)
+                or result[phase].get("status") != "PASS"
+                or (
+                    phase != "candidateCompile"
+                    and result[phase].get("mismatchCount") != 0
+                )
+                for phase in (
+                    "candidateCompile",
+                    "fullCorrectness",
+                    "stableErrorReplay",
+                    "processReplay",
+                    "oracleReplay",
+                    "crossReplay",
+                )
+            )
+            or not isinstance(result.get("dependencyQualification"), dict)
+            or result["dependencyQualification"].get("status") != "PASS"
+        ):
+            raise WorkflowError("CURRENT_COMPATIBILITY_STATUS_INVALID")
+    elif result.get("result") == "FAIL_CANDIDATE_SOURCE":
+        ordered = list(COMPATIBILITY_REPLAY_PHASES[1:])
+        failed_phase = result.get("failurePhase")
+        if (
+            failed_phase not in ordered
+            or result.get("downstreamNotRun")
+            != ordered[ordered.index(failed_phase) + 1 :]
+            or result.get("minimalReproducerSha256") is None
+            or not isinstance(result.get("dependencyQualification"), dict)
+            or result["dependencyQualification"].get("status") != "PASS"
+        ):
+            raise WorkflowError("CURRENT_COMPATIBILITY_STATUS_INVALID")
+        _require_sha256(
+            result["minimalReproducerSha256"],
+            label="current-candidate-failure",
+        )
+        for index, phase in enumerate(ordered):
+            phase_result = result.get(phase)
+            expected_status = (
+                "PASS"
+                if index < ordered.index(failed_phase)
+                else "FAIL"
+                if phase == failed_phase
+                else "NOT_RUN"
+            )
+            if (
+                not isinstance(phase_result, dict)
+                or phase_result.get("status") != expected_status
+            ):
+                raise WorkflowError("CURRENT_COMPATIBILITY_STATUS_INVALID")
+    else:
+        raise WorkflowError("CURRENT_COMPATIBILITY_STATUS_INVALID")
     return result
 
 
@@ -863,6 +1144,23 @@ def _load_haskell_evidence(haskell_root: Path):
     return module
 
 
+def _load_compatibility_evidence(haskell_root: Path):
+    module_path = _absolute_regular(
+        haskell_root / "tools/compatibility_evidence.py",
+        label="COMPATIBILITY_EVIDENCE_HELPER",
+    )
+    specification = importlib.util.spec_from_file_location(
+        "s1_4x_current_compatibility_evidence",
+        module_path,
+    )
+    if specification is None or specification.loader is None:
+        raise WorkflowError("COMPATIBILITY_EVIDENCE_IMPORT_FAILED")
+    module = importlib.util.module_from_spec(specification)
+    sys.modules[specification.name] = module
+    specification.loader.exec_module(module)
+    return module
+
+
 def _repo_commit(repo_root: Path) -> str:
     completed = subprocess.run(
         ["/usr/bin/git", "-C", str(repo_root), "rev-parse", "HEAD"],
@@ -947,6 +1245,55 @@ def _run_logged(
     if completed.returncode not in expected_exit_codes:
         raise WorkflowError(f"COMMAND_FAILED:{phase}:{completed.returncode}")
     return record
+
+
+def _run_compatibility_logged(
+    command: Sequence[str],
+    *,
+    cwd: Path,
+    environment: Mapping[str, str],
+    phase: str,
+    log_id: str,
+    output_directory: Path,
+) -> dict[str, Any]:
+    """Compatibility 단계 하나를 raw stdout/stderr와 함께 실행해 기록한다."""
+
+    if phase not in COMPATIBILITY_REPLAY_PHASES or re.fullmatch(
+        r"[a-z0-9-]+",
+        log_id,
+    ) is None:
+        raise WorkflowError("COMPATIBILITY_COMMAND_PHASE_INVALID")
+    stdout_path = output_directory / f"{log_id}.stdout"
+    stderr_path = output_directory / f"{log_id}.stderr"
+    if stdout_path.exists() or stderr_path.exists():
+        raise WorkflowError(f"COMPATIBILITY_LOG_ALREADY_EXISTS:{log_id}")
+    started_at = _iso_now()
+    with stdout_path.open("xb") as standard_output, stderr_path.open(
+        "xb"
+    ) as standard_error:
+        completed = subprocess.run(
+            list(command),
+            cwd=cwd,
+            env=dict(environment),
+            check=False,
+            stdin=subprocess.DEVNULL,
+            stdout=standard_output,
+            stderr=standard_error,
+        )
+    finished_at = _iso_now()
+    return {
+        "phase": phase,
+        "logId": log_id,
+        "argv": list(command),
+        "argvSha256": canonical_sha256(list(command)),
+        "startedAt": started_at,
+        "endedAt": finished_at,
+        "exitCode": completed.returncode,
+        "stdoutPath": str(stdout_path),
+        "stdoutSha256": sha256_file(stdout_path),
+        "stderrPath": str(stderr_path),
+        "stderrSha256": sha256_file(stderr_path),
+    }
 
 
 def _find_candidate_binary(haskell_root: Path, *, ghc_version: str) -> Path:
@@ -1816,38 +2163,252 @@ def _mark_measurement(arguments: argparse.Namespace) -> None:
     print(json.dumps({"status": "MEASUREMENT_ENTERED"}))
 
 
-def _reference_compatibility_paths(
+def _portable_compatibility_command_record(
+    *,
+    command: Sequence[str],
+    ghcup: Path,
+    stack: Path,
+    stack_yaml: Path,
+    stack_root: Path,
+    started_at: str,
+    ended_at: str,
+    exit_code: int,
+    stdout_sha256: str,
+    stderr_sha256: str,
+    phase: str,
+) -> dict[str, Any]:
+    """Local absolute argv를 typed result용 portable path ID로 투영한다."""
+
+    replacements = {
+        str(ghcup): "GHCUP_0_2_6_2_LINUX_X86_64",
+        str(stack): "GHCUP_STACK_3_11_1",
+        str(stack_yaml): "HASKELL_GHC_914_STACK_YAML",
+        str(stack_root): "CACHE_ROOT_COMPATIBILITY_STACK_ROOT",
+    }
+    portable_argv = [replacements.get(argument, argument) for argument in command]
+    if any(argument.startswith("/") for argument in portable_argv):
+        raise WorkflowError("COMPATIBILITY_RESULT_ARGV_NOT_PORTABLE")
+    return {
+        "argv": portable_argv,
+        "cwdId": "HASKELL_COMPAT_ROOT",
+        "endedAt": ended_at,
+        "exitCode": exit_code,
+        "phase": phase,
+        "startedAt": started_at,
+        "stderrSha256": stderr_sha256,
+        "stdoutSha256": stdout_sha256,
+    }
+
+
+def _build_current_compatibility_failure_result(
+    *,
+    candidate_source_tree_sha256: str,
+    command_record: Mapping[str, Any],
+    current_plan: Mapping[str, Any],
+    evidence_sha256: str,
     haskell_root: Path,
-) -> tuple[Path, Path]:
-    evidence = _absolute_regular(
-        haskell_root / "ghc-compatibility-solve-failure.v1.json",
-        label="REFERENCE_COMPATIBILITY_EVIDENCE",
+) -> dict[str, Any]:
+    result = _compatibility_result_base(
+        candidate_source_tree_sha256=candidate_source_tree_sha256,
+        command_records=[command_record],
+        current_plan=current_plan,
+        haskell_root=haskell_root,
     )
-    result = _absolute_regular(
-        haskell_root.parent / "reports/ghc-compatibility-result.v1.json",
-        label="REFERENCE_COMPATIBILITY_RESULT",
+    result.update(
+        {
+            "candidateCompile": {
+                "evidenceSha256": None,
+                "status": "NOT_RUN",
+            },
+            "crossReplay": {
+                "evidenceSha256": None,
+                "mismatchCount": None,
+                "status": "NOT_RUN",
+            },
+            "dependencyQualification": {
+                "evidenceSha256": evidence_sha256,
+                "status": "FAIL",
+            },
+            "downstreamNotRun": [
+                "candidateCompile",
+                "fullCorrectness",
+                "stableErrorReplay",
+                "processReplay",
+                "oracleReplay",
+                "crossReplay",
+            ],
+            "failurePhase": "dependency",
+            "fullCorrectness": {
+                "evidenceSha256": None,
+                "mismatchCount": None,
+                "status": "NOT_RUN",
+            },
+            "minimalReproducerSha256": evidence_sha256,
+            "oracleReplay": {
+                "evidenceSha256": None,
+                "mismatchCount": None,
+                "status": "NOT_RUN",
+            },
+            "processReplay": {
+                "evidenceSha256": None,
+                "mismatchCount": None,
+                "status": "NOT_RUN",
+            },
+            "result": "FAIL_FROZEN_DEPENDENCY",
+            "stableErrorReplay": {
+                "evidenceSha256": None,
+                "mismatchCount": None,
+                "status": "NOT_RUN",
+            },
+        }
     )
-    validator = _absolute_regular(
-        haskell_root / "tools/compatibility_evidence.py",
-        label="REFERENCE_COMPATIBILITY_VALIDATOR",
+    return result
+
+
+def _portable_compatibility_replay_records(
+    records: Sequence[Mapping[str, Any]],
+    *,
+    haskell_root: Path,
+    numeric_root: Path,
+    output: Path,
+    stack_root: Path,
+    ghcup: Path,
+    stack: Path,
+) -> list[dict[str, Any]]:
+    """Replay command records의 local path를 안정적인 portable ID로 바꾼다."""
+
+    exact = {
+        str(ghcup): "GHCUP_0_2_6_2_LINUX_X86_64",
+        str(stack): "GHCUP_STACK_3_11_1",
+        "/usr/bin/python3": "SYSTEM_PYTHON3",
+        str(Path("/usr/bin/python3").resolve(strict=True)): "SYSTEM_PYTHON3",
+    }
+    prefixes = (
+        (str(output) + "/", "OUTPUT_ROOT/"),
+        (str(stack_root) + "/", "CACHE_ROOT_COMPATIBILITY_STACK_ROOT/"),
+        (str(haskell_root) + "/", "HASKELL_COMPAT_ROOT/"),
+        (str(numeric_root) + "/", "NUMERIC_ROOT/"),
     )
-    completed = subprocess.run(
-        [
-            "/usr/bin/python3",
-            str(validator),
-            "validate",
-            "--evidence",
-            str(evidence),
-            "--result",
-            str(result),
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
+
+    def portable(argument: str) -> str:
+        if argument in exact:
+            return exact[argument]
+        if argument == str(stack_root):
+            return "CACHE_ROOT_COMPATIBILITY_STACK_ROOT"
+        if argument == str(haskell_root):
+            return "HASKELL_COMPAT_ROOT"
+        if argument == str(numeric_root):
+            return "NUMERIC_ROOT"
+        for prefix, replacement in prefixes:
+            if argument.startswith(prefix):
+                return replacement + argument[len(prefix) :]
+        if argument.startswith("/"):
+            raise WorkflowError(f"COMPATIBILITY_REPLAY_PATH_NOT_PORTABLE:{argument}")
+        return argument
+
+    portable_records: list[dict[str, Any]] = []
+    for record in records:
+        portable_records.append(
+            {
+                "argv": [portable(str(argument)) for argument in record["argv"]],
+                "cwdId": "HASKELL_COMPAT_ROOT",
+                "endedAt": record["endedAt"],
+                "exitCode": record["exitCode"],
+                "phase": record["phase"],
+                "startedAt": record["startedAt"],
+                "stderrSha256": record["stderrSha256"],
+                "stdoutSha256": record["stdoutSha256"],
+            }
+        )
+    return portable_records
+
+
+def _build_current_compatibility_phase_failure_result(
+    *,
+    candidate_source_tree_sha256: str,
+    command_records: Sequence[Mapping[str, Any]],
+    current_plan: Mapping[str, Any],
+    phase_evidence_sha256: Mapping[str, str],
+    failed_phase: str,
+    failed_evidence_sha256: str,
+    haskell_root: Path,
+) -> dict[str, Any]:
+    """Solve 뒤 candidate/replay 실패를 ordered typed closure로 발행한다."""
+
+    downstream = list(COMPATIBILITY_REPLAY_PHASES[1:])
+    if failed_phase not in downstream:
+        raise WorkflowError("COMPATIBILITY_FAILURE_PHASE_INVALID")
+    failed_index = downstream.index(failed_phase)
+    completed = downstream[:failed_index]
+    not_run = downstream[failed_index + 1 :]
+    for phase in completed:
+        _require_sha256(
+            phase_evidence_sha256.get(phase),
+            label=f"completed-compatibility-{phase}",
+        )
+    _require_sha256(failed_evidence_sha256, label="failed-compatibility-phase")
+    dependency_sha256 = _require_sha256(
+        phase_evidence_sha256.get("dependency"),
+        label="compatibility-dependency",
     )
-    if completed.returncode != 0:
-        raise WorkflowError("REFERENCE_COMPATIBILITY_PACKET_INVALID")
-    return evidence, result
+    result = _compatibility_result_base(
+        candidate_source_tree_sha256=candidate_source_tree_sha256,
+        command_records=command_records,
+        current_plan=current_plan,
+        haskell_root=haskell_root,
+    )
+    phase_results: dict[str, dict[str, Any]] = {}
+    for phase in downstream:
+        if phase == failed_phase:
+            phase_results[phase] = (
+                {
+                    "evidenceSha256": failed_evidence_sha256,
+                    "status": "FAIL",
+                }
+                if phase == "candidateCompile"
+                else {
+                    "evidenceSha256": failed_evidence_sha256,
+                    "mismatchCount": 1,
+                    "status": "FAIL",
+                }
+            )
+        elif phase in completed:
+            phase_results[phase] = (
+                {
+                    "evidenceSha256": phase_evidence_sha256[phase],
+                    "status": "PASS",
+                }
+                if phase == "candidateCompile"
+                else {
+                    "evidenceSha256": phase_evidence_sha256[phase],
+                    "mismatchCount": 0,
+                    "status": "PASS",
+                }
+            )
+        else:
+            phase_results[phase] = (
+                {"evidenceSha256": None, "status": "NOT_RUN"}
+                if phase == "candidateCompile"
+                else {
+                    "evidenceSha256": None,
+                    "mismatchCount": None,
+                    "status": "NOT_RUN",
+                }
+            )
+    result.update(
+        {
+            **phase_results,
+            "dependencyQualification": {
+                "evidenceSha256": dependency_sha256,
+                "status": "PASS",
+            },
+            "downstreamNotRun": not_run,
+            "failurePhase": failed_phase,
+            "minimalReproducerSha256": failed_evidence_sha256,
+            "result": "FAIL_CANDIDATE_SOURCE",
+        }
+    )
+    return result
 
 
 def _current_compatibility_evidence(
@@ -1857,15 +2418,13 @@ def _current_compatibility_evidence(
     stack_root: Path,
     stdout_path: Path,
     stderr_path: Path,
+    authoritative_boot_dump: Path,
+    compatibility_boot_dump: Path,
+    pantry_db: Path,
     started_at: str,
     ended_at: str,
     exit_code: int,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    reference_evidence_path, reference_result_path = _reference_compatibility_paths(
-        haskell_root
-    )
-    reference_evidence = strict_json_load(reference_evidence_path)
-    reference_result = strict_json_load(reference_result_path)
     standard_output = _absolute_regular(
         stdout_path,
         label="CURRENT_COMPATIBILITY_STDOUT",
@@ -1876,17 +2435,18 @@ def _current_compatibility_evidence(
     )
     if exit_code != 1:
         raise WorkflowError("CURRENT_COMPATIBILITY_EXIT_NOT_FROZEN_FAILURE")
-    stderr_text = standard_error.read_text(encoding="utf-8")
-    required_failure_tokens = (
-        "Error: [S-4804]",
-        "Stack failed to construct a build plan.",
-        "directory-1.3.11.0@sha256:"
-        "2346c4f0af05c4ed55e77543e94b26f1b82523efd24da986bdd48a8f8a84c5a0,3113",
-        "process-1.6.30.0@sha256:"
-        "b74eed77eb3237c4ab6a39f08bcce4712b4486b091712ee20e92c8864f1e80a0,3754",
+    authoritative_boot = _absolute_regular(
+        authoritative_boot_dump,
+        label="CURRENT_AUTHORITATIVE_BOOT_DUMP",
     )
-    if any(token not in stderr_text for token in required_failure_tokens):
-        raise WorkflowError("CURRENT_COMPATIBILITY_FAILURE_LEAF_DRIFT")
+    compatibility_boot = _absolute_regular(
+        compatibility_boot_dump,
+        label="CURRENT_COMPATIBILITY_BOOT_DUMP",
+    )
+    current_pantry_db = _absolute_regular(
+        pantry_db,
+        label="CURRENT_COMPATIBILITY_PANTRY_DB",
+    )
     _require_iso_utc(started_at, label="compatibility-started")
     _require_iso_utc(ended_at, label="compatibility-ended")
     numeric_root = haskell_root.parent
@@ -1911,6 +2471,22 @@ def _current_compatibility_evidence(
             "--no-run-benchmarks",
         ],
     )
+    compatibility_helper = _load_compatibility_evidence(haskell_root)
+    try:
+        current_plan = compatibility_helper.build_current_failure_proof(
+            haskell_root=haskell_root,
+            stack_yaml=stack_yaml,
+            authoritative_boot_dump=authoritative_boot,
+            compatibility_boot_dump=compatibility_boot,
+            pantry_db=current_pantry_db,
+            stderr_path=standard_error,
+        )
+    except (
+        compatibility_helper.CompatibilityEvidenceError,
+        compatibility_helper.sqlite3.DatabaseError,
+    ) as exc:
+        raise WorkflowError(f"CURRENT_COMPATIBILITY_PROOF_INVALID:{exc}") from exc
+    lock_hashes = current_compatibility_lock_hashes(haskell_root)
     current_evidence = {
         "schemaVersion": CURRENT_COMPATIBILITY_EVIDENCE_VERSION,
         "status": "PASS",
@@ -1919,12 +2495,8 @@ def _current_compatibility_evidence(
         "performanceInput": False,
         "candidateSourceCommit": candidate_commit,
         "candidateSourceTreeSha256": source_tree_sha256,
-        "referenceFailureEvidenceSha256": sha256_file(reference_evidence_path),
-        "referenceResultSha256": sha256_file(reference_result_path),
         "stackYamlSha256": sha256_file(stack_yaml),
-        "authoritativeStackLockSha256": sha256_file(
-            haskell_root / "stack.yaml.lock"
-        ),
+        **lock_hashes,
         "compatibilityPolicySha256": sha256_file(
             numeric_root / "contract/ghc-compatibility-policy.v1.json"
         ),
@@ -1937,9 +2509,15 @@ def _current_compatibility_evidence(
             "stdoutSha256": sha256_file(standard_output),
             "stderrSha256": sha256_file(standard_error),
         },
-        "failureLeaf": reference_evidence["failureLeaf"],
-        "requiredFailureTokens": list(required_failure_tokens),
+        "currentPlan": current_plan,
+        "failureLeaf": current_plan["failureLeaf"],
         "rawEvidence": {
+            "authoritativeBootDumpPath": str(authoritative_boot),
+            "authoritativeBootDumpSha256": sha256_file(authoritative_boot),
+            "compatibilityBootDumpPath": str(compatibility_boot),
+            "compatibilityBootDumpSha256": sha256_file(compatibility_boot),
+            "pantryDbPath": str(current_pantry_db),
+            "pantryDbSha256": sha256_file(current_pantry_db),
             "stdoutPath": str(standard_output),
             "stdoutSha256": sha256_file(standard_output),
             "stdoutSize": standard_output.stat().st_size,
@@ -1951,37 +2529,699 @@ def _current_compatibility_evidence(
     current_evidence_sha256 = hashlib.sha256(
         canonical_json_bytes(current_evidence, trailing_newline=True)
     ).hexdigest()
-    result = json.loads(json.dumps(reference_result))
-    result["candidateSourceTreeSha256"] = source_tree_sha256
-    result["commands"] = [
-        {
-            "argv": reference_result["commands"][0]["argv"],
-            "cwdId": "HASKELL_COMPAT_ROOT",
-            "endedAt": ended_at,
-            "exitCode": 1,
-            "phase": "dependency",
-            "startedAt": started_at,
-            "stderrSha256": sha256_file(standard_error),
-            "stdoutSha256": sha256_file(standard_output),
-        }
-    ]
-    result["dependencyQualification"] = {
-        "evidenceSha256": current_evidence_sha256,
-        "status": "FAIL",
-    }
-    result["minimalReproducerSha256"] = current_evidence_sha256
-    result["compatibilityStackYamlSha256"] = sha256_file(stack_yaml)
-    result["authoritativeStackLockSha256"] = sha256_file(
-        haskell_root / "stack.yaml.lock"
+    command_record = _portable_compatibility_command_record(
+        command=command,
+        ghcup=ghcup,
+        stack=stack,
+        stack_yaml=stack_yaml,
+        stack_root=stack_root,
+        started_at=started_at,
+        ended_at=ended_at,
+        exit_code=exit_code,
+        stdout_sha256=sha256_file(standard_output),
+        stderr_sha256=sha256_file(standard_error),
+        phase="dependency",
     )
-    result["compatibilityStackLockSha256"] = result[
-        "authoritativeStackLockSha256"
-    ]
+    result = _build_current_compatibility_failure_result(
+        candidate_source_tree_sha256=source_tree_sha256,
+        command_record=command_record,
+        current_plan=current_plan,
+        evidence_sha256=current_evidence_sha256,
+        haskell_root=haskell_root,
+    )
     validate_current_compatibility_status(
         result,
         expected_source_tree_sha256=source_tree_sha256,
     )
     return current_evidence, result
+
+
+def _write_compatibility_phase_evidence(
+    *,
+    output: Path,
+    phase: str,
+    status: str,
+    records: Sequence[Mapping[str, Any]],
+    artifacts: Mapping[str, Any],
+    mismatch_count: int,
+) -> tuple[Path, str]:
+    if (
+        phase not in COMPATIBILITY_REPLAY_PHASES
+        or status not in {"PASS", "FAIL"}
+        or type(mismatch_count) is not int
+        or mismatch_count < 0
+    ):
+        raise WorkflowError("COMPATIBILITY_PHASE_EVIDENCE_INPUT_INVALID")
+    document = {
+        "schemaVersion": "s1.4x-ghc-current-phase-evidence-v1",
+        "phase": phase,
+        "status": status,
+        "mismatchCount": mismatch_count,
+        "commands": [dict(record) for record in records],
+        "artifacts": dict(artifacts),
+    }
+    path = output / f"phase-{phase}.v1.json"
+    atomic_write_json_exclusive(path, document)
+    return path, sha256_file(path)
+
+
+def _portable_solve_record(
+    *,
+    command: Sequence[str],
+    ghcup: Path,
+    stack: Path,
+    stack_yaml: Path,
+    stack_root: Path,
+    started_at: str,
+    ended_at: str,
+    stdout_path: Path,
+    stderr_path: Path,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    actual = {
+        "phase": "dependency",
+        "logId": "dependency",
+        "argv": list(command),
+        "argvSha256": canonical_sha256(list(command)),
+        "startedAt": started_at,
+        "endedAt": ended_at,
+        "exitCode": 0,
+        "stdoutPath": str(stdout_path),
+        "stdoutSha256": sha256_file(stdout_path),
+        "stderrPath": str(stderr_path),
+        "stderrSha256": sha256_file(stderr_path),
+    }
+    portable = _portable_compatibility_command_record(
+        command=command,
+        ghcup=ghcup,
+        stack=stack,
+        stack_yaml=stack_yaml,
+        stack_root=stack_root,
+        started_at=started_at,
+        ended_at=ended_at,
+        exit_code=0,
+        stdout_sha256=actual["stdoutSha256"],
+        stderr_sha256=actual["stderrSha256"],
+        phase="dependency",
+    )
+    return actual, portable
+
+
+def _publish_current_compatibility_replay(
+    *,
+    output: Path,
+    result: Mapping[str, Any],
+    current_plan: Mapping[str, Any],
+    source_tree_sha256: str,
+    candidate_commit: str,
+    phase_evidence: Mapping[str, Mapping[str, Any]],
+    raw_inputs: Mapping[str, str],
+) -> None:
+    classification = str(result["result"])
+    companion = {
+        "schemaVersion": CURRENT_COMPATIBILITY_PASS_EVIDENCE_VERSION,
+        "status": "PASS" if classification == "PASS" else "FAIL",
+        "classification": classification,
+        "nonScoring": True,
+        "performanceInput": False,
+        "candidateSourceCommit": candidate_commit,
+        "candidateSourceTreeSha256": source_tree_sha256,
+        "currentPlan": dict(current_plan),
+        "rawInputs": dict(raw_inputs),
+        "phaseEvidence": {
+            phase: dict(evidence)
+            for phase, evidence in phase_evidence.items()
+        },
+    }
+    companion_path = output / (
+        "compatibility-pass.v1.json"
+        if classification == "PASS"
+        else "compatibility-candidate-failure.v1.json"
+    )
+    result_path = output / "ghc-9.14.1-compatibility.v1.json"
+    atomic_write_json_exclusive(companion_path, companion)
+    atomic_write_json_exclusive(result_path, dict(result))
+    print(
+        json.dumps(
+            {
+                "classification": classification,
+                "evidencePath": str(companion_path),
+                "evidenceSha256": sha256_file(companion_path),
+                "resultSha256": sha256_file(result_path),
+                "status": "PASS",
+            },
+            sort_keys=True,
+        )
+    )
+
+
+def _verify_cross_replay(arguments: argparse.Namespace) -> None:
+    canonical = _comparison_status(
+        _absolute_regular(
+            arguments.canonical_comparison,
+            label="CROSS_CANONICAL_COMPARISON",
+        )
+    )
+    semantic = _comparison_status(
+        _absolute_regular(
+            arguments.semantic_comparison,
+            label="CROSS_SEMANTIC_COMPARISON",
+        )
+    )
+    document = {
+        "schemaVersion": "s1.4x-ghc-current-cross-replay-v1",
+        "canonicalComparisonSha256": sha256_file(
+            arguments.canonical_comparison
+        ),
+        "semanticComparisonSha256": sha256_file(
+            arguments.semantic_comparison
+        ),
+        "mismatchCount": canonical["mismatchCount"]
+        + semantic["mismatchCount"],
+        "status": "PASS",
+    }
+    if document["mismatchCount"] != 0:
+        raise WorkflowError("COMPATIBILITY_CROSS_REPLAY_MISMATCH")
+    atomic_write_json_exclusive(arguments.output, document)
+    print(json.dumps({"status": "PASS"}, sort_keys=True))
+
+
+def _replay_compatibility_success(arguments: argparse.Namespace) -> None:
+    output = _absolute_existing_directory(
+        arguments.output_dir,
+        label="COMPATIBILITY_OUTPUT",
+    )
+    initial_paths = {
+        arguments.stdout.resolve(strict=True),
+        arguments.stderr.resolve(strict=True),
+        arguments.authoritative_boot_dump.resolve(strict=True),
+        arguments.compatibility_boot_dump.resolve(strict=True),
+    }
+    if {path.resolve(strict=True) for path in output.iterdir()} != initial_paths:
+        raise WorkflowError("COMPATIBILITY_SUCCESS_OUTPUT_NOT_PRISTINE")
+    haskell_root = Path(__file__).resolve(strict=True).parent.parent
+    numeric_root = haskell_root.parent
+    repo_root = numeric_root.parents[3]
+    stack_yaml = _absolute_regular(
+        arguments.stack_yaml,
+        label="COMPATIBILITY_STACK_YAML",
+    )
+    expected_yaml = (haskell_root / "stack-ghc-9.14.1.yaml").resolve(strict=True)
+    if stack_yaml != expected_yaml or arguments.exit_code != 0:
+        raise WorkflowError("COMPATIBILITY_SUCCESS_SOLVE_INVALID")
+    stack_root = _absolute_existing_directory(
+        arguments.stack_root,
+        label="COMPATIBILITY_STACK_ROOT",
+    )
+    standard_output = _absolute_regular(
+        arguments.stdout,
+        label="COMPATIBILITY_SOLVE_STDOUT",
+    )
+    standard_error = _absolute_regular(
+        arguments.stderr,
+        label="COMPATIBILITY_SOLVE_STDERR",
+    )
+    authoritative_boot_dump = _absolute_regular(
+        arguments.authoritative_boot_dump,
+        label="CURRENT_AUTHORITATIVE_BOOT_DUMP",
+    )
+    compatibility_boot_dump = _absolute_regular(
+        arguments.compatibility_boot_dump,
+        label="CURRENT_COMPATIBILITY_BOOT_DUMP",
+    )
+    pantry_db = _absolute_regular(
+        arguments.pantry_db,
+        label="CURRENT_COMPATIBILITY_PANTRY_DB",
+    )
+    _require_iso_utc(arguments.started_at, label="compatibility-started")
+    _require_iso_utc(arguments.ended_at, label="compatibility-ended")
+    candidate_commit = _repo_commit(repo_root)
+    haskell_evidence = _load_haskell_evidence(haskell_root)
+    source_tree_sha256 = haskell_evidence.benchmark_source_tree_sha256(
+        haskell_root
+    )
+    compatibility_helper = _load_compatibility_evidence(haskell_root)
+    try:
+        current_plan = compatibility_helper.build_current_plan_proof(
+            haskell_root=haskell_root,
+            stack_yaml=stack_yaml,
+            authoritative_boot_dump=authoritative_boot_dump,
+            compatibility_boot_dump=compatibility_boot_dump,
+            pantry_db=pantry_db,
+        )
+    except (
+        compatibility_helper.CompatibilityEvidenceError,
+        compatibility_helper.sqlite3.DatabaseError,
+    ) as exc:
+        raise WorkflowError(f"CURRENT_COMPATIBILITY_PLAN_INVALID:{exc}") from exc
+    ghcup = _required_environment_path("S1_4X_GHCUP_BIN")
+    stack = _required_environment_path("S1_4X_STACK_BIN")
+    compatibility_ghc = _required_environment_path("S1_4X_LATEST_GHC_BIN")
+    environment = _sealed_child_environment(
+        ghc_bin=compatibility_ghc,
+        stack_bin=stack,
+    )
+    solve_command = build_stack_command(
+        ghcup=ghcup,
+        stack=stack,
+        stack_yaml=stack_yaml,
+        stack_root=stack_root,
+        ghc_version="9.14.1",
+        operation=[
+            "build",
+            "--dry-run",
+            "--test",
+            "--bench",
+            "--no-run-tests",
+            "--no-run-benchmarks",
+        ],
+    )
+    solve_actual, solve_portable = _portable_solve_record(
+        command=solve_command,
+        ghcup=ghcup,
+        stack=stack,
+        stack_yaml=stack_yaml,
+        stack_root=stack_root,
+        started_at=arguments.started_at,
+        ended_at=arguments.ended_at,
+        stdout_path=standard_output,
+        stderr_path=standard_error,
+    )
+    _, dependency_sha256 = _write_compatibility_phase_evidence(
+        output=output,
+        phase="dependency",
+        status="PASS",
+        records=[solve_actual],
+        artifacts={
+            "currentPlanSha256": canonical_sha256(current_plan),
+            "pantryDbSha256": sha256_file(pantry_db),
+        },
+        mismatch_count=0,
+    )
+    phase_evidence: dict[str, dict[str, Any]] = {
+        "dependency": {
+            "path": str(output / "phase-dependency.v1.json"),
+            "sha256": dependency_sha256,
+            "status": "PASS",
+            "mismatchCount": 0,
+        }
+    }
+    actual_records: list[dict[str, Any]] = [solve_actual]
+    portable_records: list[dict[str, Any]] = [solve_portable]
+    phase_sha256: dict[str, str] = {"dependency": dependency_sha256}
+    raw_inputs = {
+        "stackYamlPath": str(stack_yaml),
+        "stackRootPath": str(stack_root),
+        "authoritativeBootDumpPath": str(authoritative_boot_dump),
+        "compatibilityBootDumpPath": str(compatibility_boot_dump),
+        "pantryDbPath": str(pantry_db),
+        "solveStdoutPath": str(standard_output),
+        "solveStderrPath": str(standard_error),
+    }
+
+    def publish_failed(
+        phase: str,
+        records: Sequence[Mapping[str, Any]],
+        artifacts: Mapping[str, Any],
+    ) -> None:
+        path, digest = _write_compatibility_phase_evidence(
+            output=output,
+            phase=phase,
+            status="FAIL",
+            records=records,
+            artifacts=artifacts,
+            mismatch_count=1,
+        )
+        phase_evidence[phase] = {
+            "path": str(path),
+            "sha256": digest,
+            "status": "FAIL",
+            "mismatchCount": 1,
+        }
+        result = _build_current_compatibility_phase_failure_result(
+            candidate_source_tree_sha256=source_tree_sha256,
+            command_records=portable_records,
+            current_plan=current_plan,
+            phase_evidence_sha256=phase_sha256,
+            failed_phase=phase,
+            failed_evidence_sha256=digest,
+            haskell_root=haskell_root,
+        )
+        _publish_current_compatibility_replay(
+            output=output,
+            result=result,
+            current_plan=current_plan,
+            source_tree_sha256=source_tree_sha256,
+            candidate_commit=candidate_commit,
+            phase_evidence=phase_evidence,
+            raw_inputs=raw_inputs,
+        )
+
+    def run_phase_command(
+        *,
+        phase: str,
+        log_id: str,
+        command: Sequence[str],
+        cwd: Path,
+    ) -> dict[str, Any]:
+        record = _run_compatibility_logged(
+            command,
+            cwd=cwd,
+            environment=environment,
+            phase=phase,
+            log_id=log_id,
+            output_directory=output,
+        )
+        actual_records.append(record)
+        portable_records.extend(
+            _portable_compatibility_replay_records(
+                [record],
+                haskell_root=haskell_root,
+                numeric_root=numeric_root,
+                output=output,
+                stack_root=stack_root,
+                ghcup=ghcup,
+                stack=stack,
+            )
+        )
+        return record
+
+    compile_command = build_stack_command(
+        ghcup=ghcup,
+        stack=stack,
+        stack_yaml=stack_yaml,
+        stack_root=stack_root,
+        ghc_version="9.14.1",
+        operation=[
+            "build",
+            "--test",
+            "--bench",
+            "--no-run-tests",
+            "--no-run-benchmarks",
+            "--pedantic",
+        ],
+    )
+    compile_record = run_phase_command(
+        phase="candidateCompile",
+        log_id="candidate-compile",
+        command=compile_command,
+        cwd=haskell_root,
+    )
+    if compile_record["exitCode"] != 0:
+        publish_failed("candidateCompile", [compile_record], {})
+        return
+    candidate_binary = _find_candidate_binary(
+        haskell_root,
+        ghc_version="9.14.1",
+    )
+    compile_path, compile_sha256 = _write_compatibility_phase_evidence(
+        output=output,
+        phase="candidateCompile",
+        status="PASS",
+        records=[compile_record],
+        artifacts={
+            "candidateBinaryPath": str(candidate_binary),
+            "candidateBinarySha256": sha256_file(candidate_binary),
+        },
+        mismatch_count=0,
+    )
+    phase_sha256["candidateCompile"] = compile_sha256
+    phase_evidence["candidateCompile"] = {
+        "path": str(compile_path),
+        "sha256": compile_sha256,
+        "status": "PASS",
+        "mismatchCount": 0,
+    }
+
+    correctness_command = build_stack_command(
+        ghcup=ghcup,
+        stack=stack,
+        stack_yaml=stack_yaml,
+        stack_root=stack_root,
+        ghc_version="9.14.1",
+        operation=["test", "--pedantic"],
+    )
+    correctness_record = run_phase_command(
+        phase="fullCorrectness",
+        log_id="full-correctness",
+        command=correctness_command,
+        cwd=haskell_root,
+    )
+    if correctness_record["exitCode"] != 0:
+        publish_failed("fullCorrectness", [correctness_record], {})
+        return
+    correctness_path, correctness_sha256 = _write_compatibility_phase_evidence(
+        output=output,
+        phase="fullCorrectness",
+        status="PASS",
+        records=[correctness_record],
+        artifacts={"candidateBinarySha256": sha256_file(candidate_binary)},
+        mismatch_count=0,
+    )
+    phase_sha256["fullCorrectness"] = correctness_sha256
+    phase_evidence["fullCorrectness"] = {
+        "path": str(correctness_path),
+        "sha256": correctness_sha256,
+        "status": "PASS",
+        "mismatchCount": 0,
+    }
+    fixture_root = _absolute_existing_directory(
+        numeric_root / "contract/fixtures",
+        label="FIXTURE_ROOT",
+    )
+    compare_script = _absolute_regular(
+        numeric_root / "oracle/compare_results.py",
+        label="COMPARE_RESULTS",
+    )
+    python_bin = _absolute_regular(
+        Path("/usr/bin/python3").resolve(strict=True),
+        label="PYTHON",
+        executable=True,
+    )
+
+    semantic_request = _absolute_regular(
+        fixture_root / "invalid/semantic-errors.v1.json",
+        label="SEMANTIC_REQUEST",
+    )
+    semantic_expected = _absolute_regular(
+        fixture_root / "invalid/semantic-errors.expected.v1.json",
+        label="SEMANTIC_EXPECTED",
+    )
+    semantic_actual = output / "semantic.actual.json"
+    semantic_comparison = output / "semantic.comparison.json"
+    semantic_process_command = [
+        str(candidate_binary),
+        "--request",
+        str(semantic_request),
+        "--fixture-root",
+        str(fixture_root),
+        "--output",
+        str(semantic_actual),
+    ]
+    semantic_process = run_phase_command(
+        phase="stableErrorReplay",
+        log_id="stable-error-process",
+        command=semantic_process_command,
+        cwd=haskell_root,
+    )
+    if semantic_process["exitCode"] != 0:
+        publish_failed("stableErrorReplay", [semantic_process], {})
+        return
+    semantic_compare_command = [
+        str(python_bin),
+        str(compare_script),
+        "--expected",
+        str(semantic_expected),
+        "--actual",
+        str(semantic_actual),
+        "--request",
+        str(semantic_request),
+        "--output",
+        str(semantic_comparison),
+    ]
+    semantic_compare = run_phase_command(
+        phase="stableErrorReplay",
+        log_id="stable-error-compare",
+        command=semantic_compare_command,
+        cwd=repo_root,
+    )
+    if semantic_compare["exitCode"] != 0:
+        publish_failed(
+            "stableErrorReplay",
+            [semantic_process, semantic_compare],
+            {"actualSha256": sha256_file(semantic_actual)},
+        )
+        return
+    _comparison_status(semantic_comparison)
+    stable_path, stable_sha256 = _write_compatibility_phase_evidence(
+        output=output,
+        phase="stableErrorReplay",
+        status="PASS",
+        records=[semantic_process, semantic_compare],
+        artifacts={
+            "actualSha256": sha256_file(semantic_actual),
+            "comparisonSha256": sha256_file(semantic_comparison),
+        },
+        mismatch_count=0,
+    )
+    phase_sha256["stableErrorReplay"] = stable_sha256
+    phase_evidence["stableErrorReplay"] = {
+        "path": str(stable_path),
+        "sha256": stable_sha256,
+        "status": "PASS",
+        "mismatchCount": 0,
+    }
+
+    canonical_request = _absolute_regular(
+        fixture_root / "small/canonical-inputs.v1.json",
+        label="CANONICAL_REQUEST",
+    )
+    canonical_expected = _absolute_regular(
+        fixture_root / "expected/canonical-results.v1.json",
+        label="CANONICAL_EXPECTED",
+    )
+    canonical_actual = output / "canonical.actual.json"
+    canonical_comparison = output / "canonical.comparison.json"
+    process_command = [
+        str(candidate_binary),
+        "--request",
+        str(canonical_request),
+        "--fixture-root",
+        str(fixture_root),
+        "--output",
+        str(canonical_actual),
+    ]
+    process_record = run_phase_command(
+        phase="processReplay",
+        log_id="process-replay",
+        command=process_command,
+        cwd=haskell_root,
+    )
+    if process_record["exitCode"] != 0:
+        publish_failed("processReplay", [process_record], {})
+        return
+    process_path, process_sha256 = _write_compatibility_phase_evidence(
+        output=output,
+        phase="processReplay",
+        status="PASS",
+        records=[process_record],
+        artifacts={"actualSha256": sha256_file(canonical_actual)},
+        mismatch_count=0,
+    )
+    phase_sha256["processReplay"] = process_sha256
+    phase_evidence["processReplay"] = {
+        "path": str(process_path),
+        "sha256": process_sha256,
+        "status": "PASS",
+        "mismatchCount": 0,
+    }
+    oracle_command = [
+        str(python_bin),
+        str(compare_script),
+        "--expected",
+        str(canonical_expected),
+        "--actual",
+        str(canonical_actual),
+        "--request",
+        str(canonical_request),
+        "--output",
+        str(canonical_comparison),
+    ]
+    oracle_record = run_phase_command(
+        phase="oracleReplay",
+        log_id="oracle-replay",
+        command=oracle_command,
+        cwd=repo_root,
+    )
+    if oracle_record["exitCode"] != 0:
+        publish_failed("oracleReplay", [oracle_record], {})
+        return
+    _comparison_status(canonical_comparison)
+    oracle_path, oracle_sha256 = _write_compatibility_phase_evidence(
+        output=output,
+        phase="oracleReplay",
+        status="PASS",
+        records=[oracle_record],
+        artifacts={"comparisonSha256": sha256_file(canonical_comparison)},
+        mismatch_count=0,
+    )
+    phase_sha256["oracleReplay"] = oracle_sha256
+    phase_evidence["oracleReplay"] = {
+        "path": str(oracle_path),
+        "sha256": oracle_sha256,
+        "status": "PASS",
+        "mismatchCount": 0,
+    }
+    cross_artifact = output / "cross-replay.v1.json"
+    cross_command = [
+        str(python_bin),
+        str(Path(__file__).resolve(strict=True)),
+        "verify-cross-replay",
+        "--canonical-comparison",
+        str(canonical_comparison),
+        "--semantic-comparison",
+        str(semantic_comparison),
+        "--output",
+        str(cross_artifact),
+    ]
+    cross_record = run_phase_command(
+        phase="crossReplay",
+        log_id="cross-replay",
+        command=cross_command,
+        cwd=repo_root,
+    )
+    if cross_record["exitCode"] != 0:
+        publish_failed("crossReplay", [cross_record], {})
+        return
+    cross_document = strict_json_load(
+        _absolute_regular(cross_artifact, label="CROSS_REPLAY_ARTIFACT")
+    )
+    if (
+        not isinstance(cross_document, dict)
+        or cross_document.get("status") != "PASS"
+        or cross_document.get("mismatchCount") != 0
+    ):
+        raise WorkflowError("COMPATIBILITY_CROSS_REPLAY_INVALID")
+    cross_path, cross_sha256 = _write_compatibility_phase_evidence(
+        output=output,
+        phase="crossReplay",
+        status="PASS",
+        records=[cross_record],
+        artifacts={"crossReplaySha256": sha256_file(cross_artifact)},
+        mismatch_count=0,
+    )
+    phase_sha256["crossReplay"] = cross_sha256
+    phase_evidence["crossReplay"] = {
+        "path": str(cross_path),
+        "sha256": cross_sha256,
+        "status": "PASS",
+        "mismatchCount": 0,
+    }
+    if (
+        haskell_evidence.benchmark_source_tree_sha256(haskell_root)
+        != source_tree_sha256
+        or _repo_commit(repo_root) != candidate_commit
+    ):
+        raise WorkflowError("COMPATIBILITY_SOURCE_CHANGED_DURING_REPLAY")
+    result = build_current_compatibility_pass_result(
+        candidate_source_tree_sha256=source_tree_sha256,
+        command_records=portable_records,
+        phase_evidence_sha256=phase_sha256,
+        current_plan=current_plan,
+        haskell_root=haskell_root,
+    )
+    validate_current_compatibility_status(
+        result,
+        expected_source_tree_sha256=source_tree_sha256,
+    )
+    _publish_current_compatibility_replay(
+        output=output,
+        result=result,
+        current_plan=current_plan,
+        source_tree_sha256=source_tree_sha256,
+        candidate_commit=candidate_commit,
+        phase_evidence=phase_evidence,
+        raw_inputs=raw_inputs,
+    )
 
 
 def _capture_compatibility_failure(arguments: argparse.Namespace) -> None:
@@ -1993,6 +3233,8 @@ def _capture_compatibility_failure(arguments: argparse.Namespace) -> None:
         allowed = {
             arguments.stdout.resolve(strict=True),
             arguments.stderr.resolve(strict=True),
+            arguments.authoritative_boot_dump.resolve(strict=True),
+            arguments.compatibility_boot_dump.resolve(strict=True),
         }
         actual = {path.resolve(strict=True) for path in output.iterdir()}
         if actual != allowed:
@@ -2015,6 +3257,9 @@ def _capture_compatibility_failure(arguments: argparse.Namespace) -> None:
         stack_root=stack_root,
         stdout_path=arguments.stdout,
         stderr_path=arguments.stderr,
+        authoritative_boot_dump=arguments.authoritative_boot_dump,
+        compatibility_boot_dump=arguments.compatibility_boot_dump,
+        pantry_db=arguments.pantry_db,
         started_at=arguments.started_at,
         ended_at=arguments.ended_at,
         exit_code=arguments.exit_code,
@@ -2041,13 +3286,288 @@ def _validate_compatibility(arguments: argparse.Namespace) -> None:
         arguments.result,
         label="CURRENT_COMPATIBILITY_RESULT",
     )
-    evidence_path = result_path.with_name("compatibility-failure.v1.json")
+    result = strict_json_load(result_path)
+    if not isinstance(result, dict):
+        raise WorkflowError("CURRENT_COMPATIBILITY_RESULT_INVALID")
+    classification = result.get("result")
+    evidence_name = {
+        "FAIL_FROZEN_DEPENDENCY": "compatibility-failure.v1.json",
+        "PASS": "compatibility-pass.v1.json",
+        "FAIL_CANDIDATE_SOURCE": "compatibility-candidate-failure.v1.json",
+    }.get(classification)
+    if evidence_name is None:
+        raise WorkflowError("CURRENT_COMPATIBILITY_CLASSIFICATION_INVALID")
+    evidence_path = result_path.with_name(evidence_name)
     evidence = strict_json_load(
         _absolute_regular(
             evidence_path,
             label="CURRENT_COMPATIBILITY_EVIDENCE",
         )
     )
+    haskell_root = Path(__file__).resolve(strict=True).parent.parent
+    numeric_root = haskell_root.parent
+    repo_root = numeric_root.parents[3]
+    stack_yaml = _absolute_regular(
+        haskell_root / "stack-ghc-9.14.1.yaml",
+        label="COMPATIBILITY_STACK_YAML",
+    )
+    if classification != "FAIL_FROZEN_DEPENDENCY":
+        expected_fields = {
+            "schemaVersion",
+            "status",
+            "classification",
+            "nonScoring",
+            "performanceInput",
+            "candidateSourceCommit",
+            "candidateSourceTreeSha256",
+            "currentPlan",
+            "rawInputs",
+            "phaseEvidence",
+        }
+        if (
+            not isinstance(evidence, dict)
+            or set(evidence) != expected_fields
+            or evidence.get("schemaVersion")
+            != CURRENT_COMPATIBILITY_PASS_EVIDENCE_VERSION
+            or evidence.get("classification") != classification
+            or evidence.get("status")
+            != ("PASS" if classification == "PASS" else "FAIL")
+            or evidence.get("nonScoring") is not True
+            or evidence.get("performanceInput") is not False
+        ):
+            raise WorkflowError("CURRENT_COMPATIBILITY_REPLAY_EVIDENCE_INVALID")
+        raw_inputs = evidence.get("rawInputs")
+        phase_evidence = evidence.get("phaseEvidence")
+        if not isinstance(raw_inputs, dict) or not isinstance(
+            phase_evidence,
+            dict,
+        ):
+            raise WorkflowError("CURRENT_COMPATIBILITY_REPLAY_INPUT_INVALID")
+        stack_root = _absolute_existing_directory(
+            Path(raw_inputs.get("stackRootPath", "")),
+            label="COMPATIBILITY_STACK_ROOT",
+        )
+        if _absolute_regular(
+            Path(raw_inputs.get("stackYamlPath", "")),
+            label="COMPATIBILITY_STACK_YAML",
+        ) != stack_yaml:
+            raise WorkflowError("COMPATIBILITY_STACK_YAML_NOT_FROZEN")
+        authoritative_boot_dump = _absolute_regular(
+            Path(raw_inputs.get("authoritativeBootDumpPath", "")),
+            label="CURRENT_AUTHORITATIVE_BOOT_DUMP",
+        )
+        compatibility_boot_dump = _absolute_regular(
+            Path(raw_inputs.get("compatibilityBootDumpPath", "")),
+            label="CURRENT_COMPATIBILITY_BOOT_DUMP",
+        )
+        pantry_db = _absolute_regular(
+            Path(raw_inputs.get("pantryDbPath", "")),
+            label="CURRENT_COMPATIBILITY_PANTRY_DB",
+        )
+        compatibility_helper = _load_compatibility_evidence(haskell_root)
+        try:
+            current_plan = compatibility_helper.build_current_plan_proof(
+                haskell_root=haskell_root,
+                stack_yaml=stack_yaml,
+                authoritative_boot_dump=authoritative_boot_dump,
+                compatibility_boot_dump=compatibility_boot_dump,
+                pantry_db=pantry_db,
+            )
+        except (
+            compatibility_helper.CompatibilityEvidenceError,
+            compatibility_helper.sqlite3.DatabaseError,
+        ) as exc:
+            raise WorkflowError(
+                f"CURRENT_COMPATIBILITY_PLAN_INVALID:{exc}"
+            ) from exc
+        if current_plan != evidence.get("currentPlan"):
+            raise WorkflowError("CURRENT_COMPATIBILITY_PLAN_DRIFT")
+        expected_phase_order = list(COMPATIBILITY_REPLAY_PHASES)
+        if classification == "FAIL_CANDIDATE_SOURCE":
+            failed_phase = result.get("failurePhase")
+            if failed_phase not in expected_phase_order[1:]:
+                raise WorkflowError("CURRENT_COMPATIBILITY_FAILURE_PHASE_INVALID")
+            expected_phase_order = expected_phase_order[
+                : expected_phase_order.index(failed_phase) + 1
+            ]
+        if set(phase_evidence) != set(expected_phase_order):
+            raise WorkflowError("CURRENT_COMPATIBILITY_PHASE_SET_DRIFT")
+        actual_records: list[dict[str, Any]] = []
+        phase_sha256: dict[str, str] = {}
+        for phase in expected_phase_order:
+            binding = phase_evidence[phase]
+            if (
+                not isinstance(binding, dict)
+                or set(binding)
+                != {"path", "sha256", "status", "mismatchCount"}
+            ):
+                raise WorkflowError("CURRENT_COMPATIBILITY_PHASE_BINDING_INVALID")
+            phase_path = _absolute_regular(
+                Path(binding["path"]),
+                label=f"COMPATIBILITY_PHASE_{phase}",
+            )
+            if phase_path.parent != result_path.parent:
+                raise WorkflowError("COMPATIBILITY_PHASE_PATH_ESCAPE")
+            if sha256_file(phase_path) != binding["sha256"]:
+                raise WorkflowError("COMPATIBILITY_PHASE_SHA256_DRIFT")
+            phase_document = strict_json_load(phase_path)
+            if (
+                not isinstance(phase_document, dict)
+                or set(phase_document)
+                != {
+                    "schemaVersion",
+                    "phase",
+                    "status",
+                    "mismatchCount",
+                    "commands",
+                    "artifacts",
+                }
+                or phase_document.get("schemaVersion")
+                != "s1.4x-ghc-current-phase-evidence-v1"
+                or phase_document.get("phase") != phase
+                or phase_document.get("status") != binding["status"]
+                or phase_document.get("mismatchCount")
+                != binding["mismatchCount"]
+                or not isinstance(phase_document.get("commands"), list)
+                or not phase_document["commands"]
+            ):
+                raise WorkflowError("CURRENT_COMPATIBILITY_PHASE_EVIDENCE_INVALID")
+            for record in phase_document["commands"]:
+                if (
+                    not isinstance(record, dict)
+                    or set(record)
+                    != {
+                        "phase",
+                        "logId",
+                        "argv",
+                        "argvSha256",
+                        "startedAt",
+                        "endedAt",
+                        "exitCode",
+                        "stdoutPath",
+                        "stdoutSha256",
+                        "stderrPath",
+                        "stderrSha256",
+                    }
+                    or record.get("phase") != phase
+                    or record.get("argvSha256")
+                    != canonical_sha256(record.get("argv"))
+                ):
+                    raise WorkflowError(
+                        "CURRENT_COMPATIBILITY_COMMAND_RECORD_INVALID"
+                    )
+                _require_iso_utc(
+                    record.get("startedAt"),
+                    label=f"{phase}-started",
+                )
+                _require_iso_utc(
+                    record.get("endedAt"),
+                    label=f"{phase}-ended",
+                )
+                for stream in ("stdout", "stderr"):
+                    stream_path = _absolute_regular(
+                        Path(record[f"{stream}Path"]),
+                        label=f"{phase}-{stream}",
+                    )
+                    if (
+                        stream_path.parent != result_path.parent
+                        or sha256_file(stream_path)
+                        != record[f"{stream}Sha256"]
+                    ):
+                        raise WorkflowError(
+                            "CURRENT_COMPATIBILITY_COMMAND_LOG_DRIFT"
+                        )
+                actual_records.append(record)
+            if binding["status"] == "PASS" and any(
+                record["exitCode"] != 0
+                for record in phase_document["commands"]
+            ):
+                raise WorkflowError("CURRENT_COMPATIBILITY_PASS_EXIT_DRIFT")
+            if binding["status"] == "FAIL" and all(
+                record["exitCode"] == 0
+                for record in phase_document["commands"]
+            ):
+                raise WorkflowError("CURRENT_COMPATIBILITY_FAIL_EXIT_DRIFT")
+            phase_sha256[phase] = binding["sha256"]
+        ghcup = _required_environment_path("S1_4X_GHCUP_BIN")
+        stack = _required_environment_path("S1_4X_STACK_BIN")
+        dependency_record = actual_records[0]
+        dependency_portable = _portable_compatibility_command_record(
+            command=dependency_record["argv"],
+            ghcup=ghcup,
+            stack=stack,
+            stack_yaml=stack_yaml,
+            stack_root=stack_root,
+            started_at=dependency_record["startedAt"],
+            ended_at=dependency_record["endedAt"],
+            exit_code=dependency_record["exitCode"],
+            stdout_sha256=dependency_record["stdoutSha256"],
+            stderr_sha256=dependency_record["stderrSha256"],
+            phase="dependency",
+        )
+        portable_records = [dependency_portable]
+        portable_records.extend(
+            _portable_compatibility_replay_records(
+                actual_records[1:],
+                haskell_root=haskell_root,
+                numeric_root=numeric_root,
+                output=result_path.parent,
+                stack_root=stack_root,
+                ghcup=ghcup,
+                stack=stack,
+            )
+        )
+        source_tree_sha256 = _load_haskell_evidence(
+            haskell_root
+        ).benchmark_source_tree_sha256(haskell_root)
+        if (
+            source_tree_sha256 != evidence["candidateSourceTreeSha256"]
+            or _repo_commit(repo_root) != evidence["candidateSourceCommit"]
+        ):
+            raise WorkflowError("CURRENT_COMPATIBILITY_SUBJECT_DRIFT")
+        if classification == "PASS":
+            rebuilt_result = build_current_compatibility_pass_result(
+                candidate_source_tree_sha256=source_tree_sha256,
+                command_records=portable_records,
+                phase_evidence_sha256=phase_sha256,
+                current_plan=current_plan,
+                haskell_root=haskell_root,
+            )
+        else:
+            failed_phase = result["failurePhase"]
+            rebuilt_result = _build_current_compatibility_phase_failure_result(
+                candidate_source_tree_sha256=source_tree_sha256,
+                command_records=portable_records,
+                current_plan=current_plan,
+                phase_evidence_sha256=phase_sha256,
+                failed_phase=failed_phase,
+                failed_evidence_sha256=phase_sha256[failed_phase],
+                haskell_root=haskell_root,
+            )
+        validate_current_compatibility_status(
+            rebuilt_result,
+            expected_source_tree_sha256=source_tree_sha256,
+        )
+        if (
+            result != rebuilt_result
+            or evidence_path.read_bytes()
+            != canonical_json_bytes(evidence, trailing_newline=True)
+            or result_path.read_bytes()
+            != canonical_json_bytes(result, trailing_newline=True)
+        ):
+            raise WorkflowError("CURRENT_COMPATIBILITY_PACKET_DRIFT")
+        print(
+            json.dumps(
+                {
+                    "classification": classification,
+                    "evidenceSha256": sha256_file(evidence_path),
+                    "resultSha256": sha256_file(result_path),
+                    "status": "PASS",
+                },
+                sort_keys=True,
+            )
+        )
+        return
     if (
         not isinstance(evidence, dict)
         or evidence.get("schemaVersion")
@@ -2058,11 +3578,6 @@ def _validate_compatibility(arguments: argparse.Namespace) -> None:
         or evidence.get("performanceInput") is not False
     ):
         raise WorkflowError("CURRENT_COMPATIBILITY_EVIDENCE_INVALID")
-    haskell_root = Path(__file__).resolve(strict=True).parent.parent
-    stack_yaml = _absolute_regular(
-        haskell_root / "stack-ghc-9.14.1.yaml",
-        label="COMPATIBILITY_STACK_YAML",
-    )
     command = evidence.get("command")
     raw = evidence.get("rawEvidence")
     if not isinstance(command, dict) or not isinstance(raw, dict):
@@ -2075,6 +3590,18 @@ def _validate_compatibility(arguments: argparse.Namespace) -> None:
         Path(raw.get("stderrPath", "")),
         label="CURRENT_COMPATIBILITY_STDERR",
     )
+    authoritative_boot_dump = _absolute_regular(
+        Path(raw.get("authoritativeBootDumpPath", "")),
+        label="CURRENT_AUTHORITATIVE_BOOT_DUMP",
+    )
+    compatibility_boot_dump = _absolute_regular(
+        Path(raw.get("compatibilityBootDumpPath", "")),
+        label="CURRENT_COMPATIBILITY_BOOT_DUMP",
+    )
+    pantry_db = _absolute_regular(
+        Path(raw.get("pantryDbPath", "")),
+        label="CURRENT_COMPATIBILITY_PANTRY_DB",
+    )
     rebuilt_evidence, rebuilt_result = _current_compatibility_evidence(
         haskell_root=haskell_root,
         stack_yaml=stack_yaml,
@@ -2084,11 +3611,13 @@ def _validate_compatibility(arguments: argparse.Namespace) -> None:
         ),
         stdout_path=stdout_path,
         stderr_path=stderr_path,
+        authoritative_boot_dump=authoritative_boot_dump,
+        compatibility_boot_dump=compatibility_boot_dump,
+        pantry_db=pantry_db,
         started_at=command["startedAt"],
         ended_at=command["endedAt"],
         exit_code=command["exitCode"],
     )
-    result = strict_json_load(result_path)
     if (
         evidence != rebuilt_evidence
         or result != rebuilt_result
@@ -2459,11 +3988,58 @@ def _parser() -> argparse.ArgumentParser:
     capture_compatibility.add_argument("--stack-root", type=Path, required=True)
     capture_compatibility.add_argument("--stdout", type=Path, required=True)
     capture_compatibility.add_argument("--stderr", type=Path, required=True)
+    capture_compatibility.add_argument(
+        "--authoritative-boot-dump",
+        type=Path,
+        required=True,
+    )
+    capture_compatibility.add_argument(
+        "--compatibility-boot-dump",
+        type=Path,
+        required=True,
+    )
+    capture_compatibility.add_argument("--pantry-db", type=Path, required=True)
     capture_compatibility.add_argument("--started-at", required=True)
     capture_compatibility.add_argument("--ended-at", required=True)
     capture_compatibility.add_argument("--exit-code", type=int, required=True)
     capture_compatibility.add_argument("--output-dir", type=Path, required=True)
     capture_compatibility.set_defaults(handler=_capture_compatibility_failure)
+    replay_compatibility = commands.add_parser(
+        "replay-compatibility-success"
+    )
+    replay_compatibility.add_argument("--stack-yaml", type=Path, required=True)
+    replay_compatibility.add_argument("--stack-root", type=Path, required=True)
+    replay_compatibility.add_argument("--stdout", type=Path, required=True)
+    replay_compatibility.add_argument("--stderr", type=Path, required=True)
+    replay_compatibility.add_argument(
+        "--authoritative-boot-dump",
+        type=Path,
+        required=True,
+    )
+    replay_compatibility.add_argument(
+        "--compatibility-boot-dump",
+        type=Path,
+        required=True,
+    )
+    replay_compatibility.add_argument("--pantry-db", type=Path, required=True)
+    replay_compatibility.add_argument("--started-at", required=True)
+    replay_compatibility.add_argument("--ended-at", required=True)
+    replay_compatibility.add_argument("--exit-code", type=int, required=True)
+    replay_compatibility.add_argument("--output-dir", type=Path, required=True)
+    replay_compatibility.set_defaults(handler=_replay_compatibility_success)
+    cross_replay = commands.add_parser("verify-cross-replay")
+    cross_replay.add_argument(
+        "--canonical-comparison",
+        type=Path,
+        required=True,
+    )
+    cross_replay.add_argument(
+        "--semantic-comparison",
+        type=Path,
+        required=True,
+    )
+    cross_replay.add_argument("--output", type=Path, required=True)
+    cross_replay.set_defaults(handler=_verify_cross_replay)
     validate_compatibility = commands.add_parser("validate-compatibility")
     validate_compatibility.add_argument("--result", type=Path, required=True)
     validate_compatibility.set_defaults(handler=_validate_compatibility)

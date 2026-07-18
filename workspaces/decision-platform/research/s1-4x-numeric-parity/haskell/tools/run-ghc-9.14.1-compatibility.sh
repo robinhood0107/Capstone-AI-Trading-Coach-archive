@@ -50,6 +50,15 @@ STACK_ROOT_PATH="$S1_4X_CACHE_ROOT/stack-root-ghc914-current"
 }
 mkdir -m 700 "$OUTPUT_DIRECTORY" "$STACK_ROOT_PATH"
 
+AUTHORITATIVE_BOOT_DUMP="$OUTPUT_DIRECTORY/authoritative-boot.dump"
+COMPATIBILITY_BOOT_DUMP="$OUTPUT_DIRECTORY/compatibility-boot.dump"
+"$S1_4X_GHCUP_BIN" --offline run --quick \
+  --ghc 9.10.3 --stack 3.11.1 -- \
+  ghc-pkg dump >"$AUTHORITATIVE_BOOT_DUMP"
+"$S1_4X_GHCUP_BIN" --offline run --quick \
+  --ghc 9.14.1 --stack 3.11.1 -- \
+  ghc-pkg dump >"$COMPATIBILITY_BOOT_DUMP"
+
 STDOUT_PATH="$OUTPUT_DIRECTORY/dependency.stdout"
 STDERR_PATH="$OUTPUT_DIRECTORY/dependency.stderr"
 STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%S.000000Z)"
@@ -66,10 +75,22 @@ set +e
 SOLVE_EXIT_CODE=$?
 set -e
 ENDED_AT="$(date -u +%Y-%m-%dT%H:%M:%S.000000Z)"
+PANTRY_DB="$STACK_ROOT_PATH/pantry/pantry.sqlite3"
 
 if [[ "$SOLVE_EXIT_CODE" -eq 0 ]]; then
-  echo "COMPATIBILITY_SOLVE_UNEXPECTED_SUCCESS: downstream full replay is required" >&2
-  exit 2
+  exec /usr/bin/python3 "$HASKELL_ROOT/tools/profile_workflow.py" \
+    replay-compatibility-success \
+    --stack-yaml "$EXPECTED_STACK_YAML" \
+    --stack-root "$STACK_ROOT_PATH" \
+    --stdout "$STDOUT_PATH" \
+    --stderr "$STDERR_PATH" \
+    --authoritative-boot-dump "$AUTHORITATIVE_BOOT_DUMP" \
+    --compatibility-boot-dump "$COMPATIBILITY_BOOT_DUMP" \
+    --pantry-db "$PANTRY_DB" \
+    --started-at "$STARTED_AT" \
+    --ended-at "$ENDED_AT" \
+    --exit-code "$SOLVE_EXIT_CODE" \
+    --output-dir "$OUTPUT_DIRECTORY"
 fi
 if [[ "$SOLVE_EXIT_CODE" -ne 1 ]]; then
   printf 'COMPATIBILITY_SOLVE_UNCLASSIFIED_EXIT:%s\n' "$SOLVE_EXIT_CODE" >&2
@@ -82,6 +103,9 @@ exec /usr/bin/python3 "$HASKELL_ROOT/tools/profile_workflow.py" \
   --stack-root "$STACK_ROOT_PATH" \
   --stdout "$STDOUT_PATH" \
   --stderr "$STDERR_PATH" \
+  --authoritative-boot-dump "$AUTHORITATIVE_BOOT_DUMP" \
+  --compatibility-boot-dump "$COMPATIBILITY_BOOT_DUMP" \
+  --pantry-db "$PANTRY_DB" \
   --started-at "$STARTED_AT" \
   --ended-at "$ENDED_AT" \
   --exit-code "$SOLVE_EXIT_CODE" \
