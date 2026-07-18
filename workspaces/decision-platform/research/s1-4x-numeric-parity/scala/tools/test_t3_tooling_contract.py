@@ -216,8 +216,7 @@ def main() -> int:
         "assert-selected-profile.sh",
         "--mode full",
         "S1_4X_SCALA_SELECTED_PROFILE_RESULT",
-        'dirname -- "$OUTPUT_DIR"',
-        'basename -- "$OUTPUT_DIR"',
+        'basename -- "$(dirname -- "$OUTPUT_DIR")"',
         '"scala-jmh"',
     ):
         assert marker in native_full
