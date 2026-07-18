@@ -13,7 +13,8 @@ tests =
     "static-policy"
     [ testCase "candidate source has no forbidden native or unsafe forms" noForbiddenForms,
       testCase "every candidate module declares an explicit export list" explicitExports,
-      testCase "Stack configurations have no forbidden override keys" noStackOverrides
+      testCase "Stack configurations have no forbidden override keys" noStackOverrides,
+      testCase "core component cannot see contract shell dependencies" componentDependencyBoundary
     ]
 
 noForbiddenForms :: IO ()
@@ -81,6 +82,52 @@ noStackOverrides = do
             key `elem` forbiddenKeys
         ]
   assertBool ("forbidden Stack override keys: " <> show violations) (null violations)
+
+componentDependencyBoundary :: IO ()
+componentDependencyBoundary = do
+  cabalFile <- readFile "s1-4x-haskell.cabal"
+  case
+      ( componentSection "library" cabalFile,
+        componentSection "library s1-4x-core" cabalFile
+      )
+    of
+      (Just shellSection, Just coreSection) -> do
+        let shellOnlyPackages =
+              [ "aeson",
+                "attoparsec",
+                "binary",
+                "bytestring",
+                "directory",
+                "filepath",
+                "SHA",
+                "text",
+                "unix"
+              ]
+            leaked =
+              [ packageName
+                | packageName <- shellOnlyPackages,
+                  packageName `isInfixOf` coreSection
+              ]
+        assertBool ("shell dependency leaked into core component: " <> show leaked) (null leaked)
+        assertBool
+          "contract shell must depend on the internal core library"
+          ("s1-4x-core" `isInfixOf` shellSection)
+      _ -> assertFailure "generated Cabal must contain shell and s1-4x-core libraries"
+
+componentSection :: String -> String -> Maybe String
+componentSection header content =
+  case dropWhile (/= header) (lines content) of
+    [] -> Nothing
+    _ : remaining ->
+      Just
+        ( unlines
+            (takeWhile continuationLine remaining)
+        )
+  where
+    continuationLine line =
+      case line of
+        [] -> True
+        character : _ -> isSpace character
 
 haskellSources :: FilePath -> IO [FilePath]
 haskellSources root = do
