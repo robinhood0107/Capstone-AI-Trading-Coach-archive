@@ -49,6 +49,27 @@ mapfile -t unit_sources < <(
   printf 'unit source manifest closure is empty\n' >&2
   exit 1
 }
+mapfile -t test_dependencies < <(
+  sed -n 's#^//> using test\.dep \([^[:space:]]\+\)$#\1#p' \
+    "$SCALA_ROOT/project.scala"
+)
+test_dependency_directive_count="$(
+  grep -c '^//> using test\.dep ' "$SCALA_ROOT/project.scala"
+)"
+[[ "${#test_dependencies[@]}" -gt 0 \
+  && "${#test_dependencies[@]}" -eq "$test_dependency_directive_count" ]] || {
+  printf 'test dependency directive closure is invalid\n' >&2
+  exit 1
+}
+test_dependency_arguments=()
+for dependency in "${test_dependencies[@]}"; do
+  [[ "$dependency" =~ ^[A-Za-z0-9_.-]+:{1,3}[A-Za-z0-9_.-]+:[A-Za-z0-9_.+-]+$ ]] ||
+    {
+      printf 'test dependency coordinate is invalid\n' >&2
+      exit 1
+    }
+  test_dependency_arguments+=("--dependency" "$dependency")
+done
 unit_command=(
   "$SCALA_CLI" test
   "${unit_sources[@]}"
@@ -56,6 +77,7 @@ unit_command=(
   --jvm system
   --require-tests
   --coursier-validate-checksums
+  "${test_dependency_arguments[@]}"
   "${profile_options[@]}"
 )
 set +e
