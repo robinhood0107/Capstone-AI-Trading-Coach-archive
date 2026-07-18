@@ -22,7 +22,6 @@ from executable_identity import (  # noqa: E402
 )
 from executable_identity import (  # noqa: E402
     inspect_executable_identity,
-    inspect_executable_path,
 )
 
 BOUNDARY_IDS = (

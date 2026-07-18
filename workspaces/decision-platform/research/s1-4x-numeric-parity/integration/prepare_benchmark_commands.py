@@ -13,9 +13,9 @@ from pathlib import Path
 from benchmark_commands import (
     BOUNDARY_IDS,
     build_manifest,
-    inspect_executable_path,
     write_manifest_exclusive,
 )
+from executable_identity import inspect_executable_path
 
 
 def _identity(path: Path) -> dict[str, str]:
