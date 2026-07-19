@@ -632,8 +632,13 @@ def test_benchmark_environment_drops_ambient_code_and_tool_overrides(
         descriptor=42,
         required_seals=runner.F_SEAL_SEAL,
     )
+    docker = runner.PinnedExecutable(
+        binding={"path": "/opt/s1-4x/docker", "sha256": "b" * 64},
+        descriptor=43,
+        required_seals=runner.F_SEAL_SEAL,
+    )
     environment = runner._benchmark_environment(
-        {"uv": runtime},
+        {"uv": runtime, "docker": docker},
         {},
         boundary_id="hostValidator",
     )
@@ -652,6 +657,8 @@ def test_benchmark_environment_drops_ambient_code_and_tool_overrides(
         "S1_4X_THREAD_COUNT": "1",
         "S1_4X_UV_BIN": "/proc/self/fd/42",
         "S1_4X_UV_SHA256": "a" * 64,
+        "S1_4X_DOCKER_BIN": "/proc/self/fd/43",
+        "S1_4X_DOCKER_SHA256": "b" * 64,
     }
 
 
@@ -669,9 +676,14 @@ def test_benchmark_environment_honors_explicit_cache_root(
         descriptor=42,
         required_seals=runner.F_SEAL_SEAL,
     )
+    docker = runner.PinnedExecutable(
+        binding={"path": "/opt/s1-4x/docker", "sha256": "b" * 64},
+        descriptor=43,
+        required_seals=runner.F_SEAL_SEAL,
+    )
 
     environment = runner._benchmark_environment(
-        {"uv": runtime},
+        {"uv": runtime, "docker": docker},
         {},
         boundary_id="hostValidator",
     )
@@ -1093,6 +1105,7 @@ def _install_execute_fakes(
     native_marks_measurement: bool,
     host_status: str = "PASS",
     host_times_out: bool = False,
+    host_timeout_observations: list[int] | None = None,
 ) -> list[runner.ScheduledBlock]:
     schedule = runner.build_schedule(plan)[:2]
 
@@ -1123,6 +1136,17 @@ def _install_execute_fakes(
         stderr_path: Path,
         environment: dict[str, str],
     ) -> None:
+        if "--allowed-process-root-pid" in command:
+            if host_timeout_observations is not None:
+                host_timeout_observations.append(timeout_seconds)
+            if host_times_out:
+                raise ContractError("PERFORMANCE_DEADLINE_EXCEEDED")
+            output_index = command.index("--output") + 1
+            Path(command[output_index]).write_text(
+                json.dumps(_host_report(plan, status=host_status), allow_nan=False),
+                encoding="utf-8",
+            )
+            return
         del (
             executable,
             inherited_executables,
@@ -1132,15 +1156,6 @@ def _install_execute_fakes(
             stderr_path,
             environment,
         )
-        if "--allowed-process-root-pid" in command:
-            if host_times_out:
-                raise ContractError("PERFORMANCE_DEADLINE_EXCEEDED")
-            output_index = command.index("--output") + 1
-            Path(command[output_index]).write_text(
-                json.dumps(_host_report(plan, status=host_status), allow_nan=False),
-                encoding="utf-8",
-            )
-            return
         if native_marks_measurement:
             qualification_index = command.index("--qualification") + 1
             runner.mark_measurement_entered(Path(command[qualification_index]))
@@ -1255,6 +1270,28 @@ def test_execute_rechecks_source_binding_around_every_native_block(
 
     assert summary["validPerformanceTimeoutCount"] == len(schedule)
     assert checks == [(COMMIT, COMMIT)] * (1 + 2 * len(schedule))
+
+
+def test_host_preflight_timeout_covers_quiet_window_and_post_checks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    plan: dict[str, Any],
+) -> None:
+    host_timeouts: list[int] = []
+    schedule = _install_execute_fakes(
+        monkeypatch,
+        plan,
+        native_marks_measurement=True,
+        host_timeout_observations=host_timeouts,
+    )
+    manifest_path = tmp_path / "commands.json"
+    manifest_sha256 = _write_manifest(manifest_path)
+
+    _execute(tmp_path, manifest_path, manifest_sha256)
+
+    assert host_timeouts == [
+        plan["environmentValidity"]["maxQuietWaitSeconds"] + 60
+    ] * len(schedule)
 
 
 @pytest.mark.parametrize(

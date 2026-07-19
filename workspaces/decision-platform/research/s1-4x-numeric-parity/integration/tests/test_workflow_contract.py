@@ -404,6 +404,7 @@ class NumericParityBenchmarkWorkflowTests(unittest.TestCase):
         self.assertNotIn("--uv ", timing)
         for role in (
             "uv",
+            "docker",
             "benchmarkPython",
             "scalaCli",
             "java",

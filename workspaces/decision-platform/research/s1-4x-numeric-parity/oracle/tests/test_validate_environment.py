@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import hashlib
+import os
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from oracle_common import OracleContractError
 from validate_environment import (
     EnvironmentPolicy,
+    LocalEnvironmentAdapter,
     ProcessSample,
     ProcessSnapshot,
     _parse_proc_stat,
@@ -240,6 +244,76 @@ def test_container_count_policy_accepts_four_and_rejects_five() -> None:
 
     assert _checks(accepted_report)["docker.running-containers"]["status"] == "PASS"
     assert _checks(rejected_report)["docker.running-containers"]["status"] == "FAIL"
+
+
+def test_local_adapter_uses_the_injected_docker_identity_not_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    trusted = tmp_path / "trusted-docker"
+    trusted.write_text(
+        "#!/usr/bin/bash\n"
+        "test \"$1\" = ps\n"
+        "test \"$2\" = -q\n"
+        "printf 'container-a\\ncontainer-b\\n'\n",
+        encoding="utf-8",
+    )
+    trusted.chmod(0o700)
+    trusted_sha256 = hashlib.sha256(trusted.read_bytes()).hexdigest()
+    ambient_bin = tmp_path / "ambient-bin"
+    ambient_bin.mkdir()
+    sentinel = tmp_path / "ambient-executed"
+    ambient = ambient_bin / "docker"
+    ambient.write_text(
+        "#!/usr/bin/bash\n"
+        f"printf ambient > {sentinel}\n"
+        "exit 99\n",
+        encoding="utf-8",
+    )
+    ambient.chmod(0o700)
+    monkeypatch.setenv("PATH", str(ambient_bin))
+
+    adapter = LocalEnvironmentAdapter(
+        docker_bin=trusted,
+        docker_sha256=trusted_sha256,
+    )
+
+    assert adapter.running_containers() == ["container-a", "container-b"]
+    assert not sentinel.exists()
+
+
+@pytest.mark.parametrize("mutation", ["sha", "symlink", "non-executable"])
+def test_local_adapter_rejects_unsafe_explicit_docker_identity(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    trusted = tmp_path / "trusted-docker"
+    trusted.write_text("#!/usr/bin/bash\nexit 0\n", encoding="utf-8")
+    trusted.chmod(0o700)
+    expected_sha256 = hashlib.sha256(trusted.read_bytes()).hexdigest()
+    candidate = trusted
+    if mutation == "sha":
+        expected_sha256 = "0" * 64
+    elif mutation == "symlink":
+        candidate = tmp_path / "docker-link"
+        candidate.symlink_to(trusted)
+    else:
+        trusted.chmod(0o600)
+
+    with pytest.raises(OracleContractError):
+        LocalEnvironmentAdapter(
+            docker_bin=candidate,
+            docker_sha256=expected_sha256,
+        )
+
+
+def test_local_logical_cpu_count_is_stable_under_inherited_affinity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(os, "cpu_count", lambda: 8)
+    monkeypatch.setattr(os, "sched_getaffinity", lambda _pid: {0})
+
+    assert LocalEnvironmentAdapter().logical_cpu_count() == 8
 
 
 def test_proc_stat_parser_handles_spaces_inside_command() -> None:

@@ -299,6 +299,17 @@ class BenchmarkCommandManifestTests(TestCase):
         )
         self.assertIn("S1_4X_BENCHMARK_PYTHON_SHA256", python_source)
         self.assertIn("export UV_PYTHON=", python_source)
+        host_source = wrappers[0].read_text(encoding="utf-8")
+        self.assertIn("S1_4X_DOCKER_BIN", host_source)
+        self.assertIn("S1_4X_DOCKER_SHA256", host_source)
+        self.assertIn("--docker-bin", host_source)
+        self.assertIn("--docker-sha256", host_source)
+
+    def test_host_validator_runtime_closure_includes_verified_docker(self) -> None:
+        self.assertEqual(
+            RUNTIME_DEPENDENCY_ROLES_BY_BOUNDARY["hostValidator"],
+            ("uv", "docker"),
+        )
 
     def test_host_wrapper_uses_approved_constrained_host_thresholds(self) -> None:
         source = (
