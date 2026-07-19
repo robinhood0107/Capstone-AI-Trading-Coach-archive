@@ -65,6 +65,12 @@ def main() -> int:
     assert toolchain_lock["jdk"]["javacExecutableSha256"] == (
         "5dc287a983c41c8cee0c00e621d87a46ff9dd77202885814b39645074d714dd9"
     )
+    assert toolchain_lock["jdk"]["jdkModulesPathId"] == (
+        "TEMURIN_25_0_3_9_LTS/lib/modules"
+    )
+    assert toolchain_lock["jdk"]["jdkModulesSha256"] == (
+        "0b4f933e2a29a05a74a869dddd823d1e7bc0ed9b38db0db25a44eab5dfb5c462"
+    )
     profiles = json.loads(
         (SCALA_ROOT / "compiler-profiles.v1.json").read_text(encoding="utf-8")
     )
@@ -300,8 +306,13 @@ def main() -> int:
         '--classpath "$precompiled_classes"',
         "generatedJavaPrecompileReceiptSha256",
         "JVM_FORK_FILE_COUNT_MISMATCH:expected=",
+        "S1_4X_FIXTURE_MATERIALIZATION_RECEIPT",
     ):
         assert marker in native_smoke
+    assert (
+        'export S1_4X_FIXTURE_ROOT="$S1_ROOT/contract/fixtures"'
+        not in native_smoke
+    )
     assert "--server=true" not in native_smoke
     assert native_smoke.index("--server=false") < native_smoke.index(
         '--classpath "$precompiled_classes"'

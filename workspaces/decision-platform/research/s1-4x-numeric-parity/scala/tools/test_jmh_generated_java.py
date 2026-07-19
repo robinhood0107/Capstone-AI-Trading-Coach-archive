@@ -101,6 +101,8 @@ def main() -> int:
         assert classpath.generator_class_input == generator_input
         assert classpath.generated_source_root == generated_root
         assert classpath.generated_resource_root == generator_output / "resources"
+        assert classpath.generator_class_input_sha256
+        assert classpath.generated_resource_root_sha256
         assert [item.path_id for item in classpath.entries] == [
             (
                 "SCALA_WORKSPACE/"
@@ -108,6 +110,45 @@ def main() -> int:
             ),
             "COURSIER_CACHE/https/repo.example/jmh-core.jar",
         ]
+        entry_values = [
+            {
+                "pathId": item.path_id,
+                "kind": item.kind,
+                "sha256": item.sha256,
+            }
+            for item in classpath.entries
+        ]
+        helper.verify_classpath_entries(
+            entry_values,
+            workspace=workspace,
+            coursier_cache=coursier,
+        )
+        post_run = helper.generator_output_closure(
+            generator_stdout.splitlines()[0]
+            + "\n"
+            + generator_stdout.splitlines()[1]
+            + "\n# JMH version: 1.37\n",
+            workspace=workspace,
+        )
+        assert (
+            post_run.generator_class_input_sha256
+            == classpath.generator_class_input_sha256
+        )
+        assert (
+            post_run.generated_resource_root_sha256
+            == classpath.generated_resource_root_sha256
+        )
+        dependency.write_bytes(b"tampered\n")
+        expect_error(
+            helper,
+            "CLASSPATH_POST_RUN_DRIFT",
+            lambda: helper.verify_classpath_entries(
+                entry_values,
+                workspace=workspace,
+                coursier_cache=coursier,
+            ),
+        )
+        dependency.write_bytes(b"jar-bytes\n")
 
         missing = generated_root / expected[0]
         missing.unlink()
