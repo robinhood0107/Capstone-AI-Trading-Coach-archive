@@ -36,6 +36,26 @@ PROFILE_OPTIONS = {
 }
 PROFILE_MARKER_SCHEMA_VERSION = "s1.4x-haskell-profile-measurement-state-v1"
 QUALIFICATION_SCHEMA_VERSION = "s1.4x-haskell-profile-qualification-v1"
+QUALIFICATION_DOCKER_ROUTE_SCHEMA_VERSION = (
+    "s1.4x-haskell-qualification-docker-route-v1"
+)
+QUALIFICATION_DOCKER_SNAPSHOT_SCHEMA_VERSION = (
+    "s1.4x-haskell-qualification-docker-snapshot-v1"
+)
+QUALIFICATION_HOST_TOOLS_PATH_ID = "S1_4X_QUALIFICATION_HOST_TOOLS"
+QUALIFICATION_DOCKER_COMMAND_PATH_ID = (
+    "S1_4X_QUALIFICATION_HOST_TOOLS_DOCKER"
+)
+QUALIFICATION_DOCKER_CONFIG_PATH_ID = (
+    "S1_4X_QUALIFICATION_DOCKER_CONFIG"
+)
+QUALIFICATION_DOCKER_CONTEXT = "default"
+QUALIFICATION_DOCKER_CONFIG_WSLENV = (
+    "DOCKER_CONFIG/p:DOCKER_CONTEXT"
+)
+QUALIFICATION_OWNER_DOCKER_FD_PATH_ID = (
+    "S1_4X_QUALIFICATION_OWNER_DOCKER_FD"
+)
 FINAL_PROFILE_SCHEMA_VERSION = "s1.4x-haskell-selected-profile-v1"
 RUNTIME_PROFILE_FIELDS = {
     "schemaVersion",
@@ -144,6 +164,24 @@ class PinnedDockerClient:
     mode: int
     identity: Mapping[str, int]
     path_id: str
+
+
+@dataclass(frozen=True)
+class QualificationDockerRoute:
+    """Qualification owner FD를 output-bound `docker` 이름으로만 노출한다."""
+
+    output_root: Path
+    host_tools_directory: Path
+    docker_link: Path
+    docker_link_target: str
+    docker_config_directory: Path
+    owner_pid: int
+    owner_start_ticks: int
+    owner_uid: int
+    output_identity: Mapping[str, int]
+    directory_identity: Mapping[str, int]
+    link_identity: Mapping[str, int]
+    docker_config_identity: Mapping[str, int]
 
 
 def _load_pinned_runtime_helpers() -> tuple[Any, Any, type[Exception]]:
@@ -324,6 +362,18 @@ def _stat_identity(value: os.stat_result) -> dict[str, int]:
         "mtimeNs": value.st_mtime_ns,
         "ctimeNs": value.st_ctime_ns,
         "linkCount": value.st_nlink,
+    }
+
+
+def _directory_anchor_identity(value: os.stat_result) -> dict[str, int]:
+    """내용이 늘어나는 output directory는 stable inode/owner/mode만 결속한다."""
+
+    return {
+        "device": value.st_dev,
+        "inode": value.st_ino,
+        "mode": value.st_mode,
+        "uid": value.st_uid,
+        "gid": value.st_gid,
     }
 
 
@@ -3264,6 +3314,20 @@ def _qualification(arguments: argparse.Namespace) -> None:
         numeric_root / "oracle/validate_environment.py",
         label="HOST_VALIDATOR_PY",
     )
+    docker_client = pin_qualification_docker_client_from_environment()
+    docker_route = prepare_qualification_docker_route(
+        output,
+        docker_client=docker_client,
+    )
+    docker_route_baseline = snapshot_qualification_docker_route(
+        docker_route,
+        docker_client=docker_client,
+    )
+    docker_route_receipt = build_qualification_docker_route_receipt(
+        docker_route,
+        docker_client=docker_client,
+        baseline=docker_route_baseline,
+    )
     configured_python_sha256 = marker_python.sha256
     marker_script_sha256 = marker_script.sha256
     qualification_owner_pid = os.getpid()
@@ -3292,6 +3356,11 @@ def _qualification(arguments: argparse.Namespace) -> None:
         stack_bin=stack,
         python_runtime=marker_python,
     )
+    host_environment = qualification_environment_with_docker_route(
+        environment,
+        route=docker_route,
+        docker_client=docker_client,
+    )
     host_path_ids = {
         str(marker_python.fd_path): _benchmark_python_path_id(marker_python),
         str(host_validator.fd_path): _pinned_file_path_id(host_validator),
@@ -3315,23 +3384,48 @@ def _qualification(arguments: argparse.Namespace) -> None:
                 numeric_root=numeric_root,
                 plan=plan,
                 output=host_report,
-                root_pid=os.getpid(),
+                root_pid=qualification_owner_pid,
                 python_bin=marker_python.fd_path,
                 validator_script=host_validator.fd_path,
             )
-            host_record = _run_logged(
-                host_command,
-                cwd=repo_root,
-                environment=environment,
-                phase=f"qualification-{prefix}-host",
-                output_directory=output,
-                pass_fds=(
-                    marker_python.descriptor,
-                    host_validator.descriptor,
-                ),
-                portable_path_ids=host_path_ids,
+            docker_route_before = snapshot_qualification_docker_route(
+                docker_route,
+                docker_client=docker_client,
             )
-            _validate_host_report(host_report, plan=plan, root_pid=os.getpid())
+            if docker_route_before != docker_route_baseline:
+                raise WorkflowError("QUALIFICATION_DOCKER_ROUTE_CHANGED")
+            try:
+                host_record = _run_logged(
+                    host_command,
+                    cwd=repo_root,
+                    environment=host_environment,
+                    phase=f"qualification-{prefix}-host",
+                    output_directory=output,
+                    pass_fds=(
+                        marker_python.descriptor,
+                        host_validator.descriptor,
+                        docker_client.descriptor,
+                    ),
+                    portable_path_ids=host_path_ids,
+                )
+            finally:
+                # Host가 정책상 실패해도 route drift 검증은 생략하지 않는다.
+                docker_route_after = snapshot_qualification_docker_route(
+                    docker_route,
+                    docker_client=docker_client,
+                )
+                if (
+                    docker_route_after != docker_route_before
+                    or docker_route_after != docker_route_baseline
+                ):
+                    raise WorkflowError(
+                        "QUALIFICATION_DOCKER_ROUTE_CHANGED"
+                    )
+            _validate_host_report(
+                host_report,
+                plan=plan,
+                root_pid=qualification_owner_pid,
+            )
             marker_path = output / f"{prefix}-measurement-state.json"
             marker_argv = [
                 str(marker_python.fd_path),
@@ -3463,6 +3557,12 @@ def _qualification(arguments: argparse.Namespace) -> None:
                     "finishedAt": finished_at,
                     "hostValidityPath": str(host_report),
                     "hostValiditySha256": sha256_file(host_report),
+                    "hostDockerRouteBeforeSha256": (
+                        docker_route_before["snapshotSha256"]
+                    ),
+                    "hostDockerRouteAfterSha256": (
+                        docker_route_after["snapshotSha256"]
+                    ),
                     "hostCommand": host_record,
                     "rawCriterionPath": str(raw_report),
                     "rawCriterionSha256": sha256_file(raw_report),
@@ -3533,6 +3633,7 @@ def _qualification(arguments: argparse.Namespace) -> None:
         "plannedProfileOrderBlocks": [
             list(block) for block in PROFILE_ORDER_BLOCKS
         ],
+        "dockerRoute": docker_route_receipt,
         "blocks": blocks,
         "selection": selection,
     }
@@ -3915,6 +4016,7 @@ def _validate_qualification_artifact(
         "stackWorkDir",
         "qualificationCaseOrder",
         "plannedProfileOrderBlocks",
+        "dockerRoute",
         "blocks",
         "selection",
     }
@@ -3945,6 +4047,10 @@ def _validate_qualification_artifact(
         or len(artifact["blocks"]) != len(PROFILE_ORDER_BLOCKS)
     ):
         raise WorkflowError("QUALIFICATION_ARTIFACT_INVALID")
+    docker_route_receipt = validate_qualification_docker_route_receipt(
+        artifact["dockerRoute"],
+        require_owner_exit=True,
+    )
     output = artifact_path.parent
     ghcup = _required_environment_path("S1_4X_GHCUP_BIN")
     stack = _required_environment_path("S1_4X_STACK_BIN")
@@ -3998,6 +4104,8 @@ def _validate_qualification_artifact(
         "finishedAt",
         "hostValidityPath",
         "hostValiditySha256",
+        "hostDockerRouteBeforeSha256",
+        "hostDockerRouteAfterSha256",
         "hostCommand",
         "rawCriterionPath",
         "rawCriterionSha256",
@@ -4101,6 +4209,16 @@ def _validate_qualification_artifact(
                 raise WorkflowError("QUALIFICATION_HOST_ROOT_PID_INVALID") from exc
             if root_pid <= 0:
                 raise WorkflowError("QUALIFICATION_HOST_ROOT_PID_INVALID")
+            if (
+                root_pid != docker_route_receipt["owner"]["pid"]
+                or profile.get("hostDockerRouteBeforeSha256")
+                != docker_route_receipt["snapshotSha256"]
+                or profile.get("hostDockerRouteAfterSha256")
+                != docker_route_receipt["snapshotSha256"]
+            ):
+                raise WorkflowError(
+                    "QUALIFICATION_DOCKER_ROUTE_EVIDENCE_INVALID"
+                )
             _validate_host_report_document(
                 host_report,
                 plan=plan,
@@ -4149,6 +4267,10 @@ def _validate_qualification_artifact(
                 script_source_path=marker_script_source,
                 script_source_sha256=marker_script_sha256,
                 require_owner_exit=True,
+            )
+            _validate_qualification_docker_owner_binding(
+                docker_route_receipt,
+                marker["portableWitness"],
             )
             if (
                 measurement.get("planSha256") != artifact["planSha256"]
@@ -6205,6 +6327,516 @@ def pin_oci_docker_client(
     except BaseException:
         os.close(descriptor)
         raise
+
+
+def pin_qualification_docker_client_from_environment() -> PinnedDockerClient:
+    """Qualification도 OCI와 같은 caller-approved Docker path/SHA 계약을 쓴다."""
+
+    source = _required_environment_path("S1_4X_DOCKER_BIN")
+    expected_sha256 = _require_sha256(
+        os.environ.get("S1_4X_DOCKER_SHA256"),
+        label="docker",
+    )
+    return pin_oci_docker_client(
+        source,
+        expected_sha256=expected_sha256,
+    )
+
+
+def prepare_qualification_docker_route(
+    output_root: Path,
+    *,
+    docker_client: PinnedDockerClient,
+) -> QualificationDockerRoute:
+    """Retained owner FD를 fresh output의 유일한 `docker` route로 만든다."""
+
+    output = _absolute_existing_directory(
+        output_root,
+        label="QUALIFICATION_DOCKER_OUTPUT",
+    )
+    _snapshot_pinned_oci_docker_client(docker_client)
+    owner_pid = os.getpid()
+    owner_start_ticks = _process_start_ticks(owner_pid)
+    owner_uid = os.getuid()
+    try:
+        proc_owner = os.stat(f"/proc/{owner_pid}", follow_symlinks=False)
+        output_stat = os.lstat(output)
+    except OSError as exc:
+        raise WorkflowError("QUALIFICATION_DOCKER_OWNER_NOT_LIVE") from exc
+    if (
+        proc_owner.st_uid != owner_uid
+        or output_stat.st_uid != owner_uid
+        or not stat.S_ISDIR(output_stat.st_mode)
+        or stat.S_IMODE(output_stat.st_mode) != 0o700
+    ):
+        raise WorkflowError("QUALIFICATION_DOCKER_OWNER_IDENTITY_DRIFT")
+    host_tools = output / "host-tools"
+    docker_link = host_tools / "docker"
+    docker_config = output / "docker-config"
+    if (
+        host_tools.exists()
+        or host_tools.is_symlink()
+        or docker_link.exists()
+        or docker_link.is_symlink()
+        or docker_config.exists()
+        or docker_config.is_symlink()
+    ):
+        raise WorkflowError("QUALIFICATION_DOCKER_ROUTE_ALREADY_EXISTS")
+    try:
+        host_tools.mkdir(mode=0o700)
+        docker_config.mkdir(mode=0o700)
+        docker_link_target = (
+            f"/proc/{owner_pid}/fd/{docker_client.descriptor}"
+        )
+        docker_link.symlink_to(docker_link_target)
+        directory_stat = os.lstat(host_tools)
+        link_stat = os.lstat(docker_link)
+        target_stat = os.stat(docker_link)
+        docker_config_stat = os.lstat(docker_config)
+    except OSError as exc:
+        raise WorkflowError("QUALIFICATION_DOCKER_ROUTE_CREATE_FAILED") from exc
+    if (
+        not stat.S_ISDIR(directory_stat.st_mode)
+        or stat.S_IMODE(directory_stat.st_mode) != 0o700
+        or directory_stat.st_uid != owner_uid
+        or not stat.S_ISLNK(link_stat.st_mode)
+        or link_stat.st_uid != owner_uid
+        or _stat_identity(target_stat) != dict(docker_client.identity)
+        or not stat.S_ISDIR(docker_config_stat.st_mode)
+        or stat.S_IMODE(docker_config_stat.st_mode) != 0o700
+        or docker_config_stat.st_uid != owner_uid
+    ):
+        raise WorkflowError("QUALIFICATION_DOCKER_ROUTE_IDENTITY_INVALID")
+    return QualificationDockerRoute(
+        output_root=output,
+        host_tools_directory=host_tools,
+        docker_link=docker_link,
+        docker_link_target=docker_link_target,
+        docker_config_directory=docker_config,
+        owner_pid=owner_pid,
+        owner_start_ticks=owner_start_ticks,
+        owner_uid=owner_uid,
+        output_identity=_directory_anchor_identity(output_stat),
+        directory_identity=_stat_identity(directory_stat),
+        link_identity=_stat_identity(link_stat),
+        docker_config_identity=_stat_identity(docker_config_stat),
+    )
+
+
+def _qualification_docker_snapshot_document(
+    route: QualificationDockerRoute,
+    *,
+    docker_client: PinnedDockerClient,
+    docker_payload: bytes,
+    output_stat: os.stat_result,
+    directory_stat: os.stat_result,
+    link_stat: os.stat_result,
+    docker_config_stat: os.stat_result,
+) -> dict[str, Any]:
+    """Local inode 값은 hash 안에만 넣고 receipt에는 portable path ID를 남긴다."""
+
+    owner = {
+        "pid": route.owner_pid,
+        "startTicks": route.owner_start_ticks,
+        "uid": route.owner_uid,
+    }
+    document = {
+        "schemaVersion": QUALIFICATION_DOCKER_SNAPSHOT_SCHEMA_VERSION,
+        "dockerClientPathId": docker_client.path_id,
+        "dockerClientSha256": docker_client.sha256,
+        "dockerClientByteLength": len(docker_payload),
+        "dockerClientIdentitySha256": canonical_sha256(
+            dict(docker_client.identity)
+        ),
+        "outputIdentitySha256": canonical_sha256(
+            _directory_anchor_identity(output_stat)
+        ),
+        "hostToolsPathId": QUALIFICATION_HOST_TOOLS_PATH_ID,
+        "hostToolsIdentitySha256": canonical_sha256(
+            _stat_identity(directory_stat)
+        ),
+        "dockerCommandPathId": QUALIFICATION_DOCKER_COMMAND_PATH_ID,
+        "dockerLinkIdentitySha256": canonical_sha256(
+            _stat_identity(link_stat)
+        ),
+        "dockerConfigPathId": QUALIFICATION_DOCKER_CONFIG_PATH_ID,
+        "dockerConfigIdentitySha256": canonical_sha256(
+            _stat_identity(docker_config_stat)
+        ),
+        "dockerConfigEntryCount": 0,
+        "dockerConfigTreeSha256": canonical_sha256([]),
+        "ownerFdPathId": QUALIFICATION_OWNER_DOCKER_FD_PATH_ID,
+        "owner": owner,
+    }
+    return {
+        **document,
+        "snapshotSha256": canonical_sha256(document),
+    }
+
+
+def _validate_qualification_docker_snapshot(
+    snapshot: object,
+) -> dict[str, Any]:
+    """Runtime snapshot의 exact portable schema와 self-hash를 검증한다."""
+
+    expected_fields = {
+        "schemaVersion",
+        "dockerClientPathId",
+        "dockerClientSha256",
+        "dockerClientByteLength",
+        "dockerClientIdentitySha256",
+        "outputIdentitySha256",
+        "hostToolsPathId",
+        "hostToolsIdentitySha256",
+        "dockerCommandPathId",
+        "dockerLinkIdentitySha256",
+        "dockerConfigPathId",
+        "dockerConfigIdentitySha256",
+        "dockerConfigEntryCount",
+        "dockerConfigTreeSha256",
+        "ownerFdPathId",
+        "owner",
+        "snapshotSha256",
+    }
+    if not isinstance(snapshot, dict) or set(snapshot) != expected_fields:
+        raise WorkflowError("QUALIFICATION_DOCKER_SNAPSHOT_INVALID")
+    without_hash = dict(snapshot)
+    snapshot_sha256 = without_hash.pop("snapshotSha256")
+    owner = snapshot.get("owner")
+    docker_sha256 = snapshot.get("dockerClientSha256")
+    if (
+        snapshot.get("schemaVersion")
+        != QUALIFICATION_DOCKER_SNAPSHOT_SCHEMA_VERSION
+        or type(docker_sha256) is not str
+        or SHA256_PATTERN.fullmatch(docker_sha256) is None
+        or snapshot.get("dockerClientPathId")
+        != f"S1_4X_DOCKER_CLIENT_SHA256_{str(docker_sha256).upper()}"
+        or type(snapshot.get("dockerClientByteLength")) is not int
+        or snapshot["dockerClientByteLength"] < 0
+        or snapshot.get("hostToolsPathId")
+        != QUALIFICATION_HOST_TOOLS_PATH_ID
+        or snapshot.get("dockerCommandPathId")
+        != QUALIFICATION_DOCKER_COMMAND_PATH_ID
+        or snapshot.get("dockerConfigPathId")
+        != QUALIFICATION_DOCKER_CONFIG_PATH_ID
+        or type(snapshot.get("dockerConfigEntryCount")) is not int
+        or snapshot.get("dockerConfigEntryCount") != 0
+        or snapshot.get("dockerConfigTreeSha256") != canonical_sha256([])
+        or snapshot.get("ownerFdPathId")
+        != QUALIFICATION_OWNER_DOCKER_FD_PATH_ID
+        or not isinstance(owner, dict)
+        or set(owner) != {"pid", "startTicks", "uid"}
+        or type(owner.get("pid")) is not int
+        or owner["pid"] <= 0
+        or type(owner.get("startTicks")) is not int
+        or owner["startTicks"] <= 0
+        or type(owner.get("uid")) is not int
+        or owner["uid"] < 0
+        or any(
+            type(snapshot.get(field)) is not str
+            or SHA256_PATTERN.fullmatch(snapshot[field]) is None
+            for field in (
+                "dockerClientIdentitySha256",
+                "outputIdentitySha256",
+                "hostToolsIdentitySha256",
+                "dockerLinkIdentitySha256",
+                "dockerConfigIdentitySha256",
+            )
+        )
+        or snapshot_sha256 != canonical_sha256(without_hash)
+    ):
+        raise WorkflowError("QUALIFICATION_DOCKER_SNAPSHOT_INVALID")
+    return snapshot
+
+
+def snapshot_qualification_docker_route(
+    route: QualificationDockerRoute,
+    *,
+    docker_client: PinnedDockerClient,
+) -> dict[str, Any]:
+    """Host validator 전후 owner/FD/directory/symlink identity를 다시 고정한다."""
+
+    if not isinstance(route, QualificationDockerRoute):
+        raise WorkflowError("QUALIFICATION_DOCKER_ROUTE_INVALID")
+    try:
+        current_start_ticks = _process_start_ticks(route.owner_pid)
+        proc_owner = os.stat(
+            f"/proc/{route.owner_pid}",
+            follow_symlinks=False,
+        )
+    except (OSError, WorkflowError) as exc:
+        raise WorkflowError("QUALIFICATION_DOCKER_OWNER_NOT_LIVE") from exc
+    if (
+        route.owner_pid != os.getpid()
+        or current_start_ticks != route.owner_start_ticks
+        or route.owner_uid != os.getuid()
+        or proc_owner.st_uid != route.owner_uid
+    ):
+        raise WorkflowError("QUALIFICATION_DOCKER_OWNER_IDENTITY_DRIFT")
+    docker_payload, docker_stat = _snapshot_pinned_oci_docker_client(
+        docker_client
+    )
+    expected_target = (
+        f"/proc/{route.owner_pid}/fd/{docker_client.descriptor}"
+    )
+    if route.docker_link_target != expected_target:
+        raise WorkflowError("QUALIFICATION_DOCKER_LINK_TARGET_DRIFT")
+    try:
+        output_stat = os.lstat(route.output_root)
+        directory_stat = os.lstat(route.host_tools_directory)
+        entries = {path.name for path in route.host_tools_directory.iterdir()}
+        link_stat = os.lstat(route.docker_link)
+        link_target = os.readlink(route.docker_link)
+        target_stat = os.stat(route.docker_link)
+    except OSError as exc:
+        raise WorkflowError("QUALIFICATION_DOCKER_LINK_DRIFT") from exc
+    try:
+        docker_config_stat = os.lstat(route.docker_config_directory)
+        docker_config_entries = tuple(
+            route.docker_config_directory.iterdir()
+        )
+    except OSError as exc:
+        raise WorkflowError("QUALIFICATION_DOCKER_CONFIG_DRIFT") from exc
+    if (
+        not stat.S_ISDIR(output_stat.st_mode)
+        or output_stat.st_uid != route.owner_uid
+        or stat.S_IMODE(output_stat.st_mode) != 0o700
+        or _directory_anchor_identity(output_stat)
+        != dict(route.output_identity)
+        or route.host_tools_directory != route.output_root / "host-tools"
+        or not stat.S_ISDIR(directory_stat.st_mode)
+        or stat.S_IMODE(directory_stat.st_mode) != 0o700
+        or directory_stat.st_uid != route.owner_uid
+        or entries != {"docker"}
+    ):
+        raise WorkflowError("QUALIFICATION_DOCKER_DIRECTORY_DRIFT")
+    if (
+        route.docker_link != route.host_tools_directory / "docker"
+        or not stat.S_ISLNK(link_stat.st_mode)
+        or _stat_identity(link_stat) != dict(route.link_identity)
+    ):
+        raise WorkflowError("QUALIFICATION_DOCKER_LINK_IDENTITY_DRIFT")
+    if (
+        link_target != expected_target
+        or _stat_identity(target_stat) != dict(docker_client.identity)
+        or _stat_identity(target_stat) != _stat_identity(docker_stat)
+    ):
+        raise WorkflowError("QUALIFICATION_DOCKER_LINK_TARGET_DRIFT")
+    if _stat_identity(directory_stat) != dict(route.directory_identity):
+        raise WorkflowError("QUALIFICATION_DOCKER_DIRECTORY_DRIFT")
+    if (
+        route.docker_config_directory
+        != route.output_root / "docker-config"
+        or not stat.S_ISDIR(docker_config_stat.st_mode)
+        or stat.S_IMODE(docker_config_stat.st_mode) != 0o700
+        or docker_config_stat.st_uid != route.owner_uid
+        or _stat_identity(docker_config_stat)
+        != dict(route.docker_config_identity)
+        or docker_config_entries
+    ):
+        raise WorkflowError("QUALIFICATION_DOCKER_CONFIG_DRIFT")
+    snapshot = _qualification_docker_snapshot_document(
+        route,
+        docker_client=docker_client,
+        docker_payload=docker_payload,
+        output_stat=output_stat,
+        directory_stat=directory_stat,
+        link_stat=link_stat,
+        docker_config_stat=docker_config_stat,
+    )
+    return _validate_qualification_docker_snapshot(snapshot)
+
+
+def qualification_environment_with_docker_route(
+    environment: Mapping[str, str],
+    *,
+    route: QualificationDockerRoute,
+    docker_client: PinnedDockerClient,
+) -> dict[str, str]:
+    """Host validator PATH를 검증된 output-bound route 하나로만 고정한다."""
+
+    snapshot_qualification_docker_route(
+        route,
+        docker_client=docker_client,
+    )
+    current_path = environment.get("PATH")
+    route_path = str(route.host_tools_directory)
+    if (
+        type(current_path) is not str
+        or not current_path
+        or any(
+            token in route_path
+            for token in ("\0", "\n", ":")
+        )
+    ):
+        raise WorkflowError("QUALIFICATION_DOCKER_PATH_INVALID")
+    routed = {
+        name: value
+        for name, value in environment.items()
+        if not name.startswith("DOCKER_")
+    }
+    # Route가 사라져도 ambient `/usr/bin/docker`로 계속 탐색하지 못하게 한다.
+    routed["PATH"] = route_path
+    routed["DOCKER_CONFIG"] = str(route.docker_config_directory)
+    routed["DOCKER_CONTEXT"] = QUALIFICATION_DOCKER_CONTEXT
+    # Windows docker.exe에는 WSLENV path translation으로 같은 directory를 전달한다.
+    routed["WSLENV"] = QUALIFICATION_DOCKER_CONFIG_WSLENV
+    return routed
+
+
+def build_qualification_docker_route_receipt(
+    route: QualificationDockerRoute,
+    *,
+    docker_client: PinnedDockerClient,
+    baseline: object,
+) -> dict[str, Any]:
+    """Qualification artifact에 local pathname 없는 Docker trust receipt를 넣는다."""
+
+    accepted = _validate_qualification_docker_snapshot(baseline)
+    current = snapshot_qualification_docker_route(
+        route,
+        docker_client=docker_client,
+    )
+    if current != accepted:
+        raise WorkflowError("QUALIFICATION_DOCKER_ROUTE_CHANGED")
+    return {
+        "schemaVersion": QUALIFICATION_DOCKER_ROUTE_SCHEMA_VERSION,
+        "dockerClientPathId": docker_client.path_id,
+        "dockerClientSha256": docker_client.sha256,
+        "hostToolsPathId": QUALIFICATION_HOST_TOOLS_PATH_ID,
+        "dockerCommandPathId": QUALIFICATION_DOCKER_COMMAND_PATH_ID,
+        "dockerConfigPathId": QUALIFICATION_DOCKER_CONFIG_PATH_ID,
+        "dockerConfigTreeSha256": canonical_sha256([]),
+        "dockerConfigWslEnv": QUALIFICATION_DOCKER_CONFIG_WSLENV,
+        "dockerContext": QUALIFICATION_DOCKER_CONTEXT,
+        "ownerFdPathId": QUALIFICATION_OWNER_DOCKER_FD_PATH_ID,
+        "owner": {
+            "pid": route.owner_pid,
+            "startTicks": route.owner_start_ticks,
+            "uid": route.owner_uid,
+        },
+        "snapshotSha256": accepted["snapshotSha256"],
+        "snapshot": {
+            **accepted,
+            "owner": dict(accepted["owner"]),
+        },
+    }
+
+
+def validate_qualification_docker_route_receipt(
+    receipt: object,
+    *,
+    require_owner_exit: bool,
+) -> dict[str, Any]:
+    """Portable Docker route receipt의 schema와 종료된 owner identity를 검증한다."""
+
+    expected_fields = {
+        "schemaVersion",
+        "dockerClientPathId",
+        "dockerClientSha256",
+        "hostToolsPathId",
+        "dockerCommandPathId",
+        "dockerConfigPathId",
+        "dockerConfigTreeSha256",
+        "dockerConfigWslEnv",
+        "dockerContext",
+        "ownerFdPathId",
+        "owner",
+        "snapshotSha256",
+        "snapshot",
+    }
+    owner = receipt.get("owner") if isinstance(receipt, dict) else None
+    docker_sha256 = (
+        receipt.get("dockerClientSha256")
+        if isinstance(receipt, dict)
+        else None
+    )
+    if (
+        not isinstance(receipt, dict)
+        or set(receipt) != expected_fields
+        or type(require_owner_exit) is not bool
+        or receipt.get("schemaVersion")
+        != QUALIFICATION_DOCKER_ROUTE_SCHEMA_VERSION
+        or type(docker_sha256) is not str
+        or SHA256_PATTERN.fullmatch(docker_sha256) is None
+        or receipt.get("dockerClientPathId")
+        != f"S1_4X_DOCKER_CLIENT_SHA256_{str(docker_sha256).upper()}"
+        or receipt.get("hostToolsPathId")
+        != QUALIFICATION_HOST_TOOLS_PATH_ID
+        or receipt.get("dockerCommandPathId")
+        != QUALIFICATION_DOCKER_COMMAND_PATH_ID
+        or receipt.get("dockerConfigPathId")
+        != QUALIFICATION_DOCKER_CONFIG_PATH_ID
+        or receipt.get("dockerConfigTreeSha256")
+        != canonical_sha256([])
+        or receipt.get("dockerConfigWslEnv")
+        != QUALIFICATION_DOCKER_CONFIG_WSLENV
+        or receipt.get("dockerContext") != QUALIFICATION_DOCKER_CONTEXT
+        or receipt.get("ownerFdPathId")
+        != QUALIFICATION_OWNER_DOCKER_FD_PATH_ID
+        or not isinstance(owner, dict)
+        or set(owner) != {"pid", "startTicks", "uid"}
+        or type(owner.get("pid")) is not int
+        or owner["pid"] <= 0
+        or type(owner.get("startTicks")) is not int
+        or owner["startTicks"] <= 0
+        or type(owner.get("uid")) is not int
+        or owner["uid"] < 0
+        or type(receipt.get("snapshotSha256")) is not str
+        or SHA256_PATTERN.fullmatch(receipt["snapshotSha256"]) is None
+    ):
+        raise WorkflowError("QUALIFICATION_DOCKER_RECEIPT_INVALID")
+    snapshot = _validate_qualification_docker_snapshot(
+        receipt["snapshot"]
+    )
+    if (
+        receipt["snapshotSha256"] != snapshot["snapshotSha256"]
+        or receipt["dockerClientPathId"]
+        != snapshot["dockerClientPathId"]
+        or receipt["dockerClientSha256"]
+        != snapshot["dockerClientSha256"]
+        or receipt["hostToolsPathId"] != snapshot["hostToolsPathId"]
+        or receipt["dockerCommandPathId"]
+        != snapshot["dockerCommandPathId"]
+        or receipt["dockerConfigPathId"]
+        != snapshot["dockerConfigPathId"]
+        or receipt["dockerConfigTreeSha256"]
+        != snapshot["dockerConfigTreeSha256"]
+        or receipt["ownerFdPathId"] != snapshot["ownerFdPathId"]
+        or receipt["owner"] != snapshot["owner"]
+    ):
+        raise WorkflowError(
+            "QUALIFICATION_DOCKER_RECEIPT_SNAPSHOT_BINDING_INVALID"
+        )
+    if require_owner_exit and _process_identity_is_live(
+        owner["pid"],
+        owner["startTicks"],
+    ):
+        raise WorkflowError("QUALIFICATION_DOCKER_OWNER_STILL_LIVE")
+    return receipt
+
+
+def _validate_qualification_docker_owner_binding(
+    docker_route_receipt: Mapping[str, Any],
+    portable_witness: object,
+) -> None:
+    """Docker route와 marker FD가 같은 PID incarnation에서 생성됐는지 묶는다."""
+
+    route_owner = docker_route_receipt.get("owner")
+    witness_owner = (
+        portable_witness.get("owner")
+        if isinstance(portable_witness, dict)
+        else None
+    )
+    if (
+        not isinstance(route_owner, dict)
+        or witness_owner
+        != {
+            "pid": route_owner.get("pid"),
+            "startTicks": route_owner.get("startTicks"),
+        }
+    ):
+        raise WorkflowError("QUALIFICATION_DOCKER_OWNER_BINDING_INVALID")
 
 
 def _run_pinned_oci_docker_logged(
