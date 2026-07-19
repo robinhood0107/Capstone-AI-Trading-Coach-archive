@@ -960,6 +960,9 @@ def main() -> int:
         finally:
             restore_directory(class_output, class_output_original)
             restore_directory(generated_resources, resources_original)
+        shutil.rmtree(runtime_generator_input.parents[1])
+        shutil.rmtree(runtime_generator_output)
+        shutil.rmtree(runtime_class_output.parents[1])
 
         class_output_original = rotate_directory(class_output)
         try:
