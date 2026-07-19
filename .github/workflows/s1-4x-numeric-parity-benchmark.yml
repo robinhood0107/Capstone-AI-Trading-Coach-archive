@@ -259,6 +259,19 @@ jobs:
       - *bootstrap_scala
       - *bootstrap_haskell
 
+      - name: Bind exact Docker client for host validation
+        shell: bash
+        run: |
+          set -euo pipefail
+          S1_4X_DOCKER_BIN="$(readlink -f "$(command -v docker)")"
+          test -f "$S1_4X_DOCKER_BIN"
+          test -x "$S1_4X_DOCKER_BIN"
+          test ! -L "$S1_4X_DOCKER_BIN"
+          {
+            echo "S1_4X_DOCKER_BIN=$S1_4X_DOCKER_BIN"
+            echo "S1_4X_DOCKER_SHA256=$(sha256sum "$S1_4X_DOCKER_BIN" | awk '{print $1}')"
+          } >> "$GITHUB_ENV"
+
       - name: Download accepted correctness evidence
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
@@ -361,6 +374,7 @@ jobs:
                 --haskell-wrapper \
                   "$S1_4X/haskell/tools/run-benchmark-block.sh" \
                 --runtime-executable "uv=$S1_4X_UV_BIN" \
+                --runtime-executable "docker=$S1_4X_DOCKER_BIN" \
                 --runtime-executable "benchmarkPython=$S1_4X_BENCHMARK_PYTHON_BIN" \
                 --runtime-executable "scalaCli=$S1_4X_SCALA_CLI_BIN" \
                 --runtime-executable "java=$JAVA_HOME/bin/java" \
