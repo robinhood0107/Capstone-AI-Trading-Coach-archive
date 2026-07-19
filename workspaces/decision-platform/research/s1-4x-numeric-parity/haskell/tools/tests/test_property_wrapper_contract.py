@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import re
 import subprocess
 import sys
 import tempfile
@@ -265,6 +266,28 @@ class PropertyWrapperContractTests(unittest.TestCase):
         self.assertIn('root </> "source-inputs.v1.json"', source)
         self.assertIn('root </> "selected-profile.v1.json"', source)
         self.assertNotIn("filterMFile", source)
+
+    def test_haskell_and_python_property_configuration_closures_are_identical(
+        self,
+    ) -> None:
+        source = (
+            HASKELL_ROOT / "test/S14X/PropertyEvidence.hs"
+        ).read_text(encoding="utf-8")
+        matched = re.search(
+            r"(?ms)^propertyClosureConfigurationPaths :: \\[FilePath\\]\\n"
+            r"propertyClosureConfigurationPaths =\\n"
+            r"  \\[(.*?)^  \\]\\n",
+            source,
+        )
+        self.assertIsNotNone(matched)
+        assert matched is not None
+        haskell_paths = tuple(re.findall(r'"([^"]+)"', matched.group(1)))
+
+        self.assertEqual(
+            haskell_paths,
+            haskell_evidence.PROPERTY_CLOSURE_CONFIGURATION_PATHS,
+        )
+        self.assertEqual(len(haskell_paths), 51)
 
     def test_haskell_rechecks_expected_manifest_profile_and_source_tree_hashes(
         self,
