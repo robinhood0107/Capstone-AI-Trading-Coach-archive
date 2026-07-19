@@ -310,6 +310,10 @@ class NativeBenchmarkBlockTests(TestCase):
                 "produce_scala_native_evidence",
                 return_value=producer_result,
             ) as producer,
+            patch.dict(
+                os.environ,
+                {"S1_4X_LARGE_FIXTURE_ROOT": "/materialized-large-fixtures"},
+            ),
             redirect_stdout(output),
         ):
             self.assertEqual(native_block_module.main(argv), 0)
