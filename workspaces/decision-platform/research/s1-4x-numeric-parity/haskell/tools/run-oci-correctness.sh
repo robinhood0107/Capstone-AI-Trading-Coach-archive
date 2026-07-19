@@ -14,16 +14,25 @@ if [[ -v STACK_YAML || -v STACK_ROOT || -v STACK_OPTS || -v STACK_CONFIG ]]; the
   exit 64
 fi
 
-: "${S1_4X_DOCKER_BIN:?absolute pinned Docker client is required}"
-: "${S1_4X_DOCKER_SHA256:?pinned Docker client SHA-256 is required}"
+: "${S1_4X_DOCKER_BIN:?absolute Docker client is required}"
+: "${S1_4X_DOCKER_SHA256:?trusted Docker client SHA-256 is required}"
+: "${S1_4X_DOCKER_DAEMON_IDENTITY_SHA256:?trusted Docker daemon identity SHA-256 is required}"
 [[ "$S1_4X_DOCKER_BIN" == /* \
   && -f "$S1_4X_DOCKER_BIN" \
   && -x "$S1_4X_DOCKER_BIN" \
   && ! -L "$S1_4X_DOCKER_BIN" \
-  && "$(realpath "$S1_4X_DOCKER_BIN")" == "$S1_4X_DOCKER_BIN" \
-  && "$(sha256sum "$S1_4X_DOCKER_BIN" | awk '{print $1}')" \
-    == "$S1_4X_DOCKER_SHA256" ]] || {
-  echo "Docker client identity mismatch" >&2
+  && "$(realpath "$S1_4X_DOCKER_BIN")" == "$S1_4X_DOCKER_BIN" ]] || {
+  echo "Docker client path identity is unsafe" >&2
+  exit 69
+}
+[[ "$S1_4X_DOCKER_SHA256" =~ ^[0-9a-f]{64}$ \
+  && "$S1_4X_DOCKER_DAEMON_IDENTITY_SHA256" =~ ^[0-9a-f]{64}$ ]] || {
+  echo "Docker trust anchor format is invalid" >&2
+  exit 69
+}
+[[ "$(/usr/bin/sha256sum "$S1_4X_DOCKER_BIN")" == \
+  "$S1_4X_DOCKER_SHA256  $S1_4X_DOCKER_BIN" ]] || {
+  echo "Docker client SHA-256 mismatch" >&2
   exit 69
 }
 

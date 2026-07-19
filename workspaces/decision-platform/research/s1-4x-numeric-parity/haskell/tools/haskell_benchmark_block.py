@@ -1402,6 +1402,15 @@ def run_block(arguments: argparse.Namespace) -> dict[str, Any]:
         numeric_root / "haskell",
         label="HASKELL_ROOT",
     )
+    # Full timing은 orchestration이 check한 materialized large root만 소비한다.
+    large_fixture_root = _require_absolute_directory(
+        Path(_required_environment("S1_4X_LARGE_FIXTURE_ROOT")),
+        label="LARGE_FIXTURE_ROOT",
+    )
+    _require_absolute_directory(
+        large_fixture_root / "large",
+        label="LARGE_FIXTURE_DIRECTORY",
+    )
     integration_root = _require_absolute_directory(
         numeric_root / "integration",
         label="INTEGRATION_ROOT",
@@ -1623,9 +1632,7 @@ def run_block(arguments: argparse.Namespace) -> dict[str, Any]:
     environment.update(
         {
             "S1_4X_BENCHMARK_PLAN": str(plan_path),
-            "S1_4X_BENCHMARK_FIXTURE_ROOT": str(
-                numeric_root / "contract/fixtures"
-            ),
+            "S1_4X_LARGE_FIXTURE_ROOT": str(large_fixture_root),
             "S1_4X_BENCHMARK_QUALIFICATION": str(qualification_path),
             "S1_4X_BENCHMARK_SELECTOR_ID": arguments.selector,
             "S1_4X_BENCHMARK_RUNTIME_IDENTITY": str(runtime_identity_path),
@@ -1676,10 +1683,7 @@ def run_block(arguments: argparse.Namespace) -> dict[str, Any]:
         or sha256_file(artifact) != executed_benchmark_sha256
     ):
         raise BlockError("BENCHMARK_ARTIFACT_RUNTIME_IDENTITY_MISMATCH")
-    fixture_root = _require_absolute_directory(
-        numeric_root / "contract/fixtures",
-        label="FIXTURE_ROOT",
-    )
+    fixture_root = large_fixture_root
     receipt = {
         "schemaVersion": "s1.4x-native-case-execution-receipt-v1",
         "boundaryId": "haskell",

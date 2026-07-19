@@ -209,7 +209,8 @@ instance NFData PreparedCase where
 main :: IO ()
 main = do
   planPath <- configuredPath "S1_4X_BENCHMARK_PLAN" "../benchmarks/benchmark-plan.v1.json"
-  fixtureRoot <- configuredPath "S1_4X_BENCHMARK_FIXTURE_ROOT" "../contract/fixtures"
+  -- Shared materializer root는 large timing fixture만 담고 tracked correctness fixture와 분리된다.
+  fixtureRoot <- requiredConfiguredDirectory "S1_4X_LARGE_FIXTURE_ROOT"
   qualificationPath <- requiredConfiguredPath "S1_4X_BENCHMARK_QUALIFICATION"
   verifyPlanLock planPath
   plan <- decodeFile planPath
@@ -341,6 +342,22 @@ requiredConfiguredPath variable = do
   unless (exists && not symbolic) (fail (variable <> " must be a regular non-symlink"))
   canonical <- canonicalizePath configured
   unless (canonical == configured) (fail (variable <> " must already be canonical"))
+  pure canonical
+
+requiredConfiguredDirectory :: String -> IO FilePath
+requiredConfiguredDirectory variable = do
+  configured <- requiredConfiguredValue variable
+  unless (isAbsolute configured) (fail (variable <> " must be absolute"))
+  symbolic <- pathIsSymbolicLink configured
+  exists <- doesDirectoryExist configured
+  unless (exists && not symbolic) (fail (variable <> " must be a directory non-symlink"))
+  canonical <- canonicalizePath configured
+  unless (canonical == configured) (fail (variable <> " must already be canonical"))
+  largeExists <- doesDirectoryExist (configured </> "large")
+  largeSymbolic <- pathIsSymbolicLink (configured </> "large")
+  unless
+    (largeExists && not largeSymbolic)
+    (fail (variable <> "/large must be a directory non-symlink"))
   pure canonical
 
 requiredConfiguredValue :: String -> IO String

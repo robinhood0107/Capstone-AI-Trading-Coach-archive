@@ -82,6 +82,7 @@ QUALIFICATION_ARTIFACT="${S1_4X_HASKELL_QUALIFICATION_ARTIFACT:?S1_4X_HASKELL_QU
 QUALIFICATION_ARTIFACT_SHA256="${S1_4X_HASKELL_QUALIFICATION_ARTIFACT_SHA256:?S1_4X_HASKELL_QUALIFICATION_ARTIFACT_SHA256 is required}"
 QUALIFICATION_ARTIFACT_SOURCE_PATH="${S1_4X_HASKELL_QUALIFICATION_ARTIFACT_SOURCE_PATH:?S1_4X_HASKELL_QUALIFICATION_ARTIFACT_SOURCE_PATH is required}"
 CACHE_ROOT="${S1_4X_CACHE_ROOT:?S1_4X_CACHE_ROOT is required}"
+LARGE_FIXTURE_ROOT="${S1_4X_LARGE_FIXTURE_ROOT:?S1_4X_LARGE_FIXTURE_ROOT is required}"
 
 verify_source_path_layout() {
   local label="$1"
@@ -145,8 +146,15 @@ if [[ ! -f "$HELPER" \
   || "$CACHE_ROOT" != /* \
   || ! -d "$CACHE_ROOT" \
   || -L "$CACHE_ROOT" \
-  || "$(/usr/bin/realpath -e -- "$CACHE_ROOT")" != "$CACHE_ROOT" ]]; then
-  echo "benchmark helper/cache root identity is unsafe" >&2
+  || "$(/usr/bin/realpath -e -- "$CACHE_ROOT")" != "$CACHE_ROOT" \
+  || "$LARGE_FIXTURE_ROOT" != /* \
+  || ! -d "$LARGE_FIXTURE_ROOT" \
+  || -L "$LARGE_FIXTURE_ROOT" \
+  || ! -d "$LARGE_FIXTURE_ROOT/large" \
+  || -L "$LARGE_FIXTURE_ROOT/large" \
+  || "$(/usr/bin/realpath -e -- "$LARGE_FIXTURE_ROOT")" \
+    != "$LARGE_FIXTURE_ROOT" ]]; then
+  echo "benchmark helper/cache/large fixture root identity is unsafe" >&2
   exit 69
 fi
 
@@ -186,6 +194,7 @@ exec /usr/bin/env -i \
   S1_4X_HASKELL_QUALIFICATION_ARTIFACT_SHA256="$QUALIFICATION_ARTIFACT_SHA256" \
   S1_4X_HASKELL_QUALIFICATION_ARTIFACT_SOURCE_PATH="$QUALIFICATION_ARTIFACT_SOURCE_PATH" \
   S1_4X_CACHE_ROOT="$CACHE_ROOT" \
+  S1_4X_LARGE_FIXTURE_ROOT="$LARGE_FIXTURE_ROOT" \
   "$BENCHMARK_PYTHON_PINNED_FD_PATH" "$HELPER" \
   --repo-root "$REPO_ROOT" \
   --plan "$2" \

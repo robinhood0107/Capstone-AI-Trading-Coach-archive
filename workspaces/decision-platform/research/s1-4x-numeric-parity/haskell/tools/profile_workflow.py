@@ -79,8 +79,10 @@ PROFILE_MARKER_FIELDS = {
     "qualificationCaseOrder",
     "hostValiditySha256",
     "markerPythonPath",
+    "markerPythonPinnedFdPath",
     "markerPythonSha256",
     "markerScriptPath",
+    "markerScriptPinnedFdPath",
     "markerScriptSha256",
     "markerArgv",
     "markerArgvSha256",
@@ -102,10 +104,40 @@ FORBIDDEN_STACK_ENVIRONMENT = (
     "STACK_OPTS",
     "STACK_CONFIG",
 )
+OCI_PLATFORM = "linux/amd64"
+OCI_BASE_IMAGE = (
+    "docker.io/library/haskell@sha256:"
+    "417d4bc30ac7d8d5ff04ec97937f86eb508b0c76bfd1a39b5ec225688531aa9d"
+)
+OCI_PROVENANCE_LABEL_KEYS = {
+    "io.s1-4x.base-image-id",
+    "io.s1-4x.containerfile-sha256",
+    "io.s1-4x.fixture-tree-sha256",
+}
 
 
 class WorkflowError(RuntimeError):
     """Workflow input이나 실행 결과가 frozen contract에서 벗어났을 때 발생한다."""
+
+
+def _load_pinned_runtime_helpers() -> tuple[Any, Any, type[Exception]]:
+    """Qualification에서만 FD pin helper를 지연 import해 marker 단독 실행을 보존한다."""
+
+    try:
+        from haskell_benchmark_block import (
+            BlockError,
+            pin_regular_file,
+            pinned_executable_environment,
+        )
+    except ModuleNotFoundError as import_error:
+        if import_error.name != "haskell_benchmark_block":
+            raise
+        from tools.haskell_benchmark_block import (
+            BlockError,
+            pin_regular_file,
+            pinned_executable_environment,
+        )
+    return pinned_executable_environment, pin_regular_file, BlockError
 
 
 def canonical_json_bytes(value: Any, *, trailing_newline: bool = False) -> bytes:
@@ -261,14 +293,46 @@ def runtime_selected_profile(document: object) -> tuple[str, tuple[str, str]]:
     return profile_id, options
 
 
-def candidate_stack_root(cache_root: Path, output_path: Path) -> Path:
-    """Output path identity마다 재사용 불가능한 candidate Stack root를 파생한다."""
+def isolated_stack_root(
+    cache_root: Path,
+    *,
+    purpose: str,
+    output_path: Path,
+) -> Path:
+    """Workflow 목적과 output identity마다 재사용 불가능한 Stack root를 파생한다."""
 
-    if not cache_root.is_absolute() or not output_path.is_absolute():
-        raise WorkflowError("CANDIDATE_STACK_ROOT_INPUT_NOT_ABSOLUTE")
-    output_identity = os.fsencode(str(output_path))
-    suffix = hashlib.sha256(output_identity).hexdigest()[:24]
-    return cache_root / f"stack-root-candidate-{suffix}"
+    if (
+        not cache_root.is_absolute()
+        or not output_path.is_absolute()
+        or type(purpose) is not str
+        or re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", purpose) is None
+    ):
+        raise WorkflowError("ISOLATED_STACK_ROOT_INPUT_INVALID")
+    identity = purpose.encode("ascii") + b"\0" + os.fsencode(str(output_path))
+    suffix = hashlib.sha256(identity).hexdigest()[:24]
+    return cache_root / f"stack-root-{purpose}-{suffix}"
+
+
+def candidate_stack_root(cache_root: Path, output_path: Path) -> Path:
+    """통합 candidate의 output-bound Stack root를 호환 API로 반환한다."""
+
+    return isolated_stack_root(
+        cache_root,
+        purpose="candidate",
+        output_path=output_path,
+    )
+
+
+def isolated_stack_work_dir(stack_root: Path) -> Path:
+    """Output-bound Stack root 이름으로 project-relative build 산출물 경계를 만든다."""
+
+    if (
+        not stack_root.is_absolute()
+        or re.fullmatch(r"stack-root(?:-[a-z0-9]+)*", stack_root.name)
+        is None
+    ):
+        raise WorkflowError("ISOLATED_STACK_WORK_DIR_INPUT_INVALID")
+    return Path(".stack-work") / "s1-4x" / stack_root.name
 
 
 def build_stack_command(
@@ -277,6 +341,7 @@ def build_stack_command(
     stack: Path,
     stack_yaml: Path,
     stack_root: Path,
+    work_dir: Path | None = None,
     ghc_version: str,
     operation: Sequence[str],
 ) -> list[str]:
@@ -284,6 +349,15 @@ def build_stack_command(
 
     if ghc_version not in {"9.10.3", "9.14.1"}:
         raise WorkflowError("GHC_VERSION_INVALID")
+    expected_work_dir = isolated_stack_work_dir(stack_root)
+    effective_work_dir = (
+        expected_work_dir if work_dir is None else work_dir
+    )
+    if (
+        effective_work_dir.is_absolute()
+        or effective_work_dir != expected_work_dir
+    ):
+        raise WorkflowError("STACK_WORK_DIR_INVALID")
     if not operation or any(type(argument) is not str or not argument for argument in operation):
         raise WorkflowError("STACK_OPERATION_INVALID")
     return [
@@ -299,6 +373,8 @@ def build_stack_command(
         str(stack),
         "--stack-root",
         str(stack_root),
+        "--work-dir",
+        str(effective_work_dir),
         "--stack-yaml",
         str(stack_yaml),
         "--no-terminal",
@@ -326,6 +402,18 @@ def _require_iso_utc(value: object, *, label: str) -> str:
     return value
 
 
+def _pinned_fd_number(value: object) -> int | None:
+    """현재 process의 canonical inherited FD path만 lexical하게 해석한다."""
+
+    if type(value) is not str:
+        return None
+    matched = re.fullmatch(r"/proc/self/fd/([1-9][0-9]*)", value)
+    if matched is None:
+        return None
+    descriptor = int(matched.group(1))
+    return descriptor if descriptor >= 3 else None
+
+
 def build_profile_marker(
     *,
     plan_sha256: str,
@@ -336,8 +424,10 @@ def build_profile_marker(
     case_order: Sequence[str],
     host_validity_sha256: str,
     marker_python_path: str,
+    marker_python_pinned_fd_path: str,
     marker_python_sha256: str,
     marker_script_path: str,
+    marker_script_pinned_fd_path: str,
     marker_script_sha256: str,
     marker_argv: Sequence[str],
     started_at: str,
@@ -360,6 +450,8 @@ def build_profile_marker(
         or any(type(case_id) is not str or not case_id for case_id in case_order)
         or not marker_python_path.startswith("/")
         or not marker_script_path.startswith("/")
+        or _pinned_fd_number(marker_python_pinned_fd_path) is None
+        or _pinned_fd_number(marker_script_pinned_fd_path) is None
         or not marker_argv
         or any(type(argument) is not str or not argument for argument in marker_argv)
     ):
@@ -378,8 +470,10 @@ def build_profile_marker(
         "qualificationCaseOrder": list(case_order),
         "hostValiditySha256": host_validity_sha256,
         "markerPythonPath": marker_python_path,
+        "markerPythonPinnedFdPath": marker_python_pinned_fd_path,
         "markerPythonSha256": marker_python_sha256,
         "markerScriptPath": marker_script_path,
+        "markerScriptPinnedFdPath": marker_script_pinned_fd_path,
         "markerScriptSha256": marker_script_sha256,
         "markerArgv": marker_argv_list,
         "markerArgvSha256": canonical_sha256(marker_argv_list),
@@ -429,9 +523,11 @@ def _validate_profile_marker(document: object, *, state: str) -> dict[str, Any]:
         or not marker_argv
         or any(type(argument) is not str or not argument for argument in marker_argv)
         or document["markerArgvSha256"] != canonical_sha256(marker_argv)
-        or document.get("markerPythonPath") != marker_argv[0]
+        or document.get("markerPythonPinnedFdPath") != marker_argv[0]
         or len(marker_argv) != 5
-        or marker_argv[1] != document.get("markerScriptPath")
+        or marker_argv[1] != document.get("markerScriptPinnedFdPath")
+        or _pinned_fd_number(marker_argv[0]) is None
+        or _pinned_fd_number(marker_argv[1]) is None
         or marker_argv[2:] != [
             "mark-measurement-entered",
             "--qualification",
@@ -543,6 +639,28 @@ def _same_fd_json_value(
     except (UnicodeError, json.JSONDecodeError) as exc:
         raise WorkflowError(f"{label}_JSON_INVALID") from exc
     return payload, document, snapshot
+
+
+def _same_fd_logged_json_snapshot(
+    path: Path,
+    *,
+    label: str,
+    command_record: Mapping[str, Any],
+) -> tuple[Any, str]:
+    """한 command stdout FD의 bytes를 parse/hash 양쪽에 동일하게 결속한다."""
+
+    payload, document, _ = _same_fd_json_value(
+        path,
+        label=label,
+        max_bytes=64 * 1024 * 1024,
+    )
+    digest = hashlib.sha256(payload).hexdigest()
+    if (
+        command_record.get("stdoutPath") != str(path)
+        or command_record.get("stdoutSha256") != digest
+    ):
+        raise WorkflowError(f"{label}_COMMAND_LOG_BINDING_INVALID")
+    return document, digest
 
 
 def read_same_fd_json_evidence(
@@ -1136,8 +1254,10 @@ def build_oci_build_command(
     docker: Path,
     containerfile: Path,
     context: Path,
+    iidfile: Path,
     image_tag: str,
     binary_sha256: str,
+    provenance_labels: Mapping[str, str],
 ) -> list[str]:
     """Digest-pinned context를 network-disabled BuildKit command로 조립한다."""
 
@@ -1146,11 +1266,27 @@ def build_oci_build_command(
         re.fullmatch(r"local/s1-4x-haskell:[a-z0-9._-]+", image_tag) is None
         or not containerfile.is_absolute()
         or not context.is_absolute()
+        or not iidfile.is_absolute()
+        or set(provenance_labels) != OCI_PROVENANCE_LABEL_KEYS
+        or re.fullmatch(
+            r"sha256:[0-9a-f]{64}",
+            str(provenance_labels.get("io.s1-4x.base-image-id")),
+        )
+        is None
+        or any(
+            SHA256_PATTERN.fullmatch(str(provenance_labels.get(key))) is None
+            for key in (
+                "io.s1-4x.containerfile-sha256",
+                "io.s1-4x.fixture-tree-sha256",
+            )
+        )
     ):
         raise WorkflowError("OCI_BUILD_INPUT_INVALID")
-    return [
+    command = [
         str(docker),
         "build",
+        "--platform",
+        OCI_PLATFORM,
         "--network",
         "none",
         "--pull=false",
@@ -1158,10 +1294,19 @@ def build_oci_build_command(
         str(containerfile),
         "--build-arg",
         f"S1_4X_BINARY_SHA256={binary_sha256}",
-        "--tag",
-        image_tag,
-        str(context),
     ]
+    for key, value in sorted(provenance_labels.items()):
+        command.extend(["--label", f"{key}={value}"])
+    command.extend(
+        [
+            "--iidfile",
+            str(iidfile),
+            "--tag",
+            image_tag,
+            str(context),
+        ]
+    )
+    return command
 
 
 def build_oci_run_command(
@@ -1190,6 +1335,8 @@ def build_oci_run_command(
     return [
         str(docker),
         "run",
+        "--platform",
+        OCI_PLATFORM,
         "--rm",
         "--network",
         "none",
@@ -1218,11 +1365,107 @@ def build_oci_run_command(
     ]
 
 
+def build_oci_context_show_command(docker: Path) -> list[str]:
+    """`docker context show`의 활성 endpoint identity command를 고정한다."""
+
+    return [str(docker), "context", "show"]
+
+
+def validate_oci_daemon_identity(
+    document: object,
+    *,
+    context_name: str,
+    expected_identity_sha256: str,
+) -> dict[str, str]:
+    """Docker daemon이 동일한 Linux amd64 endpoint인지 portable subset으로 고정한다."""
+
+    _require_sha256(
+        expected_identity_sha256,
+        label="oci-daemon-identity",
+    )
+    if (
+        not isinstance(document, dict)
+        or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", context_name)
+        is None
+        or document.get("OSType") != "linux"
+        or document.get("Architecture") not in {"amd64", "x86_64"}
+        or any(
+            type(document.get(field)) is not str or not document[field]
+            for field in ("ID", "ServerVersion", "OperatingSystem")
+        )
+    ):
+        raise WorkflowError("OCI_DAEMON_IDENTITY_INVALID")
+    identity = {
+        "contextName": context_name,
+        "daemonId": document["ID"],
+        "serverVersion": document["ServerVersion"],
+        "operatingSystem": document["OperatingSystem"],
+        "osType": "linux",
+        "architecture": "amd64",
+        "platform": OCI_PLATFORM,
+    }
+    if canonical_sha256(identity) != expected_identity_sha256:
+        raise WorkflowError("OCI_DAEMON_IDENTITY_SHA256_MISMATCH")
+    return identity
+
+
+def validate_oci_base_image_inspection(
+    document: object,
+    *,
+    expected_reference: str,
+) -> str:
+    """Network-disabled build가 사용할 local digest와 immutable image ID를 결속한다."""
+
+    expected_digest = OCI_BASE_IMAGE.rsplit("@", 1)[1]
+    allowed_names = {
+        "haskell",
+        "library/haskell",
+        "docker.io/library/haskell",
+        "index.docker.io/library/haskell",
+    }
+    repository_digests = (
+        document.get("RepoDigests") if isinstance(document, dict) else None
+    )
+    digest_bound = (
+        isinstance(repository_digests, list)
+        and all(type(value) is str for value in repository_digests)
+        and any(
+            value.rpartition("@")[0] in allowed_names
+            and value.rpartition("@")[2] == expected_digest
+            for value in repository_digests
+        )
+    )
+    if (
+        expected_reference != OCI_BASE_IMAGE
+        or not isinstance(document, dict)
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", str(document.get("Id")))
+        is None
+        or not digest_bound
+        or document.get("Os") != "linux"
+        or document.get("Architecture") != "amd64"
+    ):
+        raise WorkflowError("OCI_BASE_IMAGE_INSPECTION_INVALID")
+    return document["Id"]
+
+
+def validate_oci_iid_bytes(payload: bytes) -> str:
+    """Docker CLI iidfile의 공백 없는 exact lowercase digest bytes를 검증한다."""
+
+    try:
+        value = payload.decode("ascii")
+    except UnicodeError as exc:
+        raise WorkflowError("OCI_IIDFILE_INVALID") from exc
+    if re.fullmatch(r"sha256:[0-9a-f]{64}", value) is None:
+        raise WorkflowError("OCI_IIDFILE_INVALID")
+    return value
+
+
 def validate_oci_image_inspection(
     document: object,
     *,
     image_tag: str,
     expected_image_id: str | None,
+    expected_labels: Mapping[str, str] | None = None,
 ) -> str:
     """Tag inspection이 최초 immutable image ID를 계속 가리키는지 검증한다."""
 
@@ -1233,17 +1476,35 @@ def validate_oci_image_inspection(
         raise WorkflowError("OCI_IMAGE_INSPECTION_INVALID")
     image_id = document.get("Id")
     repository_tags = document.get("RepoTags")
+    labels = (
+        document.get("Config", {}).get("Labels")
+        if isinstance(document.get("Config"), dict)
+        else None
+    )
     if (
         type(image_id) is not str
         or re.fullmatch(r"sha256:[0-9a-f]{64}", image_id) is None
         or not isinstance(repository_tags, list)
         or any(type(tag) is not str for tag in repository_tags)
         or image_tag not in repository_tags
+        or document.get("Os") != "linux"
+        or document.get("Architecture") != "amd64"
         or (
             expected_image_id is not None
             and (
                 re.fullmatch(r"sha256:[0-9a-f]{64}", expected_image_id) is None
                 or image_id != expected_image_id
+            )
+        )
+        or (
+            expected_labels is not None
+            and (
+                set(expected_labels) != OCI_PROVENANCE_LABEL_KEYS
+                or not isinstance(labels, dict)
+                or any(
+                    labels.get(key) != value
+                    for key, value in expected_labels.items()
+                )
             )
         )
     ):
@@ -1387,6 +1648,16 @@ def _candidate_runtime(arguments: argparse.Namespace) -> None:
 
 def _candidate_stack_root(arguments: argparse.Namespace) -> None:
     print(candidate_stack_root(arguments.cache_root, arguments.output))
+
+
+def _isolated_stack_root(arguments: argparse.Namespace) -> None:
+    print(
+        isolated_stack_root(
+            arguments.cache_root,
+            purpose=arguments.purpose,
+            output_path=arguments.output,
+        )
+    )
 
 
 def _repo_commit(repo_root: Path) -> str:
@@ -1625,6 +1896,7 @@ def _run_logged(
     phase: str,
     output_directory: Path,
     expected_exit_codes: frozenset[int] = frozenset({0}),
+    pass_fds: Sequence[int] = (),
 ) -> dict[str, Any]:
     if phase not in CORRECTNESS_PHASES and not phase.startswith(("qualification-", "oci-")):
         raise WorkflowError(f"COMMAND_PHASE_INVALID:{phase}")
@@ -1632,6 +1904,12 @@ def _run_logged(
     stderr_path = output_directory / f"{phase}.stderr"
     if stdout_path.exists() or stderr_path.exists():
         raise WorkflowError(f"COMMAND_LOG_ALREADY_EXISTS:{phase}")
+    descriptors = tuple(sorted(set(pass_fds)))
+    if any(
+        type(descriptor) is not int or descriptor < 3
+        for descriptor in descriptors
+    ):
+        raise WorkflowError(f"COMMAND_PASS_FDS_INVALID:{phase}")
     started_at = _iso_now()
     with stdout_path.open("xb") as standard_output, stderr_path.open("xb") as standard_error:
         completed = subprocess.run(
@@ -1642,6 +1920,7 @@ def _run_logged(
             stdin=subprocess.DEVNULL,
             stdout=standard_output,
             stderr=standard_error,
+            pass_fds=descriptors,
         )
     finished_at = _iso_now()
     record = {
@@ -1773,11 +2052,28 @@ def _run_compatibility_logged(
     }
 
 
-def _find_candidate_binary(haskell_root: Path, *, ghc_version: str) -> Path:
+def _find_candidate_binary(
+    haskell_root: Path,
+    *,
+    work_dir: Path,
+    ghc_version: str,
+) -> Path:
+    if (
+        work_dir.is_absolute()
+        or len(work_dir.parts) != 3
+        or work_dir.parts[:2] != (".stack-work", "s1-4x")
+        or re.fullmatch(r"[a-z0-9][a-z0-9-]{0,127}", work_dir.name)
+        is None
+    ):
+        raise WorkflowError("CANDIDATE_STACK_WORK_DIR_INVALID")
+    work_root = _absolute_existing_directory(
+        haskell_root / work_dir,
+        label="CANDIDATE_STACK_WORK_DIR",
+    )
     candidates = sorted(
         (
             path.resolve(strict=True)
-            for path in (haskell_root / ".stack-work/dist").glob(
+            for path in (work_root / "dist").glob(
                 f"*/ghc-{ghc_version}/build/s1-4x-haskell/s1-4x-haskell"
             )
             if path.is_file() and not path.is_symlink() and os.access(path, os.X_OK)
@@ -1827,10 +2123,19 @@ def _correctness(arguments: argparse.Namespace) -> None:
         Path(cache_root_value),
         label="CACHE_ROOT",
     )
-    stack_root = cache_root / f"stack-root-correctness-{profile_id}"
+    stack_root = isolated_stack_root(
+        cache_root,
+        purpose=f"correctness-{profile_id}",
+        output_path=output,
+    )
     if stack_root.exists() or stack_root.is_symlink():
         raise WorkflowError("CORRECTNESS_STACK_ROOT_ALREADY_EXISTS")
     stack_root.mkdir(mode=0o700)
+    work_dir = isolated_stack_work_dir(stack_root)
+    if (haskell_root / work_dir).exists() or (
+        haskell_root / work_dir
+    ).is_symlink():
+        raise WorkflowError("CORRECTNESS_STACK_WORK_DIR_ALREADY_EXISTS")
     candidate_commit = _repo_commit(repo_root)
     evidence = _load_haskell_evidence(haskell_root)
     source_tree_sha256 = evidence.benchmark_source_tree_sha256(haskell_root)
@@ -1844,6 +2149,7 @@ def _correctness(arguments: argparse.Namespace) -> None:
         stack=stack,
         stack_yaml=stack_yaml,
         stack_root=stack_root,
+        work_dir=work_dir,
         ghc_version="9.10.3",
         operation=[
             "build",
@@ -1860,6 +2166,7 @@ def _correctness(arguments: argparse.Namespace) -> None:
         stack=stack,
         stack_yaml=stack_yaml,
         stack_root=stack_root,
+        work_dir=work_dir,
         ghc_version="9.10.3",
         operation=["test", "--pedantic", f"--ghc-options={' '.join(options)}"],
     )
@@ -1879,7 +2186,11 @@ def _correctness(arguments: argparse.Namespace) -> None:
             output_directory=output,
         ),
     ]
-    candidate_binary = _find_candidate_binary(haskell_root, ghc_version="9.10.3")
+    candidate_binary = _find_candidate_binary(
+        haskell_root,
+        work_dir=work_dir,
+        ghc_version="9.10.3",
+    )
     fixture_root = _absolute_existing_directory(
         numeric_root / "contract/fixtures",
         label="FIXTURE_ROOT",
@@ -1984,6 +2295,7 @@ def _correctness(arguments: argparse.Namespace) -> None:
         "candidateBinaryPath": str(candidate_binary),
         "candidateBinarySha256": sha256_file(candidate_binary),
         "stackRootPath": str(stack_root),
+        "stackWorkDir": str(work_dir),
         "stackYamlPath": str(stack_yaml),
         "stackYamlSha256": sha256_file(stack_yaml),
         "commands": records,
@@ -2195,6 +2507,7 @@ def _criterion_qualification_command(
     stack: Path,
     stack_yaml: Path,
     stack_root: Path,
+    work_dir: Path,
     profile_id: str,
     time_limit_seconds: int,
     raw_report: Path,
@@ -2206,6 +2519,7 @@ def _criterion_qualification_command(
         stack=stack,
         stack_yaml=stack_yaml,
         stack_root=stack_root,
+        work_dir=work_dir,
         ghc_version="9.10.3",
         operation=[
             "bench",
@@ -2241,26 +2555,59 @@ def _qualification(arguments: argparse.Namespace) -> None:
     ghcup = _required_environment_path("S1_4X_GHCUP_BIN")
     stack = _required_environment_path("S1_4X_STACK_BIN")
     ghc = _required_environment_path("S1_4X_AUTHORITATIVE_GHC_BIN")
-    marker_python = _required_environment_path("S1_4X_BENCHMARK_PYTHON_BIN")
-    configured_python_sha256 = _require_sha256(
-        os.environ.get("S1_4X_BENCHMARK_PYTHON_SHA256"),
-        label="benchmark-python",
+    # Shared materializer root는 large timing 전용이며 correctness/OCI static fixture와 섞지 않는다.
+    large_fixture_value = os.environ.get("S1_4X_LARGE_FIXTURE_ROOT")
+    if large_fixture_value is None:
+        raise WorkflowError(
+            "REQUIRED_ENVIRONMENT_MISSING:S1_4X_LARGE_FIXTURE_ROOT"
+        )
+    large_fixture_root = _absolute_existing_directory(
+        Path(large_fixture_value),
+        label="LARGE_FIXTURE_ROOT",
     )
-    if sha256_file(marker_python) != configured_python_sha256:
-        raise WorkflowError("BENCHMARK_PYTHON_SHA256_MISMATCH")
-    marker_script = _absolute_regular(
-        Path(__file__).resolve(strict=True),
-        label="PROFILE_MARKER_SCRIPT",
+    _absolute_existing_directory(
+        large_fixture_root / "large",
+        label="LARGE_FIXTURE_DIRECTORY",
     )
-    marker_script_sha256 = sha256_file(marker_script)
+    (
+        pinned_executable_environment,
+        pin_regular_file,
+        pinned_runtime_error,
+    ) = _load_pinned_runtime_helpers()
+    try:
+        marker_python = pinned_executable_environment(
+            "S1_4X_BENCHMARK_PYTHON",
+            label="QUALIFICATION_MARKER_PYTHON",
+        )
+        marker_script = pin_regular_file(
+            _absolute_regular(
+                Path(__file__).resolve(strict=True),
+                label="PROFILE_MARKER_SCRIPT",
+            ),
+            label="PROFILE_MARKER_SCRIPT",
+            max_bytes=16 * 1024 * 1024,
+        )
+    except pinned_runtime_error as exc:
+        raise WorkflowError(f"QUALIFICATION_PINNED_RUNTIME_INVALID:{exc}") from exc
+    configured_python_sha256 = marker_python.sha256
+    marker_script_sha256 = marker_script.sha256
     cache_value = os.environ.get("S1_4X_CACHE_ROOT")
     if cache_value is None:
         raise WorkflowError("REQUIRED_ENVIRONMENT_MISSING:S1_4X_CACHE_ROOT")
     cache_root = _absolute_existing_directory(Path(cache_value), label="CACHE_ROOT")
-    stack_root = cache_root / "stack-root-profile-qualification"
+    stack_root = isolated_stack_root(
+        cache_root,
+        purpose="qualification",
+        output_path=output,
+    )
     if stack_root.exists() or stack_root.is_symlink():
         raise WorkflowError("QUALIFICATION_STACK_ROOT_ALREADY_EXISTS")
     stack_root.mkdir(mode=0o700)
+    work_dir = isolated_stack_work_dir(stack_root)
+    if (haskell_root / work_dir).exists() or (
+        haskell_root / work_dir
+    ).is_symlink():
+        raise WorkflowError("QUALIFICATION_STACK_WORK_DIR_ALREADY_EXISTS")
     environment = _sealed_child_environment(ghc_bin=ghc, stack_bin=stack)
     stack_yaml = _absolute_regular(
         haskell_root / "stack.yaml",
@@ -2282,7 +2629,7 @@ def _qualification(arguments: argparse.Namespace) -> None:
                 plan=plan,
                 output=host_report,
                 root_pid=os.getpid(),
-                python_bin=marker_python,
+                python_bin=marker_python.fd_path,
             )
             host_record = _run_logged(
                 host_command,
@@ -2290,12 +2637,13 @@ def _qualification(arguments: argparse.Namespace) -> None:
                 environment=environment,
                 phase=f"qualification-{prefix}-host",
                 output_directory=output,
+                pass_fds=(marker_python.descriptor,),
             )
             _validate_host_report(host_report, plan=plan, root_pid=os.getpid())
             marker_path = output / f"{prefix}-measurement-state.json"
             marker_argv = [
-                str(marker_python),
-                str(marker_script),
+                str(marker_python.fd_path),
+                str(marker_script.fd_path),
                 "mark-measurement-entered",
                 "--qualification",
                 str(marker_path),
@@ -2308,9 +2656,11 @@ def _qualification(arguments: argparse.Namespace) -> None:
                 profile_id=profile_id,
                 case_order=case_order,
                 host_validity_sha256=sha256_file(host_report),
-                marker_python_path=str(marker_python),
+                marker_python_path=str(marker_python.source_path),
+                marker_python_pinned_fd_path=str(marker_python.fd_path),
                 marker_python_sha256=configured_python_sha256,
-                marker_script_path=str(marker_script),
+                marker_script_path=str(marker_script.source_path),
+                marker_script_pinned_fd_path=str(marker_script.fd_path),
                 marker_script_sha256=marker_script_sha256,
                 marker_argv=marker_argv,
                 started_at=_iso_now(),
@@ -2323,6 +2673,7 @@ def _qualification(arguments: argparse.Namespace) -> None:
                 stack=stack,
                 stack_yaml=stack_yaml,
                 stack_root=stack_root,
+                work_dir=work_dir,
                 profile_id=profile_id,
                 time_limit_seconds=configuration["criterionTimeLimitSeconds"],
                 raw_report=raw_report,
@@ -2332,15 +2683,13 @@ def _qualification(arguments: argparse.Namespace) -> None:
             profile_environment.update(
                 {
                     "S1_4X_BENCHMARK_PLAN": str(plan_path),
-                    "S1_4X_BENCHMARK_FIXTURE_ROOT": str(
-                        numeric_root / "contract/fixtures"
-                    ),
+                    "S1_4X_LARGE_FIXTURE_ROOT": str(large_fixture_root),
                     "S1_4X_BENCHMARK_QUALIFICATION": str(marker_path),
-                    "S1_4X_BENCHMARK_MARKER_PYTHON": str(marker_python),
+                    "S1_4X_BENCHMARK_MARKER_PYTHON": str(marker_python.fd_path),
                     "S1_4X_BENCHMARK_MARKER_PYTHON_SHA256": (
                         configured_python_sha256
                     ),
-                    "S1_4X_BENCHMARK_MARKER_SCRIPT": str(marker_script),
+                    "S1_4X_BENCHMARK_MARKER_SCRIPT": str(marker_script.fd_path),
                     "S1_4X_BENCHMARK_MARKER_SCRIPT_SHA256": (
                         marker_script_sha256
                     ),
@@ -2353,6 +2702,10 @@ def _qualification(arguments: argparse.Namespace) -> None:
                 environment=profile_environment,
                 phase=f"qualification-{prefix}-criterion",
                 output_directory=output,
+                pass_fds=(
+                    marker_python.descriptor,
+                    marker_script.descriptor,
+                ),
             )
             finished_at = _iso_now()
             raw = strict_json_load(raw_report)
@@ -2393,9 +2746,11 @@ def _qualification(arguments: argparse.Namespace) -> None:
                         "path": str(marker_path),
                         "preRunSha256": pre_run_sha256,
                         "measurementSha256": sha256_file(marker_path),
-                        "pythonPath": str(marker_python),
+                        "pythonPath": str(marker_python.source_path),
+                        "pythonPinnedFdPath": str(marker_python.fd_path),
                         "pythonSha256": configured_python_sha256,
-                        "scriptPath": str(marker_script),
+                        "scriptPath": str(marker_script.source_path),
+                        "scriptPinnedFdPath": str(marker_script.fd_path),
                         "scriptSha256": marker_script_sha256,
                         "argv": marker_argv,
                         "argvSha256": canonical_sha256(marker_argv),
@@ -2446,6 +2801,7 @@ def _qualification(arguments: argparse.Namespace) -> None:
         "planSha256": plan_sha256,
         "selectorConfigSha256": selector_config_sha256,
         "sourceTreeSha256": source_tree_sha256,
+        "stackWorkDir": str(work_dir),
         "qualificationCaseOrder": list(case_order),
         "plannedProfileOrderBlocks": [
             list(block) for block in PROFILE_ORDER_BLOCKS
@@ -2496,6 +2852,7 @@ def _validate_correctness_receipt(
         "candidateBinaryPath",
         "candidateBinarySha256",
         "stackRootPath",
+        "stackWorkDir",
         "stackYamlPath",
         "stackYamlSha256",
         "commands",
@@ -2539,11 +2896,15 @@ def _validate_correctness_receipt(
         Path(str(receipt.get("stackRootPath", ""))),
         label="CORRECTNESS_STACK_ROOT",
     )
-    if (
-        stack_root
-        != cache_root / f"stack-root-correctness-{expected_profile_id}"
+    if stack_root != isolated_stack_root(
+        cache_root,
+        purpose=f"correctness-{expected_profile_id}",
+        output_path=output,
     ):
         raise WorkflowError("CORRECTNESS_STACK_ROOT_DRIFT")
+    work_dir = Path(str(receipt.get("stackWorkDir", "")))
+    if work_dir != isolated_stack_work_dir(stack_root):
+        raise WorkflowError("CORRECTNESS_STACK_WORK_DIR_DRIFT")
     stack_yaml = _absolute_regular(
         Path(str(receipt.get("stackYamlPath", ""))),
         label="CORRECTNESS_STACK_YAML",
@@ -2565,7 +2926,11 @@ def _validate_correctness_receipt(
     )
     if (
         candidate_binary
-        != _find_candidate_binary(haskell_root, ghc_version="9.10.3")
+        != _find_candidate_binary(
+            haskell_root,
+            work_dir=work_dir,
+            ghc_version="9.10.3",
+        )
         or receipt.get("candidateBinarySha256")
         != sha256_file(candidate_binary)
     ):
@@ -2575,6 +2940,7 @@ def _validate_correctness_receipt(
         stack=stack,
         stack_yaml=stack_yaml,
         stack_root=stack_root,
+        work_dir=work_dir,
         ghc_version="9.10.3",
         operation=[
             "build",
@@ -2591,6 +2957,7 @@ def _validate_correctness_receipt(
         stack=stack,
         stack_yaml=stack_yaml,
         stack_root=stack_root,
+        work_dir=work_dir,
         ghc_version="9.10.3",
         operation=[
             "test",
@@ -2791,6 +3158,7 @@ def _validate_qualification_artifact(
         "planSha256",
         "selectorConfigSha256",
         "sourceTreeSha256",
+        "stackWorkDir",
         "qualificationCaseOrder",
         "plannedProfileOrderBlocks",
         "blocks",
@@ -2847,9 +3215,16 @@ def _validate_qualification_artifact(
         label="CACHE_ROOT",
     )
     stack_root = _absolute_existing_directory(
-        cache_root / "stack-root-profile-qualification",
+        isolated_stack_root(
+            cache_root,
+            purpose="qualification",
+            output_path=output,
+        ),
         label="QUALIFICATION_STACK_ROOT",
     )
+    work_dir = Path(str(artifact.get("stackWorkDir", "")))
+    if work_dir != isolated_stack_work_dir(stack_root):
+        raise WorkflowError("QUALIFICATION_STACK_WORK_DIR_DRIFT")
     stack_yaml = _absolute_regular(
         haskell_root / "stack.yaml",
         label="AUTHORITATIVE_STACK_YAML",
@@ -2874,8 +3249,10 @@ def _validate_qualification_artifact(
         "preRunSha256",
         "measurementSha256",
         "pythonPath",
+        "pythonPinnedFdPath",
         "pythonSha256",
         "scriptPath",
+        "scriptPinnedFdPath",
         "scriptSha256",
         "argv",
         "argvSha256",
@@ -2972,7 +3349,7 @@ def _validate_qualification_artifact(
                 plan=plan,
                 output=host_report_path,
                 root_pid=root_pid,
-                python_bin=marker_python,
+                python_bin=Path(str(marker.get("pythonPinnedFdPath", ""))),
             )
             validate_logged_command_record(
                 host_record,
@@ -3007,9 +3384,15 @@ def _validate_qualification_artifact(
                 != list(case_order)
                 or measurement.get("hostValiditySha256") != host_sha256
                 or measurement.get("markerPythonPath") != str(marker_python)
+                or measurement.get("markerPythonPinnedFdPath")
+                != marker.get("pythonPinnedFdPath")
+                or _pinned_fd_number(marker.get("pythonPinnedFdPath")) is None
                 or measurement.get("markerPythonSha256")
                 != marker_python_sha256
                 or measurement.get("markerScriptPath") != str(marker_script)
+                or measurement.get("markerScriptPinnedFdPath")
+                != marker.get("scriptPinnedFdPath")
+                or _pinned_fd_number(marker.get("scriptPinnedFdPath")) is None
                 or measurement.get("markerScriptSha256")
                 != marker_script_sha256
                 or marker.get("preRunSha256")
@@ -3025,8 +3408,8 @@ def _validate_qualification_artifact(
                 != measurement.get("markerArgvSha256")
                 or measurement.get("markerArgv")
                 != [
-                    str(marker_python),
-                    str(marker_script),
+                    marker.get("pythonPinnedFdPath"),
+                    marker.get("scriptPinnedFdPath"),
                     "mark-measurement-entered",
                     "--qualification",
                     str(marker_path),
@@ -3047,6 +3430,7 @@ def _validate_qualification_artifact(
                 stack=stack,
                 stack_yaml=stack_yaml,
                 stack_root=stack_root,
+                work_dir=work_dir,
                 profile_id=expected_profile_id,
                 time_limit_seconds=configuration[
                     "criterionTimeLimitSeconds"
@@ -3290,6 +3674,9 @@ def _portable_compatibility_command_record(
         str(stack): "GHCUP_STACK_3_11_1",
         str(stack_yaml): "HASKELL_GHC_914_STACK_YAML",
         str(stack_root): "CACHE_ROOT_COMPATIBILITY_STACK_ROOT",
+        str(isolated_stack_work_dir(stack_root)): (
+            "HASKELL_COMPAT_STACK_WORK_DIR"
+        ),
     }
     portable_argv = [replacements.get(argument, argument) for argument in command]
     if any(argument.startswith("/") for argument in portable_argv):
@@ -3567,6 +3954,7 @@ def _current_compatibility_evidence(
         stack=stack,
         stack_yaml=stack_yaml,
         stack_root=stack_root,
+        work_dir=isolated_stack_work_dir(stack_root),
         ghc_version="9.14.1",
         operation=[
             "build",
@@ -3838,6 +4226,7 @@ def _replay_compatibility_success(arguments: argparse.Namespace) -> None:
         arguments.stack_root,
         label="COMPATIBILITY_STACK_ROOT",
     )
+    work_dir = isolated_stack_work_dir(stack_root)
     standard_output = _absolute_regular(
         arguments.stdout,
         label="COMPATIBILITY_SOLVE_STDOUT",
@@ -3891,6 +4280,7 @@ def _replay_compatibility_success(arguments: argparse.Namespace) -> None:
         stack=stack,
         stack_yaml=stack_yaml,
         stack_root=stack_root,
+        work_dir=work_dir,
         ghc_version="9.14.1",
         operation=[
             "build",
@@ -3937,6 +4327,7 @@ def _replay_compatibility_success(arguments: argparse.Namespace) -> None:
     raw_inputs = {
         "stackYamlPath": str(stack_yaml),
         "stackRootPath": str(stack_root),
+        "stackWorkDir": str(work_dir),
         "authoritativeBootDumpPath": str(authoritative_boot_dump),
         "compatibilityBootDumpPath": str(compatibility_boot_dump),
         "pantryDbPath": str(pantry_db),
@@ -4016,6 +4407,7 @@ def _replay_compatibility_success(arguments: argparse.Namespace) -> None:
         stack=stack,
         stack_yaml=stack_yaml,
         stack_root=stack_root,
+        work_dir=work_dir,
         ghc_version="9.14.1",
         operation=[
             "build",
@@ -4037,6 +4429,7 @@ def _replay_compatibility_success(arguments: argparse.Namespace) -> None:
         return
     candidate_binary = _find_candidate_binary(
         haskell_root,
+        work_dir=work_dir,
         ghc_version="9.14.1",
     )
     compile_path, compile_sha256 = _write_compatibility_phase_evidence(
@@ -4063,6 +4456,7 @@ def _replay_compatibility_success(arguments: argparse.Namespace) -> None:
         stack=stack,
         stack_yaml=stack_yaml,
         stack_root=stack_root,
+        work_dir=work_dir,
         ghc_version="9.14.1",
         operation=["test", "--pedantic"],
     )
@@ -4752,22 +5146,150 @@ def _copy_oci_context(
     containerfile: Path,
     binary: Path,
     fixture_root: Path,
-) -> None:
+) -> dict[str, str]:
     if context.exists() or context.is_symlink():
         raise WorkflowError("OCI_CONTEXT_ALREADY_EXISTS")
+    _absolute_regular(containerfile, label="OCI_CONTAINERFILE_SOURCE")
+    _absolute_regular(binary, label="OCI_BINARY_SOURCE", executable=True)
+    _absolute_existing_directory(fixture_root, label="OCI_FIXTURE_SOURCE")
     for path in fixture_root.rglob("*"):
         if path.is_symlink():
             raise WorkflowError(f"OCI_FIXTURE_SYMLINK_FORBIDDEN:{path}")
+    containerfile_payload, _ = _same_fd_bytes_snapshot(
+        containerfile,
+        label="OCI_CONTAINERFILE_SOURCE",
+        max_bytes=1024 * 1024,
+    )
+    binary_payload, _ = _same_fd_bytes_snapshot(
+        binary,
+        label="OCI_BINARY_SOURCE",
+        max_bytes=512 * 1024 * 1024,
+    )
+    source_fixture_sha256 = _regular_tree_sha256(
+        fixture_root,
+        label="OCI_FIXTURE_SOURCE",
+    )
     context.mkdir(mode=0o700)
-    shutil.copy2(containerfile, context / "Containerfile")
+    staged_containerfile = context / "Containerfile"
+    with staged_containerfile.open("xb") as stream:
+        stream.write(containerfile_payload)
     staged_binary = context / "s1-4x-haskell"
-    shutil.copy2(binary, staged_binary)
+    with staged_binary.open("xb") as stream:
+        stream.write(binary_payload)
     staged_binary.chmod(0o555)
     shutil.copytree(
         fixture_root,
         context / "fixtures",
         copy_function=shutil.copy2,
     )
+    snapshot = {
+        "binarySha256": hashlib.sha256(binary_payload).hexdigest(),
+        "containerfileSha256": hashlib.sha256(
+            containerfile_payload
+        ).hexdigest(),
+        "fixtureTreeSha256": source_fixture_sha256,
+    }
+    _validate_oci_context_snapshot(context, expected=snapshot)
+    return snapshot
+
+
+def _validate_oci_context_snapshot(
+    context: Path,
+    *,
+    expected: Mapping[str, str],
+) -> dict[str, str]:
+    """Docker build context의 exact staged bytes와 tree를 다시 검증한다."""
+
+    if set(expected) != {
+        "binarySha256",
+        "containerfileSha256",
+        "fixtureTreeSha256",
+    }:
+        raise WorkflowError("OCI_CONTEXT_SNAPSHOT_INPUT_INVALID")
+    for label, value in expected.items():
+        _require_sha256(value, label=f"oci-context-{label}")
+    root = _absolute_existing_directory(context, label="OCI_CONTEXT")
+    if {path.name for path in root.iterdir()} != {
+        "Containerfile",
+        "fixtures",
+        "s1-4x-haskell",
+    }:
+        raise WorkflowError("OCI_CONTEXT_ENTRY_SET_INVALID")
+    containerfile_payload, _ = _same_fd_bytes_snapshot(
+        root / "Containerfile",
+        label="OCI_CONTEXT_CONTAINERFILE",
+        max_bytes=1024 * 1024,
+    )
+    binary_payload, _ = _same_fd_bytes_snapshot(
+        root / "s1-4x-haskell",
+        label="OCI_CONTEXT_BINARY",
+        max_bytes=512 * 1024 * 1024,
+    )
+    actual = {
+        "binarySha256": hashlib.sha256(binary_payload).hexdigest(),
+        "containerfileSha256": hashlib.sha256(
+            containerfile_payload
+        ).hexdigest(),
+        "fixtureTreeSha256": _regular_tree_sha256(
+            root / "fixtures",
+            label="OCI_FIXTURE_CONTEXT",
+        ),
+    }
+    if actual != dict(expected):
+        raise WorkflowError("OCI_CONTEXT_SNAPSHOT_DRIFT")
+    return actual
+
+
+def _regular_tree_sha256(root: Path, *, label: str) -> str:
+    """Symlink 없는 regular tree의 relative path와 raw bytes를 canonical hash한다."""
+
+    directory = _absolute_existing_directory(root, label=label)
+    entries: list[bytes] = []
+    for path in sorted(
+        directory.rglob("*"),
+        key=lambda item: item.relative_to(directory).as_posix().encode(),
+    ):
+        relative = path.relative_to(directory).as_posix()
+        if path.is_symlink():
+            raise WorkflowError(f"{label}_TREE_SYMLINK:{relative}")
+        if path.is_dir():
+            continue
+        if not path.is_file():
+            raise WorkflowError(f"{label}_TREE_ENTRY_INVALID:{relative}")
+        entries.append(
+            relative.encode("utf-8")
+            + b"\0"
+            + sha256_file(path).encode("ascii")
+            + b"\n"
+        )
+    if not entries:
+        raise WorkflowError(f"{label}_TREE_EMPTY")
+    return hashlib.sha256(b"".join(entries)).hexdigest()
+
+
+def _oci_context_name(
+    path: Path,
+    *,
+    command_record: Mapping[str, Any],
+) -> str:
+    payload, _ = _same_fd_bytes_snapshot(
+        path,
+        label="OCI_CONTEXT_NAME",
+        max_bytes=1024,
+    )
+    if (
+        command_record.get("stdoutPath") != str(path)
+        or command_record.get("stdoutSha256")
+        != hashlib.sha256(payload).hexdigest()
+    ):
+        raise WorkflowError("OCI_CONTEXT_NAME_COMMAND_LOG_BINDING_INVALID")
+    try:
+        value = payload.decode("utf-8")
+    except UnicodeError as exc:
+        raise WorkflowError("OCI_CONTEXT_NAME_INVALID") from exc
+    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\n", value) is None:
+        raise WorkflowError("OCI_CONTEXT_NAME_INVALID")
+    return value[:-1]
 
 
 def _oci_correctness(arguments: argparse.Namespace) -> None:
@@ -4805,11 +5327,16 @@ def _oci_correctness(arguments: argparse.Namespace) -> None:
     profile_id = profile["profileId"]
     options = profile_options(profile_id)
     docker = _required_environment_path("S1_4X_DOCKER_BIN")
-    docker_sha256 = _require_sha256(
+    expected_docker_sha256 = _require_sha256(
         os.environ.get("S1_4X_DOCKER_SHA256"),
-        label="docker-bin",
+        label="docker",
     )
-    if sha256_file(docker) != docker_sha256:
+    expected_daemon_identity_sha256 = _require_sha256(
+        os.environ.get("S1_4X_DOCKER_DAEMON_IDENTITY_SHA256"),
+        label="docker-daemon-identity",
+    )
+    docker_sha256 = sha256_file(docker)
+    if docker_sha256 != expected_docker_sha256:
         raise WorkflowError("DOCKER_SHA256_MISMATCH")
     ghcup = _required_environment_path("S1_4X_GHCUP_BIN")
     stack = _required_environment_path("S1_4X_STACK_BIN")
@@ -4818,14 +5345,24 @@ def _oci_correctness(arguments: argparse.Namespace) -> None:
     if cache_value is None:
         raise WorkflowError("REQUIRED_ENVIRONMENT_MISSING:S1_4X_CACHE_ROOT")
     cache_root = _absolute_existing_directory(Path(cache_value), label="CACHE_ROOT")
-    suffix = f"{candidate_commit[:12]}-{profile_id}"
-    stack_root = cache_root / f"stack-root-oci-{suffix}"
+    output_identity = hashlib.sha256(os.fsencode(str(output))).hexdigest()[:12]
+    suffix = f"{candidate_commit[:12]}-{profile_id}-{output_identity}"
+    stack_root = isolated_stack_root(
+        cache_root,
+        purpose="oci",
+        output_path=output,
+    )
     context = cache_root / f"oci-context-{suffix}"
     docker_config = cache_root / f"docker-config-{suffix}"
     for path in (stack_root, context, docker_config):
         if path.exists() or path.is_symlink():
             raise WorkflowError(f"OCI_CACHE_PATH_ALREADY_EXISTS:{path.name}")
     stack_root.mkdir(mode=0o700)
+    work_dir = isolated_stack_work_dir(stack_root)
+    if (haskell_root / work_dir).exists() or (
+        haskell_root / work_dir
+    ).is_symlink():
+        raise WorkflowError("OCI_STACK_WORK_DIR_ALREADY_EXISTS")
     docker_config.mkdir(mode=0o700)
     environment = _sealed_child_environment(ghc_bin=ghc, stack_bin=stack)
     environment["DOCKER_CONFIG"] = str(docker_config)
@@ -4838,6 +5375,7 @@ def _oci_correctness(arguments: argparse.Namespace) -> None:
         stack=stack,
         stack_yaml=stack_yaml,
         stack_root=stack_root,
+        work_dir=work_dir,
         ghc_version="9.10.3",
         operation=[
             "build",
@@ -4855,7 +5393,75 @@ def _oci_correctness(arguments: argparse.Namespace) -> None:
             output_directory=output,
         )
     ]
-    binary = _find_candidate_binary(haskell_root, ghc_version="9.10.3")
+    context_show_command = build_oci_context_show_command(docker)
+    context_before_record = _run_logged(
+        context_show_command,
+        cwd=cache_root,
+        environment=environment,
+        phase="oci-context-before",
+        output_directory=output,
+    )
+    commands.append(context_before_record)
+    context_name = _oci_context_name(
+        output / "oci-context-before.stdout",
+        command_record=context_before_record,
+    )
+    daemon_info_command = [
+        str(docker),
+        "info",
+        "--format",
+        "{{json .}}",
+    ]
+    daemon_before_record = _run_logged(
+        daemon_info_command,
+        cwd=cache_root,
+        environment=environment,
+        phase="oci-daemon-before",
+        output_directory=output,
+    )
+    commands.append(daemon_before_record)
+    daemon_before_document, _ = _same_fd_logged_json_snapshot(
+        output / "oci-daemon-before.stdout",
+        label="OCI_DAEMON_BEFORE",
+        command_record=daemon_before_record,
+    )
+    daemon_identity_before = validate_oci_daemon_identity(
+        daemon_before_document,
+        context_name=context_name,
+        expected_identity_sha256=expected_daemon_identity_sha256,
+    )
+    base_inspect_command = [
+        str(docker),
+        "image",
+        "inspect",
+        "--format",
+        "{{json .}}",
+        OCI_BASE_IMAGE,
+    ]
+    base_before_record = _run_logged(
+        base_inspect_command,
+        cwd=cache_root,
+        environment=environment,
+        phase="oci-base-before",
+        output_directory=output,
+    )
+    commands.append(base_before_record)
+    base_before_document, base_inspection_before_sha256 = (
+        _same_fd_logged_json_snapshot(
+            output / "oci-base-before.stdout",
+            label="OCI_BASE_BEFORE",
+            command_record=base_before_record,
+        )
+    )
+    base_image_id = validate_oci_base_image_inspection(
+        base_before_document,
+        expected_reference=OCI_BASE_IMAGE,
+    )
+    binary = _find_candidate_binary(
+        haskell_root,
+        work_dir=work_dir,
+        ghc_version="9.10.3",
+    )
     fixture_root = _absolute_existing_directory(
         numeric_root / "contract/fixtures",
         label="FIXTURE_ROOT",
@@ -4864,21 +5470,33 @@ def _oci_correctness(arguments: argparse.Namespace) -> None:
         haskell_root / "Containerfile",
         label="CONTAINERFILE",
     )
-    _copy_oci_context(
+    context_snapshot = _copy_oci_context(
         context=context,
         containerfile=containerfile,
         binary=binary,
         fixture_root=fixture_root,
     )
-    binary_sha256 = sha256_file(binary)
+    _validate_oci_context_snapshot(context, expected=context_snapshot)
+    binary_sha256 = context_snapshot["binarySha256"]
+    fixture_tree_sha256 = context_snapshot["fixtureTreeSha256"]
+    containerfile_sha256 = context_snapshot["containerfileSha256"]
+    provenance_labels = {
+        "io.s1-4x.base-image-id": base_image_id,
+        "io.s1-4x.containerfile-sha256": containerfile_sha256,
+        "io.s1-4x.fixture-tree-sha256": fixture_tree_sha256,
+    }
+    iidfile = output / "image.iid"
     image_tag = f"local/s1-4x-haskell:{suffix}"
     image_build = build_oci_build_command(
         docker=docker,
         containerfile=context / "Containerfile",
         context=context,
+        iidfile=iidfile,
         image_tag=image_tag,
         binary_sha256=binary_sha256,
+        provenance_labels=provenance_labels,
     )
+    _validate_oci_context_snapshot(context, expected=context_snapshot)
     commands.append(
         _run_logged(
             image_build,
@@ -4887,6 +5505,41 @@ def _oci_correctness(arguments: argparse.Namespace) -> None:
             phase="oci-image-build",
             output_directory=output,
         )
+    )
+    _validate_oci_context_snapshot(context, expected=context_snapshot)
+    iid_payload, _ = _same_fd_bytes_snapshot(
+        iidfile,
+        label="OCI_IIDFILE",
+        max_bytes=128,
+    )
+    image_id = validate_oci_iid_bytes(iid_payload)
+    iidfile_sha256 = hashlib.sha256(iid_payload).hexdigest()
+    immutable_inspect_command = [
+        str(docker),
+        "image",
+        "inspect",
+        "--format",
+        "{{json .}}",
+        image_id,
+    ]
+    immutable_inspect_record = _run_logged(
+        immutable_inspect_command,
+        cwd=cache_root,
+        environment=environment,
+        phase="oci-image-id-inspect",
+        output_directory=output,
+    )
+    commands.append(immutable_inspect_record)
+    immutable_inspection, _ = _same_fd_logged_json_snapshot(
+        output / "oci-image-id-inspect.stdout",
+        label="OCI_IMAGE_ID_INSPECTION",
+        command_record=immutable_inspect_record,
+    )
+    validate_oci_image_inspection(
+        immutable_inspection,
+        image_tag=image_tag,
+        expected_image_id=image_id,
+        expected_labels=provenance_labels,
     )
     inspect_command = [
         str(docker),
@@ -4903,35 +5556,40 @@ def _oci_correctness(arguments: argparse.Namespace) -> None:
         *,
         expected_image_id: str | None,
     ) -> str:
-        commands.append(
-            _run_logged(
-                inspect_command,
-                cwd=cache_root,
-                environment=environment,
-                phase=phase,
-                output_directory=output,
-            )
+        inspect_record = _run_logged(
+            inspect_command,
+            cwd=cache_root,
+            environment=environment,
+            phase=phase,
+            output_directory=output,
         )
+        commands.append(inspect_record)
         inspect_path = output / f"{phase}.stdout"
+        inspection, inspection_sha256 = _same_fd_logged_json_snapshot(
+            inspect_path,
+            label="OCI_IMAGE_TAG_INSPECTION",
+            command_record=inspect_record,
+        )
         inspected_image_id = validate_oci_image_inspection(
-            strict_json_load(inspect_path),
+            inspection,
             image_tag=image_tag,
             expected_image_id=expected_image_id,
+            expected_labels=provenance_labels,
         )
         image_tag_binding_checks.append(
             {
                 "phase": phase,
                 "imageTag": image_tag,
                 "imageId": inspected_image_id,
-                "inspectionSha256": sha256_file(inspect_path),
+                "inspectionSha256": inspection_sha256,
                 "status": "PASS",
             }
         )
         return inspected_image_id
 
-    image_id = inspect_tag_binding(
+    inspect_tag_binding(
         "oci-image-inspect",
-        expected_image_id=None,
+        expected_image_id=image_id,
     )
     runtime_output = output / "runtime"
     runtime_output.mkdir(mode=0o700)
@@ -5016,6 +5674,66 @@ def _oci_correctness(arguments: argparse.Namespace) -> None:
                 "status": "PASS",
             }
         )
+    base_after_record = _run_logged(
+        base_inspect_command,
+        cwd=cache_root,
+        environment=environment,
+        phase="oci-base-after",
+        output_directory=output,
+    )
+    commands.append(base_after_record)
+    base_after_document, base_inspection_after_sha256 = (
+        _same_fd_logged_json_snapshot(
+            output / "oci-base-after.stdout",
+            label="OCI_BASE_AFTER",
+            command_record=base_after_record,
+        )
+    )
+    if (
+        validate_oci_base_image_inspection(
+            base_after_document,
+            expected_reference=OCI_BASE_IMAGE,
+        )
+        != base_image_id
+    ):
+        raise WorkflowError("OCI_BASE_IMAGE_CHANGED_DURING_RUN")
+    context_after_record = _run_logged(
+        context_show_command,
+        cwd=cache_root,
+        environment=environment,
+        phase="oci-context-after",
+        output_directory=output,
+    )
+    commands.append(context_after_record)
+    context_name_after = _oci_context_name(
+        output / "oci-context-after.stdout",
+        command_record=context_after_record,
+    )
+    daemon_after_record = _run_logged(
+        daemon_info_command,
+        cwd=cache_root,
+        environment=environment,
+        phase="oci-daemon-after",
+        output_directory=output,
+    )
+    commands.append(daemon_after_record)
+    daemon_after_document, _ = _same_fd_logged_json_snapshot(
+        output / "oci-daemon-after.stdout",
+        label="OCI_DAEMON_AFTER",
+        command_record=daemon_after_record,
+    )
+    daemon_identity_after = validate_oci_daemon_identity(
+        daemon_after_document,
+        context_name=context_name_after,
+        expected_identity_sha256=expected_daemon_identity_sha256,
+    )
+    if (
+        context_name_after != context_name
+        or daemon_identity_after != daemon_identity_before
+    ):
+        raise WorkflowError("OCI_DAEMON_CHANGED_DURING_RUN")
+    if sha256_file(docker) != docker_sha256:
+        raise WorkflowError("OCI_DOCKER_CLIENT_CHANGED_DURING_RUN")
     if evidence.benchmark_source_tree_sha256(haskell_root) != source_tree_sha256:
         raise WorkflowError("SOURCE_TREE_CHANGED_DURING_OCI")
     if _repo_commit(repo_root) != candidate_commit:
@@ -5029,16 +5747,30 @@ def _oci_correctness(arguments: argparse.Namespace) -> None:
         "profileId": profile_id,
         "ghcOptions": list(options),
         "optionsSha256": canonical_sha256(list(options)),
-        "containerfileSha256": sha256_file(containerfile),
-        "baseImage": (
-            "docker.io/library/haskell@sha256:"
-            "417d4bc30ac7d8d5ff04ec97937f86eb508b0c76bfd1a39b5ec225688531aa9d"
-        ),
+        "containerfileSha256": containerfile_sha256,
+        "baseImage": OCI_BASE_IMAGE,
+        "baseImageId": base_image_id,
+        "baseInspectionBeforeSha256": base_inspection_before_sha256,
+        "baseInspectionAfterSha256": base_inspection_after_sha256,
+        "stackRootPath": str(stack_root),
+        "stackWorkDir": str(work_dir),
+        "contextSnapshot": context_snapshot,
+        "fixtureTreeSha256": fixture_tree_sha256,
         "candidateBinarySha256": binary_sha256,
         "dockerPath": str(docker),
         "dockerSha256": docker_sha256,
+        "expectedDockerSha256": expected_docker_sha256,
+        "expectedDaemonIdentitySha256": (
+            expected_daemon_identity_sha256
+        ),
+        "dockerContextName": context_name,
+        "daemonIdentityBefore": daemon_identity_before,
+        "daemonIdentityAfter": daemon_identity_after,
         "imageTag": image_tag,
         "imageId": image_id,
+        "iidFileSha256": iidfile_sha256,
+        "provenanceLabels": provenance_labels,
+        "platform": OCI_PLATFORM,
         "runtimeImageSubject": {
             "referenceType": "immutable-image-id",
             "imageId": image_id,
@@ -5169,6 +5901,11 @@ def _parser() -> argparse.ArgumentParser:
     candidate_root.add_argument("--cache-root", type=Path, required=True)
     candidate_root.add_argument("--output", type=Path, required=True)
     candidate_root.set_defaults(handler=_candidate_stack_root)
+    isolated_root = commands.add_parser("isolated-stack-root")
+    isolated_root.add_argument("--cache-root", type=Path, required=True)
+    isolated_root.add_argument("--purpose", required=True)
+    isolated_root.add_argument("--output", type=Path, required=True)
+    isolated_root.set_defaults(handler=_isolated_stack_root)
     return parser
 
 

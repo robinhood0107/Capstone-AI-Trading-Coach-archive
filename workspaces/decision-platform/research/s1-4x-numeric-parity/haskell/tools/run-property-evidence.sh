@@ -47,17 +47,21 @@ if [[ "$CACHE_ROOT_CONFIGURED" != /* \
   exit 69
 fi
 CACHE_ROOT="$CACHE_ROOT_CONFIGURED"
-STACK_ROOT_PATH="${CACHE_ROOT}/stack-root"
-if [[ -e "$STACK_ROOT_PATH" || -L "$STACK_ROOT_PATH" ]]; then
-  if [[ ! -d "$STACK_ROOT_PATH" \
-    || -L "$STACK_ROOT_PATH" \
-    || "$(readlink -f "$STACK_ROOT_PATH")" != "$STACK_ROOT_PATH" ]]; then
-    echo "isolated Stack root must be a real directory" >&2
-    exit 69
-  fi
-else
-  mkdir -m 700 -- "$STACK_ROOT_PATH"
+STACK_ROOT_PATH="$(
+  /usr/bin/python3 "$HASKELL_ROOT/tools/profile_workflow.py" \
+    isolated-stack-root \
+    --cache-root "$CACHE_ROOT" \
+    --purpose property \
+    --output "$OUTPUT_DIRECTORY"
+)"
+if [[ "$STACK_ROOT_PATH" != "$CACHE_ROOT"/stack-root-property-* \
+  || -e "$STACK_ROOT_PATH" \
+  || -L "$STACK_ROOT_PATH" ]]; then
+  echo "output-bound property Stack root must be new" >&2
+  exit 73
 fi
+mkdir -m 700 -- "$STACK_ROOT_PATH"
+STACK_WORK_DIR=".stack-work/s1-4x/${STACK_ROOT_PATH##*/}"
 
 if [[ ! -x "$STACK_BIN" || ! -x "$GHC_BIN" ]]; then
   echo "required Haskell toolchain executable is missing" >&2
@@ -135,9 +139,11 @@ esac
 export PATH="${GHC_BIN%/*}:${STACK_BIN%/*}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 STACK_ARGUMENTS=(
   --stack-root "$STACK_ROOT_PATH"
+  --work-dir "$STACK_WORK_DIR"
   --system-ghc
   --no-install-ghc
   --stack-yaml "${HASKELL_ROOT}/stack.yaml"
+  --hpack-force
 )
 
 BUILD_ARGV_SHA256="$(

@@ -43,12 +43,23 @@ EXPECTED_STACK_YAML="$(realpath "$HASKELL_ROOT/stack-ghc-9.14.1.yaml")"
 : "${S1_4X_STACK_BIN:?exact Stack path is required}"
 
 OUTPUT_DIRECTORY="$5"
-STACK_ROOT_PATH="$S1_4X_CACHE_ROOT/stack-root-ghc914-current"
+STACK_ROOT_PATH="$(
+  /usr/bin/python3 "$HASKELL_ROOT/tools/profile_workflow.py" \
+    isolated-stack-root \
+    --cache-root "$S1_4X_CACHE_ROOT" \
+    --purpose compatibility \
+    --output "$OUTPUT_DIRECTORY"
+)"
+[[ "$STACK_ROOT_PATH" == "$S1_4X_CACHE_ROOT"/stack-root-compatibility-* ]] || {
+  echo "compatibility Stack root derivation drift" >&2
+  exit 73
+}
 [[ ! -e "$STACK_ROOT_PATH" && ! -L "$STACK_ROOT_PATH" ]] || {
   echo "compatibility Stack root must be new" >&2
   exit 73
 }
 mkdir -m 700 "$OUTPUT_DIRECTORY" "$STACK_ROOT_PATH"
+STACK_WORK_DIR=".stack-work/s1-4x/${STACK_ROOT_PATH##*/}"
 
 AUTHORITATIVE_BOOT_DUMP="$OUTPUT_DIRECTORY/authoritative-boot.dump"
 COMPATIBILITY_BOOT_DUMP="$OUTPUT_DIRECTORY/compatibility-boot.dump"
@@ -67,6 +78,7 @@ set +e
   --ghc 9.14.1 --stack 3.11.1 -- \
   "$S1_4X_STACK_BIN" \
   --stack-root "$STACK_ROOT_PATH" \
+  --work-dir "$STACK_WORK_DIR" \
   --stack-yaml "$EXPECTED_STACK_YAML" \
   --no-terminal --color never \
   --system-ghc --no-install-ghc --hpack-force \

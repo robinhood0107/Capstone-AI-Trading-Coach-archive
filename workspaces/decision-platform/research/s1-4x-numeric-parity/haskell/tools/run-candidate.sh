@@ -112,6 +112,7 @@ if [[ "$STACK_ROOT_PATH" != "$CACHE_ROOT"/stack-root-candidate-* \
   exit 73
 fi
 /usr/bin/mkdir -m 700 -- "$STACK_ROOT_PATH"
+STACK_WORK_DIR=".stack-work/s1-4x/${STACK_ROOT_PATH##*/}"
 STACK_STDOUT="$STACK_ROOT_PATH/candidate.stdout"
 STACK_STDERR="$STACK_ROOT_PATH/candidate.stderr"
 
@@ -123,6 +124,7 @@ set +e
   -- \
   "$STACK_BIN" \
   --stack-root "$STACK_ROOT_PATH" \
+  --work-dir "$STACK_WORK_DIR" \
   --stack-yaml "$STACK_YAML_PATH" \
   --no-terminal \
   --color never \
