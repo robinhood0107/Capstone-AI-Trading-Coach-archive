@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import importlib.util
 import sqlite3
 import sys
@@ -376,6 +377,152 @@ packages:
                 },
             ],
         )
+
+    def test_current_snapshot_accepts_hash_addressed_pantry_blob_without_url_row(
+        self,
+    ) -> None:
+        payload = b"flags: {}\npackages: []\n"
+        digest = hashlib.sha256(payload).hexdigest()
+        with tempfile.TemporaryDirectory() as temporary:
+            pantry = Path(temporary) / "pantry.sqlite3"
+            connection = sqlite3.connect(pantry)
+            connection.executescript(
+                """\
+CREATE TABLE blob(
+  id INTEGER PRIMARY KEY,
+  sha BLOB NOT NULL UNIQUE,
+  size INTEGER NOT NULL,
+  contents BLOB NOT NULL
+);
+CREATE TABLE url_blob(
+  id INTEGER PRIMARY KEY,
+  url TEXT NOT NULL,
+  blob INTEGER NOT NULL,
+  time TEXT NOT NULL
+);
+"""
+            )
+            connection.execute(
+                "INSERT INTO blob(id, sha, size, contents) VALUES (1, ?, ?, ?)",
+                (bytes.fromhex(digest), len(payload), payload),
+            )
+            connection.commit()
+            connection.close()
+
+            snapshot = compatibility_evidence.read_current_snapshot_from_pantry(
+                pantry,
+                snapshot_url="https://example.invalid/lts.yaml",
+                expected_sha256=digest,
+                expected_size=len(payload),
+            )
+
+        self.assertEqual(snapshot, payload.decode("utf-8"))
+
+    def test_current_snapshot_accepts_duplicate_exact_url_rows(self) -> None:
+        payload = b"flags: {}\npackages: []\n"
+        digest = hashlib.sha256(payload).hexdigest()
+        with tempfile.TemporaryDirectory() as temporary:
+            pantry = Path(temporary) / "pantry.sqlite3"
+            connection = sqlite3.connect(pantry)
+            connection.executescript(
+                """\
+CREATE TABLE blob(
+  id INTEGER PRIMARY KEY,
+  sha BLOB NOT NULL UNIQUE,
+  size INTEGER NOT NULL,
+  contents BLOB NOT NULL
+);
+CREATE TABLE url_blob(
+  id INTEGER PRIMARY KEY,
+  url TEXT NOT NULL,
+  blob INTEGER NOT NULL,
+  time TEXT NOT NULL
+);
+"""
+            )
+            connection.execute(
+                "INSERT INTO blob(id, sha, size, contents) VALUES (1, ?, ?, ?)",
+                (bytes.fromhex(digest), len(payload), payload),
+            )
+            for row_id, timestamp in (
+                (1, "2026-07-19T00:00:00Z"),
+                (2, "2026-07-19T00:00:01Z"),
+            ):
+                connection.execute(
+                    """
+INSERT INTO url_blob(id, url, blob, time)
+VALUES (?, 'https://example.invalid/lts.yaml', 1, ?)
+""",
+                    (row_id, timestamp),
+                )
+            connection.commit()
+            connection.close()
+
+            snapshot = compatibility_evidence.read_current_snapshot_from_pantry(
+                pantry,
+                snapshot_url="https://example.invalid/lts.yaml",
+                expected_sha256=digest,
+                expected_size=len(payload),
+            )
+
+        self.assertEqual(snapshot, payload.decode("utf-8"))
+
+    def test_current_snapshot_rejects_drifted_url_row_before_hash_fallback(
+        self,
+    ) -> None:
+        payload = b"flags: {}\npackages: []\n"
+        drifted_payload = b"flags:\n  drifted: true\npackages: []\n"
+        digest = hashlib.sha256(payload).hexdigest()
+        with tempfile.TemporaryDirectory() as temporary:
+            pantry = Path(temporary) / "pantry.sqlite3"
+            connection = sqlite3.connect(pantry)
+            connection.executescript(
+                """\
+CREATE TABLE blob(
+  id INTEGER PRIMARY KEY,
+  sha BLOB NOT NULL UNIQUE,
+  size INTEGER NOT NULL,
+  contents BLOB NOT NULL
+);
+CREATE TABLE url_blob(
+  id INTEGER PRIMARY KEY,
+  url TEXT NOT NULL,
+  blob INTEGER NOT NULL,
+  time TEXT NOT NULL
+);
+"""
+            )
+            connection.execute(
+                "INSERT INTO blob(id, sha, size, contents) VALUES (1, ?, ?, ?)",
+                (bytes.fromhex(digest), len(payload), payload),
+            )
+            connection.execute(
+                "INSERT INTO blob(id, sha, size, contents) VALUES (2, ?, ?, ?)",
+                (
+                    hashlib.sha256(drifted_payload).digest(),
+                    len(drifted_payload),
+                    drifted_payload,
+                ),
+            )
+            connection.execute(
+                """
+INSERT INTO url_blob(id, url, blob, time)
+VALUES (1, 'https://example.invalid/lts.yaml', 2, '2026-07-19T00:00:00Z')
+"""
+            )
+            connection.commit()
+            connection.close()
+
+            with self.assertRaisesRegex(
+                compatibility_evidence.CompatibilityEvidenceError,
+                "current frozen snapshot bytes drift",
+            ):
+                compatibility_evidence.read_current_snapshot_from_pantry(
+                    pantry,
+                    snapshot_url="https://example.invalid/lts.yaml",
+                    expected_sha256=digest,
+                    expected_size=len(payload),
+                )
 
 
 if __name__ == "__main__":
