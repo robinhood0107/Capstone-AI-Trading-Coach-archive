@@ -53,6 +53,7 @@ EXPECTED_WORKFLOW_INPUTS = (
     "tools/haskell_evidence.py",
     "tools/hlint_inventory.py",
     "tools/profile_workflow.py",
+    "tools/python-runtime.sh",
     "tools/run-benchmark-block.sh",
     "tools/run-candidate.sh",
     "tools/run-correctness-profile.sh",
