@@ -31,15 +31,19 @@ def load_helper():
     return module
 
 
-def raw_reports(multiplier: float) -> list[dict[str, object]]:
+def raw_reports(multiplier: float) -> list[object]:
     return [
-        {
-            "reportName": case_id,
-            "reportAnalysis": {
-                "anMean": {"estPoint": float(index + 1) * multiplier}
-            },
-        }
-        for index, case_id in enumerate(CASE_ORDER)
+        "criterion",
+        "1.6.4.0",
+        [
+            {
+                "reportName": case_id,
+                "reportAnalysis": {
+                    "anMean": {"estPoint": float(index + 1) * multiplier}
+                },
+            }
+            for index, case_id in enumerate(CASE_ORDER)
+        ],
     ]
 
 
@@ -248,7 +252,7 @@ class ProfileEvidenceForgeryTests(unittest.TestCase):
         )
 
         forged = json.loads(json.dumps(raw_reports(0.5)))
-        forged[-1]["reportAnalysis"]["anMean"]["estPoint"] = 100.0
+        forged[2][-1]["reportAnalysis"]["anMean"]["estPoint"] = 100.0
         forged_ratios, _ = helper.recompute_qualification_ratios(
             {
                 "baseline-o0-fasm": raw_reports(1.0),

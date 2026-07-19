@@ -83,10 +83,28 @@ class BenchmarkWrapperContractTests(unittest.TestCase):
         self.assertRegex(
             source,
             r"\(\s*\\\s*~preparedCases\s*->\s*"
-            r'bgroup "" \(zipWith benchmark selectedCases preparedCases\)',
+            r'bgroup "" \(benchmarkPreparedCases selectedCases preparedCases\)',
+        )
+        self.assertRegex(
+            source,
+            r"benchmarkPreparedCases\s+"
+            r"\(benchmarkCase : benchmarkCases\)\s+"
+            r"preparedCases\s*=\s*"
+            r"let\s+~\(preparedCase,\s*remainingPreparedCases\)\s*=\s*"
+            r"unconsPreparedCases preparedCases",
+        )
+        self.assertRegex(
+            source,
+            r"unconsPreparedCases preparedCases\s*=\s*"
+            r"case preparedCases of\s*"
+            r"preparedCase : remainingPreparedCases\s*->",
         )
         self.assertNotIn(
             '(bgroup "" . zipWith benchmark selectedCases)',
+            source,
+        )
+        self.assertNotIn(
+            "zipWith benchmark selectedCases preparedCases",
             source,
         )
 

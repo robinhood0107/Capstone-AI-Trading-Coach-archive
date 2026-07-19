@@ -463,13 +463,14 @@ class ProfileSelectionContractTests(unittest.TestCase):
             }
             for index, case_id in enumerate(CASE_ORDER)
         ]
+        raw_document = ["criterion", "1.6.4.0", reports]
         parsed = helper.parse_criterion_qualification_reports(
-            reports,
+            raw_document,
             expected_case_order=CASE_ORDER,
         )
         self.assertEqual(tuple(parsed), CASE_ORDER)
 
-        for invalid in (
+        for invalid_reports in (
             reports[:-1],
             [*reports, reports[0]],
             [
@@ -480,10 +481,24 @@ class ProfileSelectionContractTests(unittest.TestCase):
                 },
             ],
         ):
-            with self.subTest(invalid=invalid[-1]):
+            with self.subTest(invalid=invalid_reports[-1]):
                 with self.assertRaises(helper.WorkflowError):
                     helper.parse_criterion_qualification_reports(
-                        invalid,
+                        ["criterion", "1.6.4.0", invalid_reports],
+                        expected_case_order=CASE_ORDER,
+                    )
+        for invalid_document in (
+            reports,
+            ["criterion", "1.6.3.0", reports],
+            ["criterion", "1.6.4.0", reports, {}],
+        ):
+            with self.subTest(invalid_document=invalid_document[:2]):
+                with self.assertRaisesRegex(
+                    helper.WorkflowError,
+                    "CRITERION_QUALIFICATION_DOCUMENT_INVALID",
+                ):
+                    helper.parse_criterion_qualification_reports(
+                        invalid_document,
                         expected_case_order=CASE_ORDER,
                     )
 
