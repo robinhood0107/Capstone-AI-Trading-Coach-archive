@@ -728,6 +728,47 @@ def selector_fixture(
                     "identitySha256": generated_classes_identity_sha,
                 },
             ]
+            classpath_post_entries = [
+                {
+                    "pathId": item["pathId"],
+                    "kind": item["kind"],
+                    "sha256": item["sha256"],
+                    "preRunIdentitySha256": item["identitySha256"],
+                    "postRunIdentitySha256": (
+                        f"{index + 4:064x}"
+                        if index < 2
+                        else item["identitySha256"]
+                    ),
+                    "identityStatus": (
+                        "ROTATED_SAME_BYTES"
+                        if index < 2
+                        else "STABLE"
+                    ),
+                }
+                for index, item in enumerate(classpath_entries)
+            ]
+            classpath_post_run = {
+                "schemaVersion": "s1.4x-classpath-post-run-v1",
+                "allowedIdentityRotations": [
+                    {
+                        "role": "SCALA_CLASS_OUTPUT",
+                        "pathId": class_output_id,
+                    },
+                    {
+                        "role": "JMH_GENERATED_RESOURCES",
+                        "pathId": generated_resource_id,
+                    },
+                ],
+                "entries": classpath_post_entries,
+                "entriesSha256": canonical_sha256(
+                    classpath_post_entries
+                ),
+                "rotatedPathIds": [
+                    class_output_id,
+                    generated_resource_id,
+                ],
+                "status": "PASS",
+            }
             physical_workspace = Path("/sealed/scala-workspace")
             physical_coursier = Path("/sealed/coursier")
             generator_input_path = (
@@ -855,6 +896,10 @@ def selector_fixture(
                 "classpathEntries": classpath_entries,
                 "classpathEntriesSha256": canonical_sha256(
                     classpath_entries
+                ),
+                "classpathPostRun": classpath_post_run,
+                "classpathPostRunSha256": canonical_sha256(
+                    classpath_post_run
                 ),
                 "runtimeClasspathSha256": runtime_classpath_sha,
                 "scalaClassOutputPathId": class_output_id,

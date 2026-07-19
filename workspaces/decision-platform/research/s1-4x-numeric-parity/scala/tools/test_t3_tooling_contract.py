@@ -313,6 +313,18 @@ def main() -> int:
     assert "S1_4X_SCALA_CLI_EXEC_PATH" in compile_benchmarks
     assert '--workspace "$S1_4X_SCALA_WORKSPACE"' in compile_benchmarks
     assert "--server=true" not in compile_benchmarks
+    precompile_helper = (
+        TOOLS_ROOT / "precompile_jmh_generated_java.py"
+    ).read_text(encoding="utf-8")
+    for marker in (
+        "capture_classpath_post_run",
+        "validate_classpath_post_run_evidence",
+        "SCALA_CLASS_OUTPUT",
+        "JMH_GENERATED_RESOURCES",
+        "ROTATED_SAME_BYTES",
+        "classpathPostRunSha256",
+    ):
+        assert marker in precompile_helper
     for marker in (
         "-l",
         "-rf",

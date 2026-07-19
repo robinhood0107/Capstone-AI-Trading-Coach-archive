@@ -40,6 +40,34 @@ def expect_error(helper, expected: str, action) -> None:
         raise AssertionError(f"expected PrecompileError: {expected}")
 
 
+def rotate_directory(path: Path) -> Path:
+    """원본 inode를 보존한 채 같은 bytes의 새 directory tree를 materialize한다."""
+
+    original = path.with_name(f"{path.name}-original")
+    path.rename(original)
+    shutil.copytree(original, path)
+    return original
+
+
+def restore_directory(path: Path, original: Path) -> None:
+    shutil.rmtree(path)
+    original.rename(path)
+
+
+def rotate_file(path: Path) -> Path:
+    """원본 regular inode를 보존한 채 같은 bytes의 새 file을 materialize한다."""
+
+    original = path.with_name(f"{path.name}-original")
+    path.rename(original)
+    shutil.copyfile(original, path)
+    return original
+
+
+def restore_file(path: Path, original: Path) -> None:
+    path.unlink()
+    original.rename(path)
+
+
 def verify_parent_owned_proc_fd(
     *,
     helper_path: Path,
@@ -576,6 +604,127 @@ def main() -> int:
             ),
         )
         dependency.write_bytes(b"jar-bytes\n")
+
+        class_output_id = classpath.entries[0].path_id
+        generated_resource_id = classpath.entries[1].path_id
+        class_output_original = rotate_directory(class_output)
+        resources_original = rotate_directory(generated_resources)
+        try:
+            post_run = helper.capture_classpath_post_run(
+                entry_values,
+                scala_class_output_path_id=class_output_id,
+                generated_resource_path_id=generated_resource_id,
+                workspace=workspace,
+                coursier_cache=coursier,
+                evidence_dir=generated_classes.parent,
+            )
+            assert post_run["rotatedPathIds"] == [
+                class_output_id,
+                generated_resource_id,
+            ]
+            assert [
+                item["identityStatus"] for item in post_run["entries"]
+            ] == [
+                "ROTATED_SAME_BYTES",
+                "ROTATED_SAME_BYTES",
+                "STABLE",
+                "STABLE",
+            ]
+            helper.validate_classpath_post_run_evidence(
+                post_run,
+                classpath_entries=entry_values,
+                scala_class_output_path_id=class_output_id,
+                generated_resource_path_id=generated_resource_id,
+            )
+            swapped_roles = json.loads(json.dumps(post_run))
+            swapped_roles["allowedIdentityRotations"][0]["pathId"] = (
+                generated_resource_id
+            )
+            swapped_roles["allowedIdentityRotations"][1]["pathId"] = (
+                class_output_id
+            )
+            expect_error(
+                helper,
+                "CLASSPATH_POST_RUN_EVIDENCE_INVALID",
+                lambda: helper.validate_classpath_post_run_evidence(
+                    swapped_roles,
+                    classpath_entries=entry_values,
+                    scala_class_output_path_id=class_output_id,
+                    generated_resource_path_id=generated_resource_id,
+                ),
+            )
+            extra_allowed = json.loads(json.dumps(post_run))
+            extra_allowed["allowedIdentityRotations"].append(
+                {
+                    "role": "FORGED_EXTRA_DIRECTORY",
+                    "pathId": classpath.entries[2].path_id,
+                }
+            )
+            expect_error(
+                helper,
+                "CLASSPATH_POST_RUN_EVIDENCE_INVALID",
+                lambda: helper.validate_classpath_post_run_evidence(
+                    extra_allowed,
+                    classpath_entries=entry_values,
+                    scala_class_output_path_id=class_output_id,
+                    generated_resource_path_id=generated_resource_id,
+                ),
+            )
+        finally:
+            restore_directory(class_output, class_output_original)
+            restore_directory(generated_resources, resources_original)
+
+        class_output_original = rotate_directory(class_output)
+        try:
+            benchmark_list.write_bytes(b"changed-class-output\n")
+            expect_error(
+                helper,
+                "CLASSPATH_POST_RUN_DRIFT",
+                lambda: helper.capture_classpath_post_run(
+                    entry_values,
+                    scala_class_output_path_id=class_output_id,
+                    generated_resource_path_id=generated_resource_id,
+                    workspace=workspace,
+                    coursier_cache=coursier,
+                    evidence_dir=generated_classes.parent,
+                ),
+            )
+        finally:
+            restore_directory(class_output, class_output_original)
+
+        evidence_original = rotate_directory(generated_classes)
+        try:
+            expect_error(
+                helper,
+                "CLASSPATH_POST_RUN_IDENTITY_DRIFT",
+                lambda: helper.capture_classpath_post_run(
+                    entry_values,
+                    scala_class_output_path_id=class_output_id,
+                    generated_resource_path_id=generated_resource_id,
+                    workspace=workspace,
+                    coursier_cache=coursier,
+                    evidence_dir=generated_classes.parent,
+                ),
+            )
+        finally:
+            restore_directory(generated_classes, evidence_original)
+
+        dependency_original = rotate_file(dependency)
+        try:
+            expect_error(
+                helper,
+                "CLASSPATH_POST_RUN_IDENTITY_DRIFT",
+                lambda: helper.capture_classpath_post_run(
+                    entry_values,
+                    scala_class_output_path_id=class_output_id,
+                    generated_resource_path_id=generated_resource_id,
+                    workspace=workspace,
+                    coursier_cache=coursier,
+                    evidence_dir=generated_classes.parent,
+                ),
+            )
+        finally:
+            restore_file(dependency, dependency_original)
 
         dependency_snapshot = helper._snapshot_regular_file(
             dependency,
