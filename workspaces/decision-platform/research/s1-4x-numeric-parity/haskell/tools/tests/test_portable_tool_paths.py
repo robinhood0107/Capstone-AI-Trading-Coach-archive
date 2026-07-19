@@ -44,6 +44,26 @@ FORBIDDEN_HOST_TOKENS = (
 
 
 class PortableToolPathTests(unittest.TestCase):
+    def test_generated_stack_work_paths_cover_flat_output_bound_layout(
+        self,
+    ) -> None:
+        for path in (
+            Path("/repo/haskell/.stack-work/dist/generated.hs"),
+            Path(
+                "/repo/haskell/"
+                ".stack-work-s1-4x-stack-root-candidate-deadbeef/"
+                "dist/generated.hs"
+            ),
+        ):
+            with self.subTest(path=path):
+                self.assertTrue(_is_generated_stack_path(path))
+
+        self.assertFalse(
+            _is_generated_stack_path(
+                Path("/repo/haskell/.stack-work-s1-4x-forged/source.hs")
+            )
+        )
+
     def test_haskell_subtree_has_no_frozen_username_or_host_path(self) -> None:
         violations: list[str] = []
         for path in sorted(HASKELL_ROOT.rglob("*"), key=lambda item: str(item).encode()):
