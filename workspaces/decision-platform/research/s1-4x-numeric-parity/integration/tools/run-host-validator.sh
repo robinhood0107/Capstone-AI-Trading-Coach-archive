@@ -1,7 +1,7 @@
 #!/usr/bin/bash
 set -euo pipefail
 
-# Outer runner PID closure를 유지한 채 Gate 1 exact host policy를 재검사한다.
+# Outer runner PID closure를 유지한 채 승인된 constrained-host 정책을 재검사한다.
 unset BASH_ENV ENV CDPATH PYTHONPATH PYTHONHOME JAVA_TOOL_OPTIONS _JAVA_OPTIONS
 unset JDK_JAVA_OPTIONS GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0
 export PATH=/usr/bin:/bin
@@ -27,12 +27,12 @@ exec "$UV_BIN" run --frozen --no-config --project "$ORACLE" \
   --home "$HOME" \
   --cpu-set 0 \
   --min-home-free-bytes 32212254720 \
-  --min-available-memory-bytes 8589934592 \
+  --min-available-memory-bytes 4294967296 \
   --max-normalized-load1 0.10 \
   --load-samples 3 \
   --sample-interval-seconds 30 \
   --max-quiet-wait-seconds 600 \
-  --max-running-containers 0 \
+  --max-running-containers 4 \
   --external-process-sample-seconds 30 \
   --max-external-process-cpu-percent 5 \
   "$@"

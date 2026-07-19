@@ -215,7 +215,7 @@ final class BenchmarkInvocation private (
 
 object BenchmarkInvocation:
   private val FrozenPlanSha256 =
-    "caf00112f58723e277293f59ccedb48bbd9ec82d096d3118ee3a9ed72658d1d1"
+    "9c8e9bb050a501b1ffc4f6db43a5ed3f4014a18c372feee29269b4626e11881d"
   private val FrozenCaseCount = 89
   private val DsrRegistrySha256 = "d" * 64
   private val Mapper =

@@ -4,7 +4,7 @@
   "files": {
     "benchmarks/scala/ai/trading/coach/s14x/benchmark/BenchmarkInvocation.scala": {
       "role": "benchmark",
-      "sha256": "03ec06d95537a9503602b457665030a1df2c2b45d426474f856f341b12e12658"
+      "sha256": "7f6445e6ab7b515d7fc2e2a30098f5e50c2631d6cced97b020ebde17647a4470"
     },
     "benchmarks/scala/ai/trading/coach/s14x/benchmark/BenchmarkSetupProbeMain.scala": {
       "role": "benchmark",
@@ -127,5 +127,5 @@
     "lint": "files",
     "profileRun": "files"
   },
-  "canonicalManifestSha256": "1acea632f117b642fd932626107da3a557c1c4187fb6f14d8dc1af1c123fca79"
+  "canonicalManifestSha256": "e5dcb59e06fba0a926c92c854886134fc7029b359285302493a22563864fdc60"
 }

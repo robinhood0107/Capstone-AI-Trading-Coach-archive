@@ -423,7 +423,7 @@ verifyPlanLock planPath = do
   lockBytes <- BS.readFile (takeDirectory planPath </> "benchmark-plan.v1.sha256")
   let expected =
         TextEncoding.encodeUtf8
-          "caf00112f58723e277293f59ccedb48bbd9ec82d096d3118ee3a9ed72658d1d1"
+          "9c8e9bb050a501b1ffc4f6db43a5ed3f4014a18c372feee29269b4626e11881d"
   unless
     (sha256Hex planBytes == expected && expected `BS.isPrefixOf` lockBytes)
     (fail "benchmark plan lock mismatch")
