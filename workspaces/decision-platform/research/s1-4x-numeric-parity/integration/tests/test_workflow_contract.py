@@ -402,6 +402,8 @@ class NumericParityBenchmarkWorkflowTests(unittest.TestCase):
     def test_full_mode_binds_exact_v3_runtime_and_evidence_roles(self) -> None:
         timing = self.jobs["bounded-timing"]
         self.assertNotIn("--uv ", timing)
+        self.assertIn("S1_4X_DOCKER_BIN=", timing)
+        self.assertIn("S1_4X_DOCKER_SHA256=", timing)
         for role in (
             "uv",
             "docker",
