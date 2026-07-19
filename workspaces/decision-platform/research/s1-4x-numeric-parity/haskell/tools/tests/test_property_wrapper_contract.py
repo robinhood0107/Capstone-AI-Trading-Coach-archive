@@ -263,8 +263,9 @@ class PropertyWrapperContractTests(unittest.TestCase):
         source = (
             HASKELL_ROOT / "test/S14X/PropertyEvidence.hs"
         ).read_text(encoding="utf-8")
-        self.assertIn('root </> "source-inputs.v1.json"', source)
-        self.assertIn('root </> "selected-profile.v1.json"', source)
+        self.assertIn('"source-inputs.v1.json"', source)
+        self.assertIn('"selected-profile.v1.json"', source)
+        self.assertIn("propertyClosureConfigurationPaths", source)
         self.assertNotIn("filterMFile", source)
 
     def test_haskell_and_python_property_configuration_closures_are_identical(
