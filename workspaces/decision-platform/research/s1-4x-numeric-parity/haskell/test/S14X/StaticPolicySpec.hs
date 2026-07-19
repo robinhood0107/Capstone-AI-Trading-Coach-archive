@@ -15,6 +15,9 @@ tests =
       testCase "every candidate module declares an explicit export list" explicitExports,
       testCase "Stack configurations have no forbidden override keys" noStackOverrides,
       testCase "core component cannot see contract shell dependencies" componentDependencyBoundary,
+      testCase
+        "test and benchmark components declare directly imported boot packages"
+        directDependencyClosure,
       testCase "formatter and HLint retain the frozen hard gates" formatterAndLintConfiguration,
       testCase
         "weighted autocorrelation uses the compensated sum primitive"
@@ -133,6 +136,32 @@ componentSection header content =
       case line of
         [] -> True
         character : _ -> isSpace character
+
+directDependencyClosure :: IO ()
+directDependencyClosure = do
+  cabalFile <- readFile "s1-4x-haskell.cabal"
+  assertComponentDependencies
+    cabalFile
+    "test-suite s1-4x-haskell-test"
+    ["bytestring", "containers", "directory", "filepath", "text", "time", "unix"]
+  assertComponentDependencies
+    cabalFile
+    "benchmark s1-4x-haskell-benchmark"
+    ["binary", "bytestring", "directory", "filepath", "process"]
+
+assertComponentDependencies :: String -> String -> [String] -> IO ()
+assertComponentDependencies cabalFile componentHeader directlyImportedBootPackages =
+  case componentSection componentHeader cabalFile of
+    Nothing -> assertFailure ("generated Cabal component is missing: " <> componentHeader)
+    Just component -> do
+      let missing =
+            [ packageName
+              | packageName <- directlyImportedBootPackages,
+                not (packageName `isInfixOf` component)
+            ]
+      assertBool
+        (componentHeader <> " omits directly imported boot packages: " <> show missing)
+        (null missing)
 
 formatterAndLintConfiguration :: IO ()
 formatterAndLintConfiguration = do
