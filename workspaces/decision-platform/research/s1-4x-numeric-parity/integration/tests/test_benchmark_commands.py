@@ -459,6 +459,10 @@ class BenchmarkCommandManifestTests(TestCase):
                     sort_keys=True,
                 ).encode("utf-8"),
             )
+            self.assertEqual(
+                validate_manifest_file(output, written),
+                manifest,
+            )
             self.assertEqual(sidecar.read_text(encoding="ascii"), f"{written}  commands.json\n")
             with self.assertRaisesRegex(CommandManifestError, "OUTPUT_ALREADY_EXISTS"):
                 write_manifest_exclusive(output, sidecar, manifest)

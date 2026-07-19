@@ -208,6 +208,7 @@ def _write_manifest(path: Path, manifest: dict[str, Any] | None = None) -> str:
         json.dumps(
             manifest or _command_manifest(path.parent),
             allow_nan=False,
+            sort_keys=True,
         ),
         encoding="utf-8",
     )
