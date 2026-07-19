@@ -154,7 +154,7 @@ def test_exact_host_boundaries_pass() -> None:
     assert all(check["status"] == "PASS" for check in report["checks"])
 
 
-def test_normalized_load_uses_effective_logical_cpu_count_before_affinity_pin() -> None:
+def test_normalized_load_uses_system_logical_cpu_count_across_affinity_pin() -> None:
     class AffinityShrinksVisibleCpuCount(FakeEnvironment):
         def __init__(self) -> None:
             super().__init__()
@@ -173,11 +173,20 @@ def test_normalized_load_uses_effective_logical_cpu_count_before_affinity_pin() 
     checks = _checks(report)
 
     assert checks["cpu.logical-count"]["actual"] == 8
-    assert checks["cpu.logical-count"]["evidence"]["samplePhase"] == "PRE_AFFINITY_PIN"
+    assert (
+        checks["cpu.logical-count"]["evidence"]["countSource"]
+        == "SYSTEM_LOGICAL_CPU_COUNT"
+    )
     assert checks["cpu.affinity-round-trip"]["status"] == "PASS"
     assert checks["load.normalized-load1-window"]["actual"] == [
         [pytest.approx(0.10), pytest.approx(0.10), pytest.approx(0.10)]
     ]
+    assert (
+        checks["load.normalized-load1-window"]["expected"][
+            "logicalCpuCountSource"
+        ]
+        == "SYSTEM_LOGICAL_CPU_COUNT"
+    )
     assert (
         checks["load.normalized-load1-window"]["evidence"][
             "normalizationLogicalCpuCount"
