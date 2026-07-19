@@ -856,10 +856,10 @@
           "const": 600
         },
         "minAvailableMemoryGiB": {
-          "const": 8
+          "const": 4
         },
         "runningContainerCount": {
-          "const": 0
+          "const": 4
         },
         "externalProcessCpuPercentThreshold": {
           "const": 5

@@ -41,12 +41,12 @@ class EnvironmentPolicy:
 
     cpu_set: frozenset[int]
     min_home_free_bytes: int = 32_212_254_720
-    min_available_memory_bytes: int = 8_589_934_592
+    min_available_memory_bytes: int = 4_294_967_296
     max_normalized_load1: float = 0.10
     load_samples: int = 3
     sample_interval_seconds: float = 30.0
     max_quiet_wait_seconds: float = 600.0
-    max_running_containers: int = 0
+    max_running_containers: int = 4
     external_process_sample_seconds: float = 30.0
     max_external_process_cpu_percent: float = 5.0
     allowed_process_root_pid: int = 0
@@ -569,12 +569,12 @@ def _parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--home", required=True, type=Path)
     parser.add_argument("--cpu-set", required=True, type=_parse_cpu_set)
     parser.add_argument("--min-home-free-bytes", type=int, default=32_212_254_720)
-    parser.add_argument("--min-available-memory-bytes", type=int, default=8_589_934_592)
+    parser.add_argument("--min-available-memory-bytes", type=int, default=4_294_967_296)
     parser.add_argument("--max-normalized-load1", type=float, default=0.10)
     parser.add_argument("--load-samples", type=int, default=3)
     parser.add_argument("--sample-interval-seconds", type=float, default=30.0)
     parser.add_argument("--max-quiet-wait-seconds", type=float, default=600.0)
-    parser.add_argument("--max-running-containers", type=int, default=0)
+    parser.add_argument("--max-running-containers", type=int, default=4)
     parser.add_argument("--external-process-sample-seconds", type=float, default=30.0)
     parser.add_argument("--max-external-process-cpu-percent", type=float, default=5.0)
     parser.add_argument("--allowed-process-root-pid", type=int, required=True)

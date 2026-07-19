@@ -591,8 +591,8 @@ def build_plan(
             "loadSampleCount": 3,
             "loadSampleIntervalSeconds": 30,
             "maxQuietWaitSeconds": 600,
-            "minAvailableMemoryGiB": 8,
-            "runningContainerCount": 0,
+            "minAvailableMemoryGiB": 4,
+            "runningContainerCount": 4,
             "externalProcessCpuPercentThreshold": 5,
             "temperatureMetadata": {
                 "recordWhenAvailable": True,
