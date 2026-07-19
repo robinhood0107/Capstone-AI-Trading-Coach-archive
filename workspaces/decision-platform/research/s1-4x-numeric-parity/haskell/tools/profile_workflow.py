@@ -1158,6 +1158,34 @@ def _pinned_fd_number(value: object) -> int | None:
     return descriptor if descriptor >= 3 else None
 
 
+def _qualification_marker_command(
+    *,
+    python_source_path: Path,
+    python_pinned_fd_path: Path,
+    script_pinned_fd_path: Path,
+    marker_path: Path,
+) -> list[str]:
+    """Qualification producer와 verifier가 공유할 exact 8-token argv를 만든다."""
+
+    if (
+        not python_source_path.is_absolute()
+        or not marker_path.is_absolute()
+        or _pinned_fd_number(str(python_pinned_fd_path)) is None
+        or _pinned_fd_number(str(script_pinned_fd_path)) is None
+    ):
+        raise WorkflowError("QUALIFICATION_MARKER_COMMAND_INVALID")
+    return [
+        "/usr/bin/env",
+        "-a",
+        str(python_source_path),
+        str(python_pinned_fd_path),
+        str(script_pinned_fd_path),
+        "mark-measurement-entered",
+        "--qualification",
+        str(marker_path),
+    ]
+
+
 def build_profile_marker(
     *,
     plan_sha256: str,
@@ -3836,16 +3864,12 @@ def _qualification(arguments: argparse.Namespace) -> None:
                 root_pid=qualification_owner_pid,
             )
             marker_path = output / f"{prefix}-measurement-state.json"
-            marker_argv = [
-                "/usr/bin/env",
-                "-a",
-                str(marker_python.source_path),
-                str(marker_python.fd_path),
-                str(marker_script.fd_path),
-                "mark-measurement-entered",
-                "--qualification",
-                str(marker_path),
-            ]
+            marker_argv = _qualification_marker_command(
+                python_source_path=marker_python.source_path,
+                python_pinned_fd_path=marker_python.fd_path,
+                script_pinned_fd_path=marker_script.fd_path,
+                marker_path=marker_path,
+            )
             marker_path_id = _qualification_marker_path_id(
                 order_block=block_index,
                 profile_id=profile_id,
@@ -4707,6 +4731,16 @@ def _validate_qualification_artifact(
                 docker_route_receipt,
                 marker["portableWitness"],
             )
+            expected_marker_argv = _qualification_marker_command(
+                python_source_path=marker_python.source_path,
+                python_pinned_fd_path=Path(
+                    str(marker.get("pythonPinnedFdPath", ""))
+                ),
+                script_pinned_fd_path=Path(
+                    str(marker.get("scriptPinnedFdPath", ""))
+                ),
+                marker_path=marker_path,
+            )
             if (
                 measurement.get("planSha256") != artifact["planSha256"]
                 or measurement.get("selectorConfigSha256")
@@ -4742,13 +4776,7 @@ def _validate_qualification_artifact(
                 or marker.get("argvSha256")
                 != measurement.get("markerArgvSha256")
                 or measurement.get("markerArgv")
-                != [
-                    marker.get("pythonPinnedFdPath"),
-                    marker.get("scriptPinnedFdPath"),
-                    "mark-measurement-entered",
-                    "--qualification",
-                    str(marker_path),
-                ]
+                != expected_marker_argv
             ):
                 raise WorkflowError("QUALIFICATION_MARKER_EVIDENCE_INVALID")
             raw_sha256 = _require_sha256(
