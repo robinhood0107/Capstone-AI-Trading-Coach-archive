@@ -1752,6 +1752,8 @@ def validate_jmh_runtime_closure_evidence(
     if runtime_input_match is None:
         raise PrecompileError(invalid)
     runtime_build = runtime_input_match.group("build")
+    if runtime_build in {".", ".."}:
+        raise PrecompileError(invalid)
     runtime_source_id = (
         f"SCALA_WORKSPACE/.scala-build/{runtime_build}_jmh/sources"
     )
