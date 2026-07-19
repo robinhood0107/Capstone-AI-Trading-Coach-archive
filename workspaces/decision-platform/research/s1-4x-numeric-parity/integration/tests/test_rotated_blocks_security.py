@@ -655,6 +655,35 @@ def test_benchmark_environment_drops_ambient_code_and_tool_overrides(
     }
 
 
+def test_benchmark_environment_honors_explicit_cache_root(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    cache_root = tmp_path / "runner-temp" / "s1-4x-cache"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("S1_4X_CACHE_ROOT", str(cache_root))
+    runtime = runner.PinnedExecutable(
+        binding={"path": "/opt/s1-4x/uv", "sha256": "a" * 64},
+        descriptor=42,
+        required_seals=runner.F_SEAL_SEAL,
+    )
+
+    environment = runner._benchmark_environment(
+        {"uv": runtime},
+        {},
+        boundary_id="hostValidator",
+    )
+
+    assert environment["TMP"] == str(cache_root / "tmp")
+    assert environment["TMPDIR"] == str(cache_root / "tmp")
+    assert environment["TEMP"] == str(cache_root / "tmp")
+    assert environment["UV_CACHE_DIR"] == str(cache_root / "uv")
+    assert environment["COURSIER_CACHE"] == str(cache_root / "coursier")
+    assert not (home / ".cache/s1-4x").exists()
+
+
 def test_benchmark_environment_is_boundary_least_privilege_and_haskell_clean(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
