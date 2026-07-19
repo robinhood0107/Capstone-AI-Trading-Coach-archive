@@ -100,6 +100,7 @@ tests:
       - aeson == 2.2.5.0
       - base
       - bytestring
+      - containers
       - directory
       - filepath
       - s1-4x-haskell
@@ -123,8 +124,12 @@ benchmarks:
     dependencies:
       - aeson == 2.2.5.0
       - base
+      - binary
+      - bytestring
       - criterion == 1.6.4.0
       - deepseq
+      - directory
+      - filepath
       - process
       - s1-4x-haskell
       - s1-4x-core
