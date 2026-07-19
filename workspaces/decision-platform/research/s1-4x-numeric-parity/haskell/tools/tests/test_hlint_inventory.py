@@ -7,12 +7,19 @@ import json
 import sys
 import tempfile
 import unittest
+from copy import deepcopy
 from pathlib import Path
 
 
 TOOLS_ROOT = Path(__file__).resolve().parents[1]
 HASKELL_ROOT = TOOLS_ROOT.parent
 MODULE_PATH = TOOLS_ROOT / "hlint_inventory.py"
+WRAPPER_PATH = TOOLS_ROOT / "check-hlint.sh"
+SCHEMA_PATH = (
+    HASKELL_ROOT.parent
+    / "contract/schemas/suppression-exception.schema.json"
+)
+MANIFEST_PATH = HASKELL_ROOT / "lint-exceptions.v1.json"
 SPEC = importlib.util.spec_from_file_location("hlint_inventory", MODULE_PATH)
 if SPEC is None or SPEC.loader is None:
     raise RuntimeError("unable to load hlint_inventory.py")
@@ -22,6 +29,129 @@ SPEC.loader.exec_module(hlint_inventory)
 
 
 class HLintInventoryTests(unittest.TestCase):
+    def test_stdlib_suppression_contract_accepts_the_frozen_schema_and_manifest(
+        self,
+    ) -> None:
+        schema = hlint_inventory.strict_json_load(SCHEMA_PATH)
+        manifest = hlint_inventory.strict_json_load(MANIFEST_PATH)
+
+        entries = hlint_inventory.validate_suppression_contract(
+            HASKELL_ROOT,
+            schema,
+            manifest,
+        )
+
+        self.assertEqual(len(entries), 11)
+        self.assertTrue(all(entry["language"] == "haskell" for entry in entries))
+
+    def test_suppression_schema_drift_is_fail_closed(self) -> None:
+        schema = hlint_inventory.strict_json_load(SCHEMA_PATH)
+        manifest = hlint_inventory.strict_json_load(MANIFEST_PATH)
+        mutations = []
+
+        extra_outer = deepcopy(schema)
+        extra_outer["unknown"] = True
+        mutations.append(("extra-outer", extra_outer))
+
+        wrong_enum = deepcopy(schema)
+        wrong_enum["$defs"]["entry"]["properties"]["language"]["enum"] = [
+            "haskell"
+        ]
+        mutations.append(("language-enum", wrong_enum))
+
+        wrong_length = deepcopy(schema)
+        wrong_length["$defs"]["entry"]["properties"]["reason"]["maxLength"] = 2048
+        mutations.append(("reason-max-length", wrong_length))
+
+        wrong_pattern = deepcopy(schema)
+        wrong_pattern["$defs"]["entry"]["properties"]["file"]["pattern"] = ".*"
+        mutations.append(("file-pattern", wrong_pattern))
+
+        missing_composite = deepcopy(schema)
+        del missing_composite["properties"]["entries"][
+            "x-s1-4x-unique-by-composite"
+        ]
+        mutations.append(("unique-composite", missing_composite))
+
+        stale_allowed = deepcopy(schema)
+        stale_allowed["properties"]["entries"][
+            "x-s1-4x-stale-or-unused-entry-is-error"
+        ] = False
+        mutations.append(("stale-unused-rule", stale_allowed))
+
+        for label, altered in mutations:
+            with self.subTest(label=label):
+                with self.assertRaisesRegex(
+                    hlint_inventory.InventoryError,
+                    "suppression schema drift",
+                ):
+                    hlint_inventory.validate_suppression_contract(
+                        HASKELL_ROOT,
+                        altered,
+                        manifest,
+                    )
+
+    def test_suppression_manifest_rejects_shape_length_path_and_duplicate_drift(
+        self,
+    ) -> None:
+        schema = hlint_inventory.strict_json_load(SCHEMA_PATH)
+        manifest = hlint_inventory.strict_json_load(MANIFEST_PATH)
+        mutations = []
+
+        extra_outer = deepcopy(manifest)
+        extra_outer["unknown"] = True
+        mutations.append(("extra-outer", extra_outer))
+
+        wrong_language = deepcopy(manifest)
+        wrong_language["entries"][0]["language"] = "scala"
+        mutations.append(("wrong-language", wrong_language))
+
+        empty_reason = deepcopy(manifest)
+        empty_reason["entries"][0]["reason"] = ""
+        mutations.append(("empty-reason", empty_reason))
+
+        oversized_reason = deepcopy(manifest)
+        oversized_reason["entries"][0]["reason"] = "x" * 1025
+        mutations.append(("oversized-reason", oversized_reason))
+
+        absolute_path = deepcopy(manifest)
+        absolute_path["entries"][0]["file"] = "/tmp/escape.hs"
+        mutations.append(("absolute-path", absolute_path))
+
+        traversal_path = deepcopy(manifest)
+        traversal_path["entries"][0]["file"] = "src/../escape.hs"
+        mutations.append(("traversal-path", traversal_path))
+
+        duplicate = deepcopy(manifest)
+        duplicate["entries"].append(deepcopy(duplicate["entries"][0]))
+        mutations.append(("duplicate-composite", duplicate))
+
+        stale_source = deepcopy(manifest)
+        stale_source["entries"][0]["file"] = "src/missing/Removed.hs"
+        mutations.append(("stale-source", stale_source))
+
+        for label, altered in mutations:
+            with self.subTest(label=label):
+                with self.assertRaises(hlint_inventory.InventoryError):
+                    hlint_inventory.validate_suppression_contract(
+                        HASKELL_ROOT,
+                        schema,
+                        altered,
+                    )
+
+    def test_hlint_wrapper_uses_no_external_jsonschema_runtime(self) -> None:
+        source = WRAPPER_PATH.read_text(encoding="utf-8")
+
+        self.assertNotIn("from jsonschema", source)
+        self.assertIn(
+            '--schema "$EXCEPTION_SCHEMA"',
+            source,
+        )
+        self.assertIn(
+            '"$HASKELL_ROOT/tools/hlint_inventory.py"',
+            source,
+        )
+
     def test_exact_module_allowances_bind_every_import(self) -> None:
         configuration = (HASKELL_ROOT / ".hlint.yaml").read_text(encoding="utf-8")
         manifest = json.loads(
