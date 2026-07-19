@@ -274,9 +274,9 @@ class PropertyWrapperContractTests(unittest.TestCase):
             HASKELL_ROOT / "test/S14X/PropertyEvidence.hs"
         ).read_text(encoding="utf-8")
         matched = re.search(
-            r"(?ms)^propertyClosureConfigurationPaths :: \\[FilePath\\]\\n"
-            r"propertyClosureConfigurationPaths =\\n"
-            r"  \\[(.*?)^  \\]\\n",
+            r"(?ms)^propertyClosureConfigurationPaths :: \[FilePath\]\n"
+            r"propertyClosureConfigurationPaths =\n"
+            r"  \[(.*?)^  \]\n",
             source,
         )
         self.assertIsNotNone(matched)
