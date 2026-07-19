@@ -262,6 +262,35 @@ class ProfileSelectionContractTests(unittest.TestCase):
             ):
                 helper.mark_profile_measurement_entered(marker_path)
 
+    def test_qualification_artifact_reuses_exact_eight_token_marker_command(
+        self,
+    ) -> None:
+        helper = load_helper()
+        command = helper._qualification_marker_command(
+            python_source_path=Path("/venv/bin/python"),
+            python_pinned_fd_path=Path("/proc/self/fd/70"),
+            script_pinned_fd_path=Path("/proc/self/fd/71"),
+            marker_path=Path("/evidence/measurement-state.json"),
+        )
+
+        self.assertEqual(
+            command,
+            [
+                "/usr/bin/env",
+                "-a",
+                "/venv/bin/python",
+                "/proc/self/fd/70",
+                "/proc/self/fd/71",
+                "mark-measurement-entered",
+                "--qualification",
+                "/evidence/measurement-state.json",
+            ],
+        )
+        self.assertIn(
+            "_qualification_marker_command(",
+            inspect.getsource(helper._validate_qualification_artifact),
+        )
+
     def test_sealed_profile_marker_script_survives_source_path_swap(self) -> None:
         helper = load_helper()
         with tempfile.TemporaryDirectory() as temporary:
