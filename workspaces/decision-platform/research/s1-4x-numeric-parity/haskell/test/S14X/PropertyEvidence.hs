@@ -122,6 +122,7 @@ runPropertyEvidence arguments =
       profileId,
       profileOptions,
       profileOptionsHash,
+      stackRootPathId,
       buildArgumentsHash,
       selectedProfileHash,
       expectedSourceManifestHash,
@@ -142,6 +143,7 @@ runPropertyEvidence arguments =
         profileId
         profileOptions
         profileOptionsHash
+        stackRootPathId
         buildArgumentsHash
         selectedProfileHash
         expectedSourceManifestHash
@@ -149,7 +151,7 @@ runPropertyEvidence arguments =
         expectedPropertyClosureHash
     _ ->
       fail
-        "property evidence requires: OUTPUT_DIR HASKELL_ROOT PROPERTY_PLAN SEED_CORPUS FUNCTION_REGISTRY ERROR_REGISTRY OUTER_RUNNER SELECTED_PROFILE SOURCE_MANIFEST PROFILE_ID PROFILE_OPTIONS PROFILE_OPTIONS_SHA256 BUILD_ARGV_SHA256 SELECTED_PROFILE_SHA256 SOURCE_MANIFEST_SHA256 SOURCE_TREE_SHA256 PROPERTY_CLOSURE_SHA256"
+        "property evidence requires: OUTPUT_DIR HASKELL_ROOT PROPERTY_PLAN SEED_CORPUS FUNCTION_REGISTRY ERROR_REGISTRY OUTER_RUNNER SELECTED_PROFILE SOURCE_MANIFEST PROFILE_ID PROFILE_OPTIONS PROFILE_OPTIONS_SHA256 STACK_ROOT_PATH_ID BUILD_ARGV_SHA256 SELECTED_PROFILE_SHA256 SOURCE_MANIFEST_SHA256 SOURCE_TREE_SHA256 PROPERTY_CLOSURE_SHA256"
 
 execute ::
   [String] ->
@@ -162,6 +164,7 @@ execute ::
   FilePath ->
   FilePath ->
   FilePath ->
+  String ->
   String ->
   String ->
   String ->
@@ -185,6 +188,7 @@ execute
   profileId
   profileOptions
   profileOptionsHash
+  stackRootPathId
   buildArgumentsHash
   selectedProfileHash
   expectedSourceManifestHash
@@ -207,6 +211,7 @@ execute
       )
       (fail "profile/manifest paths must be the fixed Haskell-root artifacts")
     validateProfileIdentity profileId profileOptions profileOptionsHash
+    validateStackRootPathId outputDirectory stackRootPathId
     validateSha256 "build argv" buildArgumentsHash
     validateSha256 "selected profile" selectedProfileHash
     validateSha256 "source manifest" expectedSourceManifestHash
@@ -285,6 +290,7 @@ execute
           (Text.pack profileId)
           (Text.pack profileOptions)
           (Text.pack profileOptionsHash)
+          (Text.pack stackRootPathId)
           (Text.pack buildArgumentsHash)
           (Text.pack selectedProfileHash)
           (Text.pack expectedSourceManifestHash)
@@ -359,6 +365,20 @@ validateProfileIdentity profileId profileOptions profileOptionsHash = do
     (fail "selected profile id/options mismatch")
   unless (Text.pack profileOptionsHash == actualHash)
     (fail "selected profile options SHA-256 mismatch")
+
+validateStackRootPathId :: FilePath -> String -> IO ()
+validateStackRootPathId outputDirectory stackRootPathId = do
+  let suffix =
+        Text.take 24
+          ( sha256Text
+              ( TextEncoding.encodeUtf8
+                  (Text.pack ("property\0" <> outputDirectory))
+              )
+          )
+      expected = "S1_4X_CACHE_ROOT/stack-root-property-" <> suffix
+  unless
+    (Text.pack stackRootPathId == expected)
+    (fail "property Stack root path ID does not match output")
 
 validateSha256 :: String -> String -> IO ()
 validateSha256 label digest =
@@ -534,6 +554,7 @@ executionReport ::
   Text ->
   Text ->
   Text ->
+  Text ->
   UTCTime ->
   UTCTime ->
   [Int] ->
@@ -549,6 +570,7 @@ executionReport
   profileId
   profileOptions
   profileOptionsHash
+  stackRootPathId
   buildArgumentsHash
   selectedProfileHash
   sourceManifestHash
@@ -574,7 +596,7 @@ executionReport
         "propertyClosureSha256" .= closureHash,
         "profileGhcOptions" .= Text.words profileOptions,
         "profileOptionsSha256" .= profileOptionsHash,
-        "stackRootPathId" .= ("S1_4X_CACHE_ROOT/stack-root" :: Text),
+        "stackRootPathId" .= stackRootPathId,
         "seedCorpusSha256" .= seedCorpusHash,
         "seedCount" .= length seeds,
         "minimumSuccessfulPerSeed" .= (42 :: Int),

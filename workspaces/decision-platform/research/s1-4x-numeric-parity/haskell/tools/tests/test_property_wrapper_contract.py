@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
+import os
 import re
 import subprocess
 import sys
@@ -203,6 +205,40 @@ class PropertyWrapperContractTests(unittest.TestCase):
         self.assertLess(manifest, build)
         self.assertLess(profile, build)
 
+    def test_wrapper_is_an_executable_coverage_runner(self) -> None:
+        wrapper = TOOLS_ROOT / "run-property-evidence.sh"
+
+        self.assertTrue(
+            os.access(wrapper, os.X_OK),
+            "coverage_execution.py invokes the Haskell wrapper directly",
+        )
+        repository = subprocess.run(
+            ["git", "-C", str(HASKELL_ROOT), "rev-parse", "--show-toplevel"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        repository_root = Path(repository)
+        tracked = subprocess.run(
+            [
+                "git",
+                "-C",
+                repository,
+                "ls-files",
+                "-s",
+                "--",
+                wrapper.relative_to(repository_root).as_posix(),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        self.assertEqual(
+            tracked.split()[0],
+            "100755",
+            "fresh checkouts must retain the directly invoked runner mode",
+        )
+
     def test_wrapper_rejects_ambient_stack_configuration(self) -> None:
         wrapper = (TOOLS_ROOT / "run-property-evidence.sh").read_text(
             encoding="utf-8"
@@ -222,6 +258,9 @@ class PropertyWrapperContractTests(unittest.TestCase):
             "--output \"$OUTPUT_DIRECTORY\"",
             "--stack-root",
             "STACK_ROOT_PATH",
+            "STACK_ROOT_PATH_ID",
+            "^stack-root-property-[0-9a-f]{24}$",
+            'STACK_ROOT_PATH_ID="S1_4X_CACHE_ROOT/$STACK_ROOT_BASENAME"',
         ):
             with self.subTest(token=token):
                 self.assertIn(token, wrapper)
@@ -238,6 +277,7 @@ class PropertyWrapperContractTests(unittest.TestCase):
             "PROFILE_OPTIONS_SHA256",
             "BUILD_ARGV_SHA256",
             "SELECTED_PROFILE_SHA256",
+            "--runtime-build-argv-sha256",
         ):
             with self.subTest(token=token):
                 self.assertIn(token, wrapper)
@@ -258,6 +298,101 @@ class PropertyWrapperContractTests(unittest.TestCase):
         ):
             with self.subTest(token=token):
                 self.assertIn(token, wrapper)
+
+    def test_wrapper_seals_generated_cabal_subject_provenance(self) -> None:
+        wrapper = (TOOLS_ROOT / "run-property-evidence.sh").read_text(
+            encoding="utf-8"
+        )
+        for token in (
+            "--dry-run",
+            "PRE_BUILD_GENERATED_CABAL_SHA256",
+            "generated-cabal-provenance",
+            "S1_4X_BENCHMARK_SUBJECT_COMMIT",
+            "--stack-bin",
+            "--pre-build-sha256",
+            "--stack-root-path-id",
+        ):
+            with self.subTest(token=token):
+                self.assertIn(token, wrapper)
+
+    def test_stack_root_path_id_is_output_bound_and_exact(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary).resolve() / "coverage-output"
+            expected_suffix = hashlib.sha256(
+                b"property\0" + os.fsencode(str(output))
+            ).hexdigest()[:24]
+            expected = (
+                "S1_4X_CACHE_ROOT/stack-root-property-" + expected_suffix
+            )
+
+            self.assertEqual(
+                haskell_evidence.property_stack_root_path_id(output),
+                expected,
+            )
+            self.assertEqual(
+                haskell_evidence.validate_property_stack_root_path_id(
+                    expected,
+                    output,
+                ),
+                expected,
+            )
+            with self.assertRaisesRegex(
+                haskell_evidence.EvidenceError,
+                "property Stack root path ID",
+            ):
+                haskell_evidence.validate_property_stack_root_path_id(
+                    "S1_4X_CACHE_ROOT/stack-root-property-" + "0" * 24,
+                    output,
+                )
+
+    def test_generated_cabal_provenance_rejects_pre_post_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary)
+            subject = subprocess.run(
+                ["git", "-C", str(HASKELL_ROOT), "rev-parse", "HEAD"],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            with self.assertRaisesRegex(
+                haskell_evidence.EvidenceError,
+                "generated Cabal changed during Hpack build",
+            ):
+                haskell_evidence.write_generated_cabal_provenance(
+                    HASKELL_ROOT,
+                    output_directory=output,
+                    benchmark_subject_commit=subject,
+                    stack_bin=output / "unreachable-stack",
+                    pre_build_sha256="0" * 64,
+                    profile_ghc_options=("-O0", "-fasm"),
+                    stack_root_path_id=(
+                        haskell_evidence.property_stack_root_path_id(output)
+                    ),
+                    runtime_build_argv_sha256="1" * 64,
+                )
+
+    def test_property_report_separates_outer_runner_and_inner_test_argv(self) -> None:
+        source = (
+            HASKELL_ROOT / "test/S14X/PropertyEvidence.hs"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn(
+            '"commandArgvSha256" .= commandArgumentsHash',
+            source,
+        )
+        self.assertIn(
+            '"outerCommandArgvSha256" .= outerCommandArgumentsHash',
+            source,
+        )
+        self.assertIn(
+            "validateStackRootPathId outputDirectory stackRootPathId",
+            source,
+        )
+        self.assertIn('"stackRootPathId" .= stackRootPathId', source)
+        self.assertNotIn(
+            '"stackRootPathId" .= ("S1_4X_CACHE_ROOT/stack-root"',
+            source,
+        )
 
     def test_haskell_closure_requires_manifest_and_selected_profile(self) -> None:
         source = (

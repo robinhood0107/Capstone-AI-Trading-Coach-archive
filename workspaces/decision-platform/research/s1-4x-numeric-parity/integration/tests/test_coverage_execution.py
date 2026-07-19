@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
 from typing import Any
 from unittest import TestCase
+from unittest.mock import patch
 
 INTEGRATION = Path(__file__).resolve().parents[1]
 S1_4X = INTEGRATION.parent
@@ -43,6 +45,7 @@ class CandidateCoverageExecutionTests(TestCase):
 
         result = run_candidate_coverage(
             candidate="scala",
+            candidate_profile="B",
             runner_path=REAL_WRAPPER_FIXTURE,
             output_directory=output,
             receipt_path=receipt,
@@ -55,6 +58,8 @@ class CandidateCoverageExecutionTests(TestCase):
             str(REAL_WRAPPER_FIXTURE.resolve()),
             "--output-dir",
             str(output.resolve()),
+            "--profile",
+            "B",
         ]
         self.assertEqual(
             result["runner"]["commandArgvSha256"],
@@ -92,7 +97,12 @@ class CandidateCoverageExecutionTests(TestCase):
             seed_corpus_sha = hashlib.sha256(SEED_CORPUS.read_bytes()).hexdigest()
             successes_per_seed = 42
             successful_tests = len(seed_corpus["seeds"]) * successes_per_seed
-            implementation = "scala-test"
+            implementation = "scala-3.8.4-jvm25"
+            toolchain = json.loads(
+                (S1_4X / "scala/toolchain-lock.v1.json").read_text(
+                    encoding="utf-8"
+                )
+            )
             properties = [
                 {
                     "propertyId": item["propertyId"],
@@ -161,8 +171,12 @@ class CandidateCoverageExecutionTests(TestCase):
                     "seedCorpusSha256": seed_corpus_sha,
                     "seedCount": len(seed_corpus["seeds"]),
                     "minimumSuccessfulPerSeed": successes_per_seed,
+                    "maximumDiscardRatio": plan["maximumDiscardRatio"],
                     "framework": "scala-check-1.19.0",
-                    "toolchainProfile": "A",
+                    "toolchainProfile": "B",
+                    "scalaCliBinarySha256": toolchain["scalaCli"][
+                        "binarySha256"
+                    ],
                     "commandArgvSha256": _canonical_sha256(command),
                     "runnerSha256": hashlib.sha256(runner_path.read_bytes()).hexdigest(),
                     "sourceClosureSha256": "c" * 64,
@@ -182,6 +196,7 @@ class CandidateCoverageExecutionTests(TestCase):
 
         result = run_candidate_coverage(
             candidate="scala",
+            candidate_profile="B",
             runner_path=runner_path,
             output_directory=output,
             receipt_path=receipt,
@@ -210,7 +225,7 @@ class CandidateCoverageExecutionTests(TestCase):
                 json.dumps(
                     {
                         "schemaVersion": "s1.4x-candidate-property-execution-v1",
-                        "commandArgvSha256": "0" * 64,
+                        "outerCommandArgvSha256": "0" * 64,
                         "runnerSha256": hashlib.sha256(runner_path.read_bytes()).hexdigest(),
                     }
                 ),
@@ -224,9 +239,138 @@ class CandidateCoverageExecutionTests(TestCase):
         ):
             run_candidate_coverage(
                 candidate="haskell",
+                candidate_profile=None,
                 runner_path=runner_path,
                 output_directory=root / "output",
                 receipt_path=root / "receipt.json",
+                property_plan_path=CONTRACT / "property-plan.v1.json",
+                function_registry_path=CONTRACT / "function-registry.v1.json",
+                error_registry_path=CONTRACT / "error-registry.v1.json",
+                runner=runner,
+            )
+
+    def test_scala_profile_is_required(self) -> None:
+        temporary = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        runner_path = temporary / "runner"
+        runner_path.write_bytes(b"runner")
+        runner_path.chmod(0o700)
+
+        with self.assertRaisesRegex(
+            CoverageExecutionError,
+            "SCALA_PROFILE_INVALID",
+        ):
+            run_candidate_coverage(
+                candidate="scala",
+                candidate_profile=None,
+                runner_path=runner_path,
+                output_directory=temporary / "output",
+                receipt_path=temporary / "receipt.json",
+                property_plan_path=CONTRACT / "property-plan.v1.json",
+                function_registry_path=CONTRACT / "function-registry.v1.json",
+                error_registry_path=CONTRACT / "error-registry.v1.json",
+            )
+
+    def test_scala_proven_fallback_profile_is_accepted(self) -> None:
+        temporary = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        result = run_candidate_coverage(
+            candidate="scala",
+            candidate_profile="A",
+            runner_path=REAL_WRAPPER_FIXTURE,
+            output_directory=temporary / "fallback-output",
+            receipt_path=temporary / "fallback-receipt.json",
+            property_plan_path=CONTRACT / "property-plan.v1.json",
+            function_registry_path=CONTRACT / "function-registry.v1.json",
+            error_registry_path=CONTRACT / "error-registry.v1.json",
+        )
+        self.assertEqual(
+            result["coverage"]["propertyExecution"]["toolchainProfile"],
+            "A",
+        )
+
+    def test_haskell_outer_wrapper_argv_is_distinct_from_inner_runner(
+        self,
+    ) -> None:
+        temporary = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        output = temporary / "haskell-output"
+        with patch.dict(
+            os.environ,
+            {"S1_4X_TEST_COVERAGE_CANDIDATE": "haskell"},
+        ):
+            result = run_candidate_coverage(
+                candidate="haskell",
+                candidate_profile=None,
+                runner_path=REAL_WRAPPER_FIXTURE,
+                output_directory=output,
+                receipt_path=temporary / "haskell-receipt.json",
+                property_plan_path=CONTRACT / "property-plan.v1.json",
+                function_registry_path=CONTRACT / "function-registry.v1.json",
+                error_registry_path=CONTRACT / "error-registry.v1.json",
+            )
+        expected_outer = _canonical_sha256(
+            [
+                str(REAL_WRAPPER_FIXTURE.resolve()),
+                "--output-dir",
+                str(output.resolve()),
+            ]
+        )
+        execution = json.loads(
+            (
+                output
+                / "haskell-property-execution-evidence.v1.json"
+            ).read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            result["runner"]["commandArgvSha256"],
+            expected_outer,
+        )
+        self.assertEqual(execution["outerCommandArgvSha256"], expected_outer)
+        self.assertNotEqual(
+            execution["commandArgvSha256"],
+            execution["outerCommandArgvSha256"],
+        )
+
+    def test_haskell_stack_root_id_is_bound_to_output_directory(self) -> None:
+        temporary = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        output = temporary / "haskell-output"
+
+        def runner(
+            command: list[str],
+            **_: Any,
+        ) -> subprocess.CompletedProcess[bytes]:
+            environment = dict(os.environ)
+            environment["S1_4X_TEST_COVERAGE_CANDIDATE"] = "haskell"
+            completed = subprocess.run(
+                command,
+                check=False,
+                capture_output=True,
+                env=environment,
+            )
+            execution_path = (
+                output
+                / "haskell-property-execution-evidence.v1.json"
+            )
+            execution = json.loads(
+                execution_path.read_text(encoding="utf-8")
+            )
+            execution["stackRootPathId"] = (
+                "S1_4X_CACHE_ROOT/stack-root-property-" + "2" * 24
+            )
+            execution_path.write_text(
+                json.dumps(execution, allow_nan=False, sort_keys=True),
+                encoding="utf-8",
+            )
+            return completed
+
+        with self.assertRaisesRegex(
+            CoverageExecutionError,
+            "EXECUTION_STACK_ROOT_PATH_ID_MISMATCH",
+        ):
+            run_candidate_coverage(
+                candidate="haskell",
+                candidate_profile=None,
+                runner_path=REAL_WRAPPER_FIXTURE,
+                output_directory=output,
+                receipt_path=temporary / "receipt.json",
                 property_plan_path=CONTRACT / "property-plan.v1.json",
                 function_registry_path=CONTRACT / "function-registry.v1.json",
                 error_registry_path=CONTRACT / "error-registry.v1.json",

@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import hashlib
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -647,6 +648,51 @@ value = 1
                 source_sha256=source_sha256,
                 provenance=provenance,
             )
+
+    def test_vector_snapshot_rejects_route_substitution_after_open(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            archive = root / "vector.tar.gz"
+            replacement = root / "replacement.tar.gz"
+            archive.write_bytes(b"official archive bytes")
+            replacement.write_bytes(b"substituted archive bytes")
+
+            def substitute(stage: str, _path: Path) -> None:
+                if stage == "after-open":
+                    archive.unlink()
+                    replacement.rename(archive)
+
+            with self.assertRaisesRegex(
+                haskell_evidence.EvidenceError,
+                "vector archive route changed",
+            ):
+                haskell_evidence.snapshot_vector_archive(
+                    archive,
+                    _test_hook=substitute,
+                )
+
+    def test_vector_snapshot_uses_inherited_fd_bytes_after_route_swap(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            archive = root / "vector.tar.gz"
+            replacement = root / "replacement.tar.gz"
+            original = b"official archive bytes"
+            archive.write_bytes(original)
+            replacement.write_bytes(b"substituted archive bytes")
+            descriptor = os.open(archive, os.O_RDONLY)
+            try:
+                pinned = Path(f"/proc/self/fd/{descriptor}")
+                archive.unlink()
+                replacement.rename(archive)
+                snapshot = haskell_evidence.snapshot_vector_archive(pinned)
+            finally:
+                os.close(descriptor)
+
+        self.assertEqual(snapshot.payload, original)
+        self.assertEqual(
+            snapshot.sha256,
+            hashlib.sha256(original).hexdigest(),
+        )
 
 
 if __name__ == "__main__":

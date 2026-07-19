@@ -305,6 +305,11 @@ class NumericParityCorrectnessWorkflowTests(unittest.TestCase):
             "integration-coverage.json",
             "compare_results.py",
             "mismatchCount",
+            '--profile "$SCALA_PROFILE"',
+            (
+                '.selectedProfileId | '
+                'select(. == "A" or . == "B" or . == "C")'
+            ),
         ):
             self.assertIn(token, comparator)
         self.assertNotIn("materialize_large_fixtures.py", comparator)
@@ -405,6 +410,11 @@ class NumericParityBenchmarkWorkflowTests(unittest.TestCase):
             "seal_correctness_run.py",
             "correctness-run-manifest.v1.json",
             "materialize_large_fixtures.py",
+            '--profile "$SCALA_PROFILE"',
+            (
+                '.selectedProfileId | '
+                'select(. == "A" or . == "B" or . == "C")'
+            ),
         ):
             self.assertIn(token, source)
         self.assertLess(
@@ -490,6 +500,26 @@ class NumericParityBenchmarkWorkflowTests(unittest.TestCase):
                 f'--runtime-evidence "{role}=',
                 timing,
             )
+
+    def test_benchmark_python_digest_is_asserted_not_reblessed(self) -> None:
+        correctness = self.jobs["correctness-before-timing"]
+        timing = self.jobs["bounded-timing"]
+        frozen_digest = (
+            "9544d2a29138833e6177d45dbc57468d"
+            "37710b5080c901fbb579d53f251cdd6f"
+        )
+
+        self.assertIn(f'"{frozen_digest}"', correctness)
+        self.assertIn(
+            'test "$(sha256sum "$BENCHMARK_PYTHON" | awk \'{print $1}\')" = \\\n'
+            '            "$S1_4X_BENCHMARK_PYTHON_SHA256"',
+            timing,
+        )
+        self.assertNotIn(
+            'echo "S1_4X_BENCHMARK_PYTHON_SHA256=$(sha256sum '
+            '"$BENCHMARK_PYTHON"',
+            timing,
+        )
         for argument in (
             "--large-fixture-root \"$S1_4X_LARGE_FIXTURE_ROOT\"",
             "--large-fixture-receipt \"$LARGE_FIXTURE_RECEIPT\"",
