@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import os
 import sys
 import tempfile
 import unittest
@@ -17,9 +18,6 @@ WRAPPER_PATH = TOOLS_ROOT / "run-oci-correctness.sh"
 CONTAINERFILE_PATH = HASKELL_ROOT / "Containerfile"
 BASE_DIGEST = (
     "sha256:417d4bc30ac7d8d5ff04ec97937f86eb508b0c76bfd1a39b5ec225688531aa9d"
-)
-DOCKER_CLIENT_SHA256 = (
-    "834d45bd30c6d08f1045f39a48fda64cf563f89e6f217a0dac53742612634fe2"
 )
 
 
@@ -170,28 +168,51 @@ class OciCorrectnessContractTests(unittest.TestCase):
 
     def test_daemon_base_and_iid_are_exact_linux_amd64_objects(self) -> None:
         helper = load_helper()
-        expected_daemon = {
-            "contextName": "desktop-linux",
-            "daemonId": "daemon-id",
-            "serverVersion": "28.3.2",
-            "operatingSystem": "Docker Desktop",
-            "osType": "linux",
-            "architecture": "amd64",
-            "platform": "linux/amd64",
+        daemon_document = {
+            "ID": "daemon-id",
+            "OSType": "linux",
+            "Architecture": "x86_64",
+            "ServerVersion": "28.3.2",
+            "OperatingSystem": "Docker Desktop",
         }
-        expected_daemon_sha256 = helper.canonical_sha256(expected_daemon)
-        daemon = helper.validate_oci_daemon_identity(
-            {
-                "ID": "daemon-id",
-                "OSType": "linux",
-                "Architecture": "x86_64",
-                "ServerVersion": "28.3.2",
-                "OperatingSystem": "Docker Desktop",
-            },
-            context_name="desktop-linux",
-            expected_identity_sha256=expected_daemon_sha256,
+        for context_name in ("default", "desktop-linux"):
+            with self.subTest(context_name=context_name):
+                expected_daemon = {
+                    "contextName": context_name,
+                    "daemonId": "daemon-id",
+                    "serverVersion": "28.3.2",
+                    "operatingSystem": "Docker Desktop",
+                    "osType": "linux",
+                    "architecture": "amd64",
+                    "platform": "linux/amd64",
+                }
+                daemon = helper.validate_oci_daemon_identity(
+                    daemon_document,
+                    context_name=context_name,
+                )
+                self.assertEqual(daemon, expected_daemon)
+                self.assertEqual(
+                    helper.validate_oci_daemon_identity_pair(
+                        daemon,
+                        dict(daemon),
+                    ),
+                    helper.canonical_sha256(daemon),
+                )
+
+        accepted = helper.validate_oci_daemon_identity(
+            daemon_document,
+            context_name="default",
         )
-        self.assertEqual(daemon, expected_daemon)
+        changed = helper.validate_oci_daemon_identity(
+            {**daemon_document, "ID": "other-daemon"},
+            context_name="default",
+        )
+        with self.assertRaisesRegex(
+            helper.WorkflowError,
+            "OCI_DAEMON_CHANGED_DURING_RUN",
+        ):
+            helper.validate_oci_daemon_identity_pair(accepted, changed)
+
         for document, context_name in (
             (
                 {
@@ -201,27 +222,11 @@ class OciCorrectnessContractTests(unittest.TestCase):
                     "ServerVersion": "28.3.2",
                     "OperatingSystem": "Docker Desktop",
                 },
-                "desktop-linux",
+                "default",
             ),
             (
-                {
-                    "ID": "other-daemon",
-                    "OSType": "linux",
-                    "Architecture": "x86_64",
-                    "ServerVersion": "28.3.2",
-                    "OperatingSystem": "Docker Desktop",
-                },
-                "desktop-linux",
-            ),
-            (
-                {
-                    "ID": "daemon-id",
-                    "OSType": "linux",
-                    "Architecture": "x86_64",
-                    "ServerVersion": "28.3.2",
-                    "OperatingSystem": "Docker Desktop",
-                },
-                "other-context",
+                daemon_document,
+                "../unsafe-context",
             ),
         ):
             with self.subTest(document=document, context=context_name):
@@ -229,39 +234,79 @@ class OciCorrectnessContractTests(unittest.TestCase):
                     helper.validate_oci_daemon_identity(
                         document,
                         context_name=context_name,
-                        expected_identity_sha256=expected_daemon_sha256,
                     )
 
-    def test_docker_context_is_exact_desktop_linux(self) -> None:
+    def test_docker_context_is_safe_nonempty_runtime_identity(self) -> None:
         helper = load_helper()
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary).resolve()
             context_log = root / "context.stdout"
-            context_log.write_bytes(b"desktop-linux\n")
-            record = {
-                "stdoutPath": str(context_log),
-                "stdoutSha256": hashlib.sha256(
-                    context_log.read_bytes()
-                ).hexdigest(),
-            }
-            self.assertEqual(
-                helper._oci_context_name(
-                    context_log,
-                    command_record=record,
-                ),
-                "desktop-linux",
+            for context_name in ("default", "desktop-linux"):
+                with self.subTest(context_name=context_name):
+                    context_log.write_bytes(f"{context_name}\n".encode("ascii"))
+                    record = {
+                        "stdoutPath": str(context_log),
+                        "stdoutSha256": hashlib.sha256(
+                            context_log.read_bytes()
+                        ).hexdigest(),
+                    }
+                    self.assertEqual(
+                        helper._oci_context_name(
+                            context_log,
+                            command_record=record,
+                        ),
+                        context_name,
+                    )
+            for invalid in (b"\n", b"../unsafe\n", b"default extra\n"):
+                with self.subTest(invalid=invalid):
+                    context_log.write_bytes(invalid)
+                    record = {
+                        "stdoutPath": str(context_log),
+                        "stdoutSha256": hashlib.sha256(invalid).hexdigest(),
+                    }
+                    with self.assertRaisesRegex(
+                        helper.WorkflowError,
+                        "OCI_CONTEXT_NAME_INVALID",
+                    ):
+                        helper._oci_context_name(
+                            context_log,
+                            command_record=record,
+                        )
+
+    def test_arbitrary_caller_trusted_client_is_pinned_and_mismatch_rejected(
+        self,
+    ) -> None:
+        helper = load_helper()
+        with tempfile.TemporaryDirectory() as temporary:
+            docker = Path(temporary).resolve() / "docker"
+            docker.write_bytes(b"arbitrary caller-trusted docker client bytes")
+            docker.chmod(0o755)
+            expected_sha256 = helper.sha256_file(docker)
+            pinned = helper.pin_oci_docker_client(
+                docker,
+                expected_sha256=expected_sha256,
             )
-            context_log.write_bytes(b"other-context\n")
-            record["stdoutSha256"] = hashlib.sha256(
-                context_log.read_bytes()
-            ).hexdigest()
+            try:
+                self.assertEqual(pinned.source_path, docker)
+                self.assertEqual(pinned.sha256, expected_sha256)
+                self.assertEqual(
+                    pinned.fd_path,
+                    Path(f"/proc/self/fd/{pinned.descriptor}"),
+                )
+                self.assertRegex(
+                    pinned.path_id,
+                    rf"^S1_4X_DOCKER_CLIENT_SHA256_{expected_sha256.upper()}$",
+                )
+            finally:
+                os.close(pinned.descriptor)
+
             with self.assertRaisesRegex(
                 helper.WorkflowError,
-                "OCI_CONTEXT_NAME_INVALID",
+                "DOCKER_SHA256_MISMATCH",
             ):
-                helper._oci_context_name(
-                    context_log,
-                    command_record=record,
+                helper.pin_oci_docker_client(
+                    docker,
+                    expected_sha256="0" * 64,
                 )
 
     def test_empty_output_bound_docker_config_and_client_stage_snapshots(
@@ -277,42 +322,117 @@ class OciCorrectnessContractTests(unittest.TestCase):
             docker.write_bytes(b"fixture docker executable")
             docker.chmod(0o755)
             docker_sha256 = helper.sha256_file(docker)
+            pinned = helper.pin_oci_docker_client(
+                docker,
+                expected_sha256=docker_sha256,
+            )
 
-            before = helper.snapshot_oci_docker_stage(
-                stage="context-before",
-                docker=docker,
-                expected_docker_sha256=docker_sha256,
-                docker_config=docker_config,
-                output_root=output,
-            )
-            self.assertEqual(before["dockerConfigEntryCount"], 0)
-            self.assertEqual(before["dockerClientSha256"], docker_sha256)
+            try:
+                before = helper.snapshot_oci_docker_stage(
+                    stage="context-before",
+                    docker_client=pinned,
+                    docker_config=docker_config,
+                    output_root=output,
+                )
+                self.assertEqual(before["dockerConfigEntryCount"], 0)
+                self.assertEqual(before["dockerClientSha256"], docker_sha256)
+                self.assertEqual(
+                    before["dockerClientPathId"],
+                    pinned.path_id,
+                )
 
-            after = helper.snapshot_oci_docker_stage(
-                stage="context-before",
-                docker=docker,
-                expected_docker_sha256=docker_sha256,
-                docker_config=docker_config,
-                output_root=output,
-            )
-            helper.validate_oci_docker_stage_pair(before, after)
+                after = helper.snapshot_oci_docker_stage(
+                    stage="context-before",
+                    docker_client=pinned,
+                    docker_config=docker_config,
+                    output_root=output,
+                )
+                helper.validate_oci_docker_stage_pair(before, after)
 
-            (docker_config / "config.json").write_text(
-                '{"currentContext":"forged"}\n',
-                encoding="utf-8",
+                (docker_config / "config.json").write_text(
+                    '{"currentContext":"forged"}\n',
+                    encoding="utf-8",
+                )
+                changed = helper.snapshot_oci_docker_stage(
+                    stage="context-before",
+                    docker_client=pinned,
+                    docker_config=docker_config,
+                    output_root=output,
+                )
+                with self.assertRaisesRegex(
+                    helper.WorkflowError,
+                    "OCI_DOCKER_TRUST_STAGE_CHANGED",
+                ):
+                    helper.validate_oci_docker_stage_pair(before, changed)
+            finally:
+                os.close(pinned.descriptor)
+
+    def test_retained_docker_fd_executes_pinned_bytes_and_rejects_path_aba(
+        self,
+    ) -> None:
+        helper = load_helper()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            output = root / "evidence"
+            output.mkdir()
+            docker_config = output / "docker-config"
+            docker_config.mkdir(mode=0o700)
+            docker = root / "docker"
+            original = b"#!/usr/bin/bash\nprintf 'sealed-client\\n'\n"
+            forged = b"#!/usr/bin/bash\nprintf 'forged-client\\n'\n"
+            docker.write_bytes(original)
+            docker.chmod(0o755)
+            pinned = helper.pin_oci_docker_client(
+                docker,
+                expected_sha256=hashlib.sha256(original).hexdigest(),
             )
-            changed = helper.snapshot_oci_docker_stage(
-                stage="context-before",
-                docker=docker,
-                expected_docker_sha256=docker_sha256,
-                docker_config=docker_config,
-                output_root=output,
-            )
-            with self.assertRaisesRegex(
-                helper.WorkflowError,
-                "OCI_DOCKER_TRUST_STAGE_CHANGED",
-            ):
-                helper.validate_oci_docker_stage_pair(before, changed)
+            saved = root / "docker.original"
+            try:
+                record = helper._run_pinned_oci_docker_logged(
+                    pinned,
+                    [str(pinned.fd_path)],
+                    cwd=root,
+                    environment={
+                        "PATH": "/usr/bin:/bin",
+                        "LC_ALL": "C",
+                        "DOCKER_CONFIG": str(docker_config),
+                    },
+                    phase="oci-pinned-client",
+                    output_directory=output,
+                )
+                self.assertEqual(
+                    (output / "oci-pinned-client.stdout").read_text(
+                        encoding="utf-8"
+                    ),
+                    "sealed-client\n",
+                )
+                self.assertEqual(record["argv"], [pinned.path_id])
+
+                docker.rename(saved)
+                docker.write_bytes(forged)
+                docker.chmod(0o755)
+                with self.assertRaisesRegex(
+                    helper.WorkflowError,
+                    "OCI_DOCKER_CLIENT_FD_IDENTITY_INVALID",
+                ):
+                    helper._run_pinned_oci_docker_logged(
+                        pinned,
+                        [str(pinned.fd_path)],
+                        cwd=root,
+                        environment={
+                            "PATH": "/usr/bin:/bin",
+                            "LC_ALL": "C",
+                            "DOCKER_CONFIG": str(docker_config),
+                        },
+                        phase="oci-aba",
+                        output_directory=output,
+                    )
+                self.assertFalse((output / "oci-aba.stdout").exists())
+            finally:
+                if saved.exists():
+                    docker.unlink(missing_ok=True)
+                    saved.rename(docker)
+                os.close(pinned.descriptor)
 
     def test_oci_flow_uses_exact_client_sha_and_per_command_trust_snapshots(
         self,
@@ -321,8 +441,12 @@ class OciCorrectnessContractTests(unittest.TestCase):
         helper_source = HELPER_PATH.read_text(encoding="utf-8")
         wrapper_source = WRAPPER_PATH.read_text(encoding="utf-8")
 
-        self.assertEqual(helper_source.count(DOCKER_CLIENT_SHA256), 1)
-        self.assertEqual(wrapper_source.count(DOCKER_CLIENT_SHA256), 1)
+        self.assertNotIn(
+            "834d45bd30c6d08f1045f39a48fda64c",
+            helper_source + wrapper_source,
+        )
+        self.assertNotIn("DOCKER_TRUST_ANCHOR_NOT_FROZEN", helper_source)
+        self.assertNotIn('OCI_CONTEXT_NAME = "desktop-linux"', helper_source)
         self.assertIn('"dockerConfigPath"', helper_source)
         self.assertIn('"dockerTrustStageSnapshots"', helper_source)
         self.assertIn("run_docker_stage", helper_source)
@@ -490,7 +614,7 @@ class OciCorrectnessContractTests(unittest.TestCase):
             3,
         )
 
-    def test_wrapper_requires_pinned_docker_client_and_daemon_identity(
+    def test_wrapper_requires_only_pinned_docker_client_runtime_identity(
         self,
     ) -> None:
         self.assertTrue(WRAPPER_PATH.is_file(), "OCI wrapper is missing")
@@ -502,7 +626,6 @@ class OciCorrectnessContractTests(unittest.TestCase):
             "--check",
             "S1_4X_DOCKER_BIN",
             "S1_4X_DOCKER_SHA256",
-            "S1_4X_DOCKER_DAEMON_IDENTITY_SHA256",
             "profile_workflow.py",
             "oci-correctness",
             "--network",
@@ -510,12 +633,14 @@ class OciCorrectnessContractTests(unittest.TestCase):
         ):
             with self.subTest(required=required):
                 self.assertIn(required, source)
+        self.assertNotIn(
+            "S1_4X_DOCKER_DAEMON_IDENTITY_SHA256",
+            source,
+        )
         helper_source = HELPER_PATH.read_text(encoding="utf-8")
         self.assertIn("DOCKER_SHA256_MISMATCH", helper_source)
-        self.assertIn(
-            "OCI_DAEMON_IDENTITY_SHA256_MISMATCH",
-            helper_source,
-        )
+        self.assertNotIn("expectedDaemonIdentitySha256", helper_source)
+        self.assertIn('"daemonIdentitySha256"', helper_source)
         for trust_token in (
             "docker context show",
             '"{{json .}}"',

@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import ast
 import importlib.util
+import os
 import re
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 
@@ -34,6 +36,67 @@ def load_helper():
 
 
 class CorrectnessProfileContractTests(unittest.TestCase):
+    def test_sealed_child_environment_preserves_exact_ghcup_prefix(self) -> None:
+        helper = load_helper()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            home = root / "home"
+            ghcup_prefix = root / "job-local-ghcup"
+            home.mkdir()
+            ghcup_prefix.mkdir()
+            runtime = helper.BenchmarkPythonRuntime(
+                source_path=Path("/tools/python3.12"),
+                fd_path=Path("/proc/self/fd/91"),
+                descriptor=91,
+                sha256="a" * 64,
+                mode=0o100755,
+                identity=(1, 2, 3, 4, 5, 1),
+            )
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "HOME": str(home),
+                    "GHCUP_INSTALL_BASE_PREFIX": str(ghcup_prefix),
+                },
+                clear=True,
+            ):
+                environment = helper._sealed_child_environment(
+                    ghc_bin=Path("/tools/ghc"),
+                    stack_bin=Path("/tools/stack"),
+                    python_runtime=runtime,
+                )
+
+            self.assertEqual(
+                environment["GHCUP_INSTALL_BASE_PREFIX"],
+                str(ghcup_prefix),
+            )
+
+            forged_link = root / "forged-prefix"
+            forged_link.symlink_to(ghcup_prefix, target_is_directory=True)
+            for invalid in (
+                None,
+                "relative-ghcup-prefix",
+                str(root / "missing-prefix"),
+                str(forged_link),
+            ):
+                ambient = {"HOME": str(home)}
+                if invalid is not None:
+                    ambient["GHCUP_INSTALL_BASE_PREFIX"] = invalid
+                with self.subTest(invalid=invalid), mock.patch.dict(
+                    os.environ,
+                    ambient,
+                    clear=True,
+                ):
+                    with self.assertRaisesRegex(
+                        helper.WorkflowError,
+                        "GHCUP_INSTALL_BASE_PREFIX",
+                    ):
+                        helper._sealed_child_environment(
+                            ghc_bin=Path("/tools/ghc"),
+                            stack_bin=Path("/tools/stack"),
+                            python_runtime=runtime,
+                        )
+
     def test_every_workflow_stack_root_is_purpose_and_output_bound(self) -> None:
         helper = load_helper()
         cache = Path("/cache/s1-4x")
