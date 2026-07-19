@@ -409,10 +409,17 @@ def main() -> int:
         SCALA_ROOT
         / "benchmarks/scala/ai/trading/coach/s14x/benchmark/BenchmarkInvocation.scala"
     ).read_text(encoding="utf-8")
-    jvm_evidence = (
+    jvm_evidence_path = (
         SCALA_ROOT
         / "benchmarks/scala/ai/trading/coach/s14x/benchmark/JvmForkEvidence.scala"
-    ).read_text(encoding="utf-8")
+    )
+    jvm_evidence = jvm_evidence_path.read_text(encoding="utf-8")
+    source_policy = load_tool("check_source_policy")
+    source_policy_violations = source_policy.audit_file(
+        jvm_evidence_path,
+        SCALA_ROOT,
+    )
+    assert source_policy_violations == [], source_policy_violations
     assert "JvmForkEvidence.record()" in benchmark_invocation
     for marker in (
         "RuntimeMXBean",
