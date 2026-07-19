@@ -129,6 +129,7 @@ FORBIDDEN_STACK_ENVIRONMENT = (
 )
 ORACLE_COMPARE_SOURCE_PATH_ID = "S1_4X_ORACLE_COMPARE_RESULTS_SOURCE"
 ORACLE_COMMON_SOURCE_PATH_ID = "S1_4X_ORACLE_COMMON_SOURCE"
+HOST_VALIDATOR_SOURCE_PATH_ID = "S1_4X_HOST_VALIDATOR_SOURCE"
 PINNED_ORACLE_COMPARE_BOOTSTRAP = (
     "import pathlib,sys,types\n"
     "compare_fd,common_fd,compare_source,common_source,*compare_argv="
@@ -144,6 +145,23 @@ PINNED_ORACLE_COMPARE_BOOTSTRAP = (
     "namespace={'__name__':'__main__','__file__':compare_source,"
     "'__package__':None,'__cached__':None}\n"
     "exec(compile(pathlib.Path(compare_fd).read_bytes(),compare_source,'exec'),"
+    "namespace)\n"
+)
+PINNED_HOST_VALIDATOR_BOOTSTRAP = (
+    "import pathlib,sys,types\n"
+    "validator_fd,common_fd,validator_source,common_source,*validator_argv="
+    "sys.argv[1:]\n"
+    "common=types.ModuleType('oracle_common')\n"
+    "common.__file__=common_source\n"
+    "common.__package__=''\n"
+    "common.__spec__=None\n"
+    "sys.modules['oracle_common']=common\n"
+    "exec(compile(pathlib.Path(common_fd).read_bytes(),common_source,'exec'),"
+    "common.__dict__)\n"
+    "sys.argv=[validator_source,*validator_argv]\n"
+    "namespace={'__name__':'__main__','__file__':validator_source,"
+    "'__package__':None,'__cached__':None}\n"
+    "exec(compile(pathlib.Path(validator_fd).read_bytes(),validator_source,'exec'),"
     "namespace)\n"
 )
 OCI_PLATFORM = "linux/amd64"
@@ -183,6 +201,14 @@ class PinnedOracleComparator:
     """Comparator와 sibling module을 같은 retained-FD 실행 폐쇄로 보존한다."""
 
     compare_script: Any
+    common_module: Any
+
+
+@dataclass(frozen=True)
+class PinnedHostValidator:
+    """Host validator와 sibling module을 같은 retained-FD 실행 폐쇄로 보존한다."""
+
+    validator_script: Any
     common_module: Any
 
 
@@ -528,6 +554,33 @@ def _pin_oracle_comparator(numeric_root: Path) -> PinnedOracleComparator:
     )
 
 
+def _pin_host_validator(numeric_root: Path) -> PinnedHostValidator:
+    """Frozen host validator와 local import를 pathname 재개방 없이 함께 봉인한다."""
+
+    validator_script = _pin_python_script(
+        _absolute_regular(
+            numeric_root / "oracle/validate_environment.py",
+            label="HOST_VALIDATOR",
+        ),
+        label="HOST_VALIDATOR_PY",
+    )
+    try:
+        common_module = _pin_python_script(
+            _absolute_regular(
+                numeric_root / "oracle/oracle_common.py",
+                label="ORACLE_COMMON",
+            ),
+            label="ORACLE_COMMON_PY",
+        )
+    except BaseException:
+        os.close(validator_script.descriptor)
+        raise
+    return PinnedHostValidator(
+        validator_script=validator_script,
+        common_module=common_module,
+    )
+
+
 def _oracle_compare_command(
     *,
     python_path: Path,
@@ -580,6 +633,25 @@ def _oracle_compare_path_ids(
         ),
         str(comparator.compare_script.source_path): ORACLE_COMPARE_SOURCE_PATH_ID,
         str(comparator.common_module.source_path): ORACLE_COMMON_SOURCE_PATH_ID,
+    }
+
+
+def _host_validator_path_ids(
+    python_runtime: BenchmarkPythonRuntime,
+    validator: PinnedHostValidator,
+) -> dict[str, str]:
+    """Host validator argv의 runtime, source FD, provenance path를 portable ID로 바꾼다."""
+
+    return {
+        str(python_runtime.fd_path): _benchmark_python_path_id(python_runtime),
+        str(validator.validator_script.fd_path): _pinned_file_path_id(
+            validator.validator_script
+        ),
+        str(validator.common_module.fd_path): _pinned_file_path_id(
+            validator.common_module
+        ),
+        str(validator.validator_script.source_path): HOST_VALIDATOR_SOURCE_PATH_ID,
+        str(validator.common_module.source_path): ORACLE_COMMON_SOURCE_PATH_ID,
     }
 
 
@@ -3719,7 +3791,7 @@ def _host_validator_command(
     output: Path,
     root_pid: int,
     python_bin: Path,
-    validator_script: Path | None = None,
+    validator: PinnedHostValidator,
 ) -> list[str]:
     execution = plan.get("execution")
     environment = plan.get("environmentValidity")
@@ -3732,17 +3804,15 @@ def _host_validator_command(
         or any(type(cpu) is not int or cpu < 0 for cpu in cpu_set)
     ):
         raise WorkflowError("HOST_CPU_SET_INVALID")
-    validator = (
-        _absolute_regular(
-            numeric_root / "oracle/validate_environment.py",
-            label="HOST_VALIDATOR",
-        )
-        if validator_script is None
-        else validator_script
-    )
     return [
         str(python_bin),
-        str(validator),
+        "-I",
+        "-c",
+        PINNED_HOST_VALIDATOR_BOOTSTRAP,
+        str(validator.validator_script.fd_path),
+        str(validator.common_module.fd_path),
+        str(validator.validator_script.source_path),
+        str(validator.common_module.source_path),
         "--home",
         str(_absolute_existing_directory(Path(os.environ["HOME"]), label="HOME")),
         "--cpu-set",
@@ -3923,10 +3993,7 @@ def _qualification(arguments: argparse.Namespace) -> None:
         Path(__file__).resolve(strict=True),
         label="PROFILE_MARKER_SCRIPT",
     )
-    host_validator = _pin_python_script(
-        numeric_root / "oracle/validate_environment.py",
-        label="HOST_VALIDATOR_PY",
-    )
+    host_validator = _pin_host_validator(numeric_root)
     docker_client = pin_qualification_docker_client_from_environment()
     docker_route = prepare_qualification_docker_route(
         output,
@@ -3974,10 +4041,7 @@ def _qualification(arguments: argparse.Namespace) -> None:
         route=docker_route,
         docker_client=docker_client,
     )
-    host_path_ids = {
-        str(marker_python.fd_path): _benchmark_python_path_id(marker_python),
-        str(host_validator.fd_path): _pinned_file_path_id(host_validator),
-    }
+    host_path_ids = _host_validator_path_ids(marker_python, host_validator)
     stack_yaml = _absolute_regular(
         haskell_root / "stack.yaml",
         label="AUTHORITATIVE_STACK_YAML",
@@ -3999,7 +4063,7 @@ def _qualification(arguments: argparse.Namespace) -> None:
                 output=host_report,
                 root_pid=qualification_owner_pid,
                 python_bin=marker_python.fd_path,
-                validator_script=host_validator.fd_path,
+                validator=host_validator,
             )
             docker_route_before = snapshot_qualification_docker_route(
                 docker_route,
@@ -4016,7 +4080,8 @@ def _qualification(arguments: argparse.Namespace) -> None:
                     output_directory=output,
                     pass_fds=(
                         marker_python.descriptor,
-                        host_validator.descriptor,
+                        host_validator.validator_script.descriptor,
+                        host_validator.common_module.descriptor,
                         docker_client.descriptor,
                     ),
                     portable_path_ids=host_path_ids,
@@ -4696,14 +4761,8 @@ def _validate_qualification_artifact(
         label="PROFILE_MARKER_SCRIPT",
     )
     marker_script_sha256 = marker_script.sha256
-    host_validator = _pin_python_script(
-        numeric_root / "oracle/validate_environment.py",
-        label="HOST_VALIDATOR_PY",
-    )
-    host_path_ids = {
-        str(marker_python.fd_path): _benchmark_python_path_id(marker_python),
-        str(host_validator.fd_path): _pinned_file_path_id(host_validator),
-    }
+    host_validator = _pin_host_validator(numeric_root)
+    host_path_ids = _host_validator_path_ids(marker_python, host_validator)
     cache_value = os.environ.get("S1_4X_CACHE_ROOT")
     if cache_value is None:
         raise WorkflowError("REQUIRED_ENVIRONMENT_MISSING:S1_4X_CACHE_ROOT")
@@ -4860,7 +4919,7 @@ def _validate_qualification_artifact(
                 output=host_report_path,
                 root_pid=root_pid,
                 python_bin=marker_python.fd_path,
-                validator_script=host_validator.fd_path,
+                validator=host_validator,
             )
             validate_logged_command_record(
                 host_record,
