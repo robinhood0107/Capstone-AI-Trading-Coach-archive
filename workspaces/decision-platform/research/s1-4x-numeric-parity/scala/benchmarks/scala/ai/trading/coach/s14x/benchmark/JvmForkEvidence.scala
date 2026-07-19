@@ -180,8 +180,7 @@ object JvmForkEvidence:
         else
           acquired.release()
           false
-      catch
-        case _: OverlappingFileLockException => true
+      catch case _: OverlappingFileLockException => true
       finally probe.close()
     catch
       // JMH가 동시에 닫은 unrelated fd나 재사용된 proc entry는 후보가 아니다.
@@ -207,8 +206,7 @@ object JvmForkEvidence:
         (descriptorsAfter -- descriptorsBefore).toVector
           .map(descriptor => ProcessFdDirectory.resolve(descriptor.toString))
           .filter(descriptorReferencesLockedChannel)
-      if candidates.size != 1 then
-        throw IllegalStateException("JMH_COMPILE_COMMAND_FILE_UNSAFE")
+      if candidates.size != 1 then throw IllegalStateException("JMH_COMPILE_COMMAND_FILE_UNSAFE")
       val descriptorPath = candidates.head
       val handleBefore = unixIdentity(descriptorPath, noFollowLinks = false)
       val firstBytes = channelBytes(channel)
@@ -227,8 +225,7 @@ object JvmForkEvidence:
           before.size == firstBytes.length.toLong &&
           firstBytes.length == secondBytes.length &&
           java.util.Arrays.equals(firstBytes, secondBytes)
-      if !stable then
-        throw IllegalStateException("JMH_COMPILE_COMMAND_FILE_UNSAFE")
+      if !stable then throw IllegalStateException("JMH_COMPILE_COMMAND_FILE_UNSAFE")
       firstBytes -> before
     finally
       lock.release()
@@ -253,17 +250,16 @@ object JvmForkEvidence:
         tmpDirectory.toRealPath().equals(tmpDirectory) &&
         evidenceDirectory.getParent != null &&
         tmpDirectory.equals(evidenceDirectory.getParent.resolve("jmh-tmp"))
-    if !safeTmpDirectory then
-      throw IllegalStateException("JMH_TMP_DIRECTORY_UNSAFE")
+    if !safeTmpDirectory then throw IllegalStateException("JMH_TMP_DIRECTORY_UNSAFE")
     bean.getInputArguments.asScala.zipWithIndex.foreach { case (argument, index) =>
       if argument.startsWith(CompileCommandPrefix) then
         val path = Path.of(argument.stripPrefix(CompileCommandPrefix))
         if (
-          !path.isAbsolute ||
-          !tmpDirectory.equals(path.getParent) ||
-          Files.isSymbolicLink(path)
-        ) then
-          throw IllegalStateException("JMH_COMPILE_COMMAND_FILE_UNSAFE")
+            !path.isAbsolute ||
+            !tmpDirectory.equals(path.getParent) ||
+            Files.isSymbolicLink(path)
+          )
+        then throw IllegalStateException("JMH_COMPILE_COMMAND_FILE_UNSAFE")
         val (bytes, fileIdentity) = stableSingleLinkBytes(path)
         val identity = Mapper.createObjectNode()
         identity.put("argumentIndex", index)
