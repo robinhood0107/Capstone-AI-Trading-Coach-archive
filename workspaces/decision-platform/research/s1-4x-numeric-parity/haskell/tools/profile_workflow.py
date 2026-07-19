@@ -2638,7 +2638,12 @@ def _candidate_runtime(arguments: argparse.Namespace) -> None:
         raise WorkflowError("CANDIDATE_RUNTIME_INPUT_PATH_DRIFT")
 
     evidence = _load_haskell_evidence(haskell_root)
-    plan = strict_json_load(plan_path)
+    plan_payload, plan, _ = _same_fd_json_value(
+        plan_path,
+        label="QUALIFICATION_PLAN",
+        max_bytes=64 * 1024 * 1024,
+    )
+    plan_sha256 = hashlib.sha256(plan_payload).hexdigest()
     selector = (
         plan.get("haskellProfileQualification")
         if isinstance(plan, dict)
@@ -2654,7 +2659,7 @@ def _candidate_runtime(arguments: argparse.Namespace) -> None:
             document,
             expected_compiler_sha256=evidence.AUTHORITATIVE_GHC_SHA256,
             expected_source_tree_sha256=source_tree_sha256,
-            expected_qualification_plan_sha256=sha256_file(plan_path),
+            expected_qualification_plan_sha256=plan_sha256,
             expected_selector_config_sha256=canonical_sha256(selector),
         )
         evidence.validate_source_manifest(haskell_root, manifest_path)
@@ -3967,7 +3972,12 @@ def _qualification(arguments: argparse.Namespace) -> None:
     output = _reserve_directory(arguments.output_dir)
     marker_python = arguments.benchmark_python_runtime
     plan_path = _absolute_regular(arguments.plan, label="QUALIFICATION_PLAN")
-    plan = strict_json_load(plan_path)
+    plan_payload, plan, _ = _same_fd_json_value(
+        plan_path,
+        label="QUALIFICATION_PLAN",
+        max_bytes=64 * 1024 * 1024,
+    )
+    plan_sha256 = hashlib.sha256(plan_payload).hexdigest()
     configuration, case_order = _qualification_contract(plan)
     haskell_root = Path(__file__).resolve(strict=True).parent.parent
     numeric_root = haskell_root.parent
@@ -3976,7 +3986,6 @@ def _qualification(arguments: argparse.Namespace) -> None:
     evidence = _load_haskell_evidence(haskell_root)
     source_tree_sha256 = evidence.benchmark_source_tree_sha256(haskell_root)
     selector_config_sha256 = canonical_sha256(configuration)
-    plan_sha256 = sha256_file(plan_path)
     ghcup = _required_environment_path("S1_4X_GHCUP_BIN")
     stack = _required_environment_path("S1_4X_STACK_BIN")
     ghc = _required_environment_path("S1_4X_AUTHORITATIVE_GHC_BIN")
@@ -4215,7 +4224,12 @@ def _qualification(arguments: argparse.Namespace) -> None:
                 benchmark_python_runtime=marker_python,
             )
             finished_at = _iso_now()
-            raw = strict_json_load(raw_report)
+            raw_payload, raw, _ = _same_fd_json_value(
+                raw_report,
+                label="QUALIFICATION_CRITERION",
+                max_bytes=64 * 1024 * 1024,
+            )
+            raw_sha256 = hashlib.sha256(raw_payload).hexdigest()
             case_estimates = parse_criterion_qualification_reports(
                 raw,
                 expected_case_order=case_order,
@@ -4252,7 +4266,7 @@ def _qualification(arguments: argparse.Namespace) -> None:
                     ),
                     "hostCommand": host_record,
                     "rawCriterionPath": str(raw_report),
-                    "rawCriterionSha256": sha256_file(raw_report),
+                    "rawCriterionSha256": raw_sha256,
                     "criterionCommand": criterion_record,
                     "caseSecondsPerBatch": case_estimates,
                     "marker": {
@@ -4345,13 +4359,14 @@ def _validate_correctness_receipt(
     expected_profile_id: str,
     expected_source_tree_sha256: str,
     expected_commit: str,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], str]:
     receipt_path = _absolute_regular(path, label="CORRECTNESS_RECEIPT")
     receipt_payload, receipt, _ = _same_fd_json_value(
         receipt_path,
         label="CORRECTNESS_RECEIPT",
         max_bytes=4 * 1024 * 1024,
     )
+    receipt_sha256 = hashlib.sha256(receipt_payload).hexdigest()
     options = profile_options(expected_profile_id)
     expected_fields = {
         "schemaVersion",
@@ -4688,22 +4703,24 @@ def _validate_correctness_receipt(
             evidence_directory=output,
             portable_path_ids=portable_path_ids,
         )
-    return receipt
+    return receipt, receipt_sha256
 
 
 def _validate_qualification_artifact(
     path: Path,
     *,
     plan: Mapping[str, Any],
+    expected_plan_sha256: str,
     expected_source_tree_sha256: str,
     expected_commit: str,
-) -> tuple[dict[str, Any], dict[str, Any]]:
+) -> tuple[dict[str, Any], dict[str, Any], str]:
     artifact_path = _absolute_regular(path, label="QUALIFICATION_ARTIFACT")
     artifact_payload, artifact, _ = _same_fd_json_value(
         artifact_path,
         label="QUALIFICATION_ARTIFACT",
         max_bytes=64 * 1024 * 1024,
     )
+    artifact_sha256 = hashlib.sha256(artifact_payload).hexdigest()
     configuration, case_order = _qualification_contract(plan)
     expected_fields = {
         "schemaVersion",
@@ -4723,10 +4740,6 @@ def _validate_qualification_artifact(
     numeric_root = Path(__file__).resolve(strict=True).parent.parent.parent
     haskell_root = numeric_root / "haskell"
     repo_root = numeric_root.parents[3]
-    plan_path = _absolute_regular(
-        numeric_root / "benchmarks/benchmark-plan.v1.json",
-        label="QUALIFICATION_PLAN",
-    )
     if (
         not isinstance(artifact, dict)
         or set(artifact) != expected_fields
@@ -4736,7 +4749,8 @@ def _validate_qualification_artifact(
         or artifact.get("status") != "PASS"
         or artifact.get("candidateSourceCommit") != expected_commit
         or artifact.get("planPathId") != "S1_4X_BENCHMARK_PLAN"
-        or artifact.get("planSha256") != sha256_file(plan_path)
+        or artifact.get("planSha256")
+        != _require_sha256(expected_plan_sha256, label="qualification-plan")
         or artifact.get("sourceTreeSha256") != expected_source_tree_sha256
         or artifact.get("qualificationCaseOrder") != list(case_order)
         or artifact.get("plannedProfileOrderBlocks")
@@ -5078,7 +5092,7 @@ def _validate_qualification_artifact(
     )
     if artifact.get("selection") != selection:
         raise WorkflowError("QUALIFICATION_SELECTION_DRIFT")
-    return artifact, selection
+    return artifact, selection, artifact_sha256
 
 
 def _select_profile(arguments: argparse.Namespace) -> None:
@@ -5091,7 +5105,12 @@ def _select_profile(arguments: argparse.Namespace) -> None:
         numeric_root / "benchmarks/benchmark-plan.v1.json",
         label="QUALIFICATION_PLAN",
     )
-    plan = strict_json_load(plan_path)
+    plan_payload, plan, _ = _same_fd_json_value(
+        plan_path,
+        label="QUALIFICATION_PLAN",
+        max_bytes=64 * 1024 * 1024,
+    )
+    plan_sha256 = hashlib.sha256(plan_payload).hexdigest()
     configuration, _ = _qualification_contract(plan)
     environment_paths = {}
     for name in (
@@ -5152,13 +5171,13 @@ def _select_profile(arguments: argparse.Namespace) -> None:
         profile_relative_path=profile_path.relative_to(repo_root).as_posix(),
         manifest_relative_path=manifest_path.relative_to(repo_root).as_posix(),
     )
-    baseline = _validate_correctness_receipt(
+    baseline, baseline_sha256 = _validate_correctness_receipt(
         environment_paths["S1_4X_HASKELL_BASELINE_CORRECTNESS"],
         expected_profile_id="baseline-o0-fasm",
         expected_source_tree_sha256=source_tree_sha256,
         expected_commit=candidate_commit,
     )
-    optimized = _validate_correctness_receipt(
+    optimized, optimized_sha256 = _validate_correctness_receipt(
         environment_paths["S1_4X_HASKELL_OPTIMIZED_CORRECTNESS"],
         expected_profile_id="optimized-o2-fasm",
         expected_source_tree_sha256=source_tree_sha256,
@@ -5167,26 +5186,29 @@ def _select_profile(arguments: argparse.Namespace) -> None:
     qualification_path = environment_paths[
         "S1_4X_HASKELL_QUALIFICATION_ARTIFACT"
     ]
-    qualification, selection = _validate_qualification_artifact(
-        qualification_path,
-        plan=plan,
-        expected_source_tree_sha256=source_tree_sha256,
-        expected_commit=candidate_commit,
+    qualification, selection, qualification_artifact_sha256 = (
+        _validate_qualification_artifact(
+            qualification_path,
+            plan=plan,
+            expected_plan_sha256=plan_sha256,
+            expected_source_tree_sha256=source_tree_sha256,
+            expected_commit=candidate_commit,
+        )
     )
-    if qualification.get("planSha256") != sha256_file(plan_path):
+    if qualification.get("planSha256") != plan_sha256:
         raise WorkflowError("QUALIFICATION_PLAN_SHA256_DRIFT")
-    selected_correctness_path = (
-        environment_paths["S1_4X_HASKELL_OPTIMIZED_CORRECTNESS"]
-        if selection["profileId"] == "optimized-o2-fasm"
-        else environment_paths["S1_4X_HASKELL_BASELINE_CORRECTNESS"]
-    )
-    selected_receipt = optimized if selection["profileId"] == "optimized-o2-fasm" else baseline
+    if selection["profileId"] == "optimized-o2-fasm":
+        selected_receipt = optimized
+        selected_correctness_sha256 = optimized_sha256
+    else:
+        selected_receipt = baseline
+        selected_correctness_sha256 = baseline_sha256
     profile_document = build_final_profile_document(
         selection=selection,
         source_tree_sha256=source_tree_sha256,
-        full_correctness_sha256=sha256_file(selected_correctness_path),
-        qualification_plan_sha256=sha256_file(plan_path),
-        qualification_artifact_sha256=sha256_file(qualification_path),
+        full_correctness_sha256=selected_correctness_sha256,
+        qualification_plan_sha256=plan_sha256,
+        qualification_artifact_sha256=qualification_artifact_sha256,
         selector_config_sha256=canonical_sha256(configuration),
         compiler_sha256=selected_receipt["compilerSha256"],
     )
@@ -5198,7 +5220,7 @@ def _select_profile(arguments: argparse.Namespace) -> None:
             pending,
             expected_compiler_sha256=evidence.AUTHORITATIVE_GHC_SHA256,
             expected_source_tree_sha256=source_tree_sha256,
-            expected_qualification_plan_sha256=sha256_file(plan_path),
+            expected_qualification_plan_sha256=plan_sha256,
             expected_selector_config_sha256=canonical_sha256(configuration),
         )
         evidence.validate_source_manifest(haskell_root, manifest_path)
@@ -5225,7 +5247,7 @@ def _select_profile(arguments: argparse.Namespace) -> None:
             actual,
             expected_compiler_sha256=evidence.AUTHORITATIVE_GHC_SHA256,
             expected_source_tree_sha256=source_tree_sha256,
-            expected_qualification_plan_sha256=sha256_file(plan_path),
+            expected_qualification_plan_sha256=plan_sha256,
             expected_selector_config_sha256=canonical_sha256(configuration),
         )
         if candidate_commit == fixed_point["preMaterializationSubjectCommit"]:
@@ -7760,7 +7782,12 @@ def _oci_correctness(arguments: argparse.Namespace) -> None:
         numeric_root / "benchmarks/benchmark-plan.v1.json",
         label="QUALIFICATION_PLAN",
     )
-    plan = strict_json_load(plan_path)
+    plan_payload, plan, _ = _same_fd_json_value(
+        plan_path,
+        label="QUALIFICATION_PLAN",
+        max_bytes=64 * 1024 * 1024,
+    )
+    plan_sha256 = hashlib.sha256(plan_payload).hexdigest()
     configuration, _ = _qualification_contract(plan)
     profile_path = _absolute_regular(
         haskell_root / "selected-profile.v1.json",
@@ -7771,7 +7798,7 @@ def _oci_correctness(arguments: argparse.Namespace) -> None:
         profile,
         expected_compiler_sha256=evidence.AUTHORITATIVE_GHC_SHA256,
         expected_source_tree_sha256=source_tree_sha256,
-        expected_qualification_plan_sha256=sha256_file(plan_path),
+        expected_qualification_plan_sha256=plan_sha256,
         expected_selector_config_sha256=canonical_sha256(configuration),
     )
     if profile.get("schemaVersion") != FINAL_PROFILE_SCHEMA_VERSION:
