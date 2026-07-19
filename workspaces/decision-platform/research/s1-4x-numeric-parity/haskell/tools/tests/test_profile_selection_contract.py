@@ -217,12 +217,14 @@ class ProfileSelectionContractTests(unittest.TestCase):
                 case_order=CASE_ORDER,
                 host_validity_sha256="4" * 64,
                 marker_python_path="/usr/bin/python3.14",
+                marker_python_pinned_fd_path="/proc/self/fd/70",
                 marker_python_sha256="5" * 64,
                 marker_script_path="/repo/haskell/tools/profile_workflow.py",
+                marker_script_pinned_fd_path="/proc/self/fd/71",
                 marker_script_sha256="6" * 64,
                 marker_argv=[
-                    "/usr/bin/python3.14",
-                    "/repo/haskell/tools/profile_workflow.py",
+                    "/proc/self/fd/70",
+                    "/proc/self/fd/71",
                     "mark-measurement-entered",
                     "--qualification",
                     str(marker_path),
@@ -348,6 +350,45 @@ class ProfileSelectionContractTests(unittest.TestCase):
             self.assertNotIn("eval ", source)
             self.assertNotIn("bash -c", source)
             self.assertNotIn("manual-override", source)
+
+    def test_qualification_marker_executes_only_inherited_fd_objects(
+        self,
+    ) -> None:
+        qualification = QUALIFICATION_WRAPPER.read_text(encoding="utf-8")
+        workflow = HELPER_PATH.read_text(encoding="utf-8")
+        for suffix in ("_BIN", "_SHA256", "_PINNED_FD_PATH"):
+            self.assertIn(
+                f"${{S1_4X_BENCHMARK_PYTHON{suffix}:?",
+                qualification,
+            )
+        self.assertIn(
+            '"$BENCHMARK_PYTHON_PINNED_FD_PATH" '
+            '"$HASKELL_ROOT/tools/profile_workflow.py"',
+            qualification,
+        )
+        self.assertNotIn(
+            'exec /usr/bin/python3 "$HASKELL_ROOT/tools/profile_workflow.py"',
+            qualification,
+        )
+        for token in (
+            "pinned_executable_environment",
+            "pin_regular_file",
+            "markerPythonPinnedFdPath",
+            "markerScriptPinnedFdPath",
+            "pass_fds=",
+        ):
+            with self.subTest(token=token):
+                self.assertIn(token, workflow)
+        self.assertIn(
+            '"S1_4X_BENCHMARK_MARKER_PYTHON": '
+            "str(marker_python.fd_path)",
+            workflow,
+        )
+        self.assertIn(
+            '"S1_4X_BENCHMARK_MARKER_SCRIPT": '
+            "str(marker_script.fd_path)",
+            workflow,
+        )
 
     def test_final_profile_binds_selected_correctness_and_qualification(self) -> None:
         helper = load_helper()
