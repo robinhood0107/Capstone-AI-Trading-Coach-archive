@@ -226,6 +226,8 @@ def _validate_entry(root: Path, entry: Mapping[str, object]) -> None:
     )
     if (
         not separator
+        or not focused_name
+        or focused_name != focused_name.strip()
         or re.fullmatch(SUPPRESSION_FILE_PATTERN, focused_path_text) is None
     ):
         raise InventoryError("focused lint test reference must use `path: test name`")
