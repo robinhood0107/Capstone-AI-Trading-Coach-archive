@@ -1733,6 +1733,8 @@ def validate_generated_java_precompile(
         "generatedSourcesIdentitySha256",
         "classpathEntries",
         "classpathEntriesSha256",
+        "classpathPostRun",
+        "classpathPostRunSha256",
         "runtimeClasspathSha256",
         "scalaClassOutputPathId",
         "generatedClassOutputPathId",
@@ -2070,6 +2072,25 @@ def validate_generated_java_precompile(
         is None
     ):
         raise T3EvidenceError("JMH_PRECOMPILE_CLASSPATH_INVALID")
+    classpath_post_run = receipt.get("classpathPostRun")
+    if (
+        receipt.get("classpathPostRunSha256")
+        != canonical_sha256(classpath_post_run)
+    ):
+        raise T3EvidenceError(
+            "JMH_PRECOMPILE_CLASSPATH_POST_RUN_INVALID"
+        )
+    try:
+        jmh_precompile.validate_classpath_post_run_evidence(
+            classpath_post_run,
+            classpath_entries=classpath_entries,
+            scala_class_output_path_id=class_output,
+            generated_resource_path_id=generated_resource_id,
+        )
+    except jmh_precompile.PrecompileError as error:
+        raise T3EvidenceError(
+            "JMH_PRECOMPILE_CLASSPATH_POST_RUN_INVALID"
+        ) from error
 
     generated_classes = receipt.get("generatedClasses")
     class_directory = artifact_root / case_root / jmh_precompile.GENERATED_CLASSES_NAME
