@@ -1527,6 +1527,80 @@ def validate_measurement_ready_marker(
     return marker_sha256
 
 
+def _canonical_absolute_physical_path(
+    raw_path: str,
+    *,
+    error_leaf: str,
+) -> Path:
+    """stdout의 물리 경로가 alias 없는 canonical Linux 절대경로인지 검증한다."""
+
+    path = Path(raw_path)
+    if (
+        path.anchor != os.sep
+        or path.as_posix() != raw_path
+        or ".." in path.parts
+    ):
+        raise T3EvidenceError(error_leaf)
+    return path
+
+
+def _canonical_portable_relative_path(
+    path_id: Any,
+    *,
+    prefix: str,
+    error_leaf: str,
+) -> Path:
+    """Portable path ID의 prefix 아래 canonical 상대경로만 허용한다."""
+
+    if not isinstance(path_id, str) or not path_id.startswith(prefix):
+        raise T3EvidenceError(error_leaf)
+    raw_relative = path_id.removeprefix(prefix)
+    relative = Path(raw_relative)
+    if (
+        not raw_relative
+        or not relative.parts
+        or relative.is_absolute()
+        or ".." in relative.parts
+        or relative.as_posix() != raw_relative
+    ):
+        raise T3EvidenceError(error_leaf)
+    return relative
+
+
+def _canonical_physical_directory(
+    path: Path,
+    *,
+    error_leaf: str,
+) -> Path:
+    """신뢰 root가 실재 canonical directory이고 전 component가 non-symlink인지 검증한다."""
+
+    if (
+        path.anchor != os.sep
+        or path.as_posix() != str(path)
+        or ".." in path.parts
+    ):
+        raise T3EvidenceError(error_leaf)
+    components = [Path(path.anchor)]
+    for index in range(1, len(path.parts)):
+        components.append(
+            Path(path.anchor).joinpath(*path.parts[1 : index + 1])
+        )
+    try:
+        metadata = [
+            os.lstat(component) for component in components
+        ]
+        resolved = path.resolve(strict=True)
+    except (OSError, RuntimeError) as error:
+        raise T3EvidenceError(error_leaf) from error
+    if (
+        resolved != path
+        or not stat.S_ISDIR(metadata[-1].st_mode)
+        or any(stat.S_ISLNK(item.st_mode) for item in metadata)
+    ):
+        raise T3EvidenceError(error_leaf)
+    return path
+
+
 def _classpath_log_binding(
     raw: str,
     *,
@@ -1560,54 +1634,81 @@ def _classpath_log_binding(
     ):
         raise T3EvidenceError("JMH_PRECOMPILE_STDOUT_BINDING_INVALID")
 
-    class_input = Path(processing.group(2))
-    source_root = Path(generated.group(1))
-    resource_root = Path(generated.group(2))
-    class_input_id = str(generator.get("classInputPathId", ""))
-    if not class_input_id.startswith("SCALA_WORKSPACE/"):
-        raise T3EvidenceError("JMH_PRECOMPILE_STDOUT_BINDING_INVALID")
-    class_input_relative = Path(
-        class_input_id.removeprefix("SCALA_WORKSPACE/")
+    error_leaf = "JMH_PRECOMPILE_STDOUT_BINDING_INVALID"
+    class_input = _canonical_absolute_physical_path(
+        processing.group(2),
+        error_leaf=error_leaf,
+    )
+    source_root = _canonical_absolute_physical_path(
+        generated.group(1),
+        error_leaf=error_leaf,
+    )
+    resource_root = _canonical_absolute_physical_path(
+        generated.group(2),
+        error_leaf=error_leaf,
+    )
+    class_input_relative = _canonical_portable_relative_path(
+        generator.get("classInputPathId"),
+        prefix="SCALA_WORKSPACE/",
+        error_leaf=error_leaf,
     )
     if (
-        not class_input.is_absolute()
-        or len(class_input_relative.parts) < 2
+        len(class_input_relative.parts) < 2
         or tuple(class_input.parts[-len(class_input_relative.parts) :])
         != class_input_relative.parts
     ):
-        raise T3EvidenceError("JMH_PRECOMPILE_STDOUT_BINDING_INVALID")
-    workspace = Path(
-        *class_input.parts[: -len(class_input_relative.parts)]
+        raise T3EvidenceError(error_leaf)
+    workspace = _canonical_physical_directory(
+        Path(*class_input.parts[: -len(class_input_relative.parts)]),
+        error_leaf=error_leaf,
     )
-    if not workspace.is_absolute():
-        raise T3EvidenceError("JMH_PRECOMPILE_STDOUT_BINDING_INVALID")
+    evidence_root = _canonical_physical_directory(
+        physical_case_root,
+        error_leaf=error_leaf,
+    )
 
     def expected_path(path_id: str, actual: Path) -> tuple[Path, Path | None]:
         if path_id.startswith("SCALA_WORKSPACE/"):
             return (
-                workspace / path_id.removeprefix("SCALA_WORKSPACE/"),
+                workspace
+                / _canonical_portable_relative_path(
+                    path_id,
+                    prefix="SCALA_WORKSPACE/",
+                    error_leaf=error_leaf,
+                ),
                 None,
             )
         if path_id.startswith("EVIDENCE_ROOT/"):
             return (
-                physical_case_root
-                / path_id.removeprefix("EVIDENCE_ROOT/"),
+                evidence_root
+                / _canonical_portable_relative_path(
+                    path_id,
+                    prefix="EVIDENCE_ROOT/",
+                    error_leaf=error_leaf,
+                ),
                 None,
             )
         if path_id.startswith("COURSIER_CACHE/"):
-            relative = Path(path_id.removeprefix("COURSIER_CACHE/"))
+            relative = _canonical_portable_relative_path(
+                path_id,
+                prefix="COURSIER_CACHE/",
+                error_leaf=error_leaf,
+            )
             if (
-                not actual.is_absolute()
-                or len(actual.parts) <= len(relative.parts)
+                len(actual.parts) <= len(relative.parts)
                 or tuple(actual.parts[-len(relative.parts) :])
                 != relative.parts
             ):
-                raise T3EvidenceError(
-                    "JMH_PRECOMPILE_STDOUT_BINDING_INVALID"
-                )
-            root = Path(*actual.parts[: -len(relative.parts)])
-            return root / relative, root
-        raise T3EvidenceError("JMH_PRECOMPILE_STDOUT_BINDING_INVALID")
+                raise T3EvidenceError(error_leaf)
+            root = _canonical_physical_directory(
+                Path(*actual.parts[: -len(relative.parts)]),
+                error_leaf=error_leaf,
+            )
+            return (
+                root / relative,
+                root,
+            )
+        raise T3EvidenceError(error_leaf)
 
     for actual, field in (
         (class_input, "classInputPathId"),
@@ -1616,29 +1717,30 @@ def _classpath_log_binding(
     ):
         expected, _ = expected_path(str(generator.get(field, "")), actual)
         if actual != expected:
-            raise T3EvidenceError("JMH_PRECOMPILE_STDOUT_BINDING_INVALID")
+            raise T3EvidenceError(error_leaf)
 
     raw_paths = lines[2].split(os.pathsep)
     if len(raw_paths) != len(entries):
-        raise T3EvidenceError("JMH_PRECOMPILE_STDOUT_BINDING_INVALID")
+        raise T3EvidenceError(error_leaf)
     coursier_root: Path | None = None
     for raw_path, item in zip(raw_paths, entries, strict=True):
         if not isinstance(item, dict):
-            raise T3EvidenceError("JMH_PRECOMPILE_STDOUT_BINDING_INVALID")
-        actual = Path(raw_path)
+            raise T3EvidenceError(error_leaf)
+        actual = _canonical_absolute_physical_path(
+            raw_path,
+            error_leaf=error_leaf,
+        )
         expected, observed_coursier = expected_path(
             str(item.get("pathId", "")),
             actual,
         )
         if actual != expected:
-            raise T3EvidenceError("JMH_PRECOMPILE_STDOUT_BINDING_INVALID")
+            raise T3EvidenceError(error_leaf)
         if observed_coursier is not None:
             if coursier_root is None:
                 coursier_root = observed_coursier
             elif coursier_root != observed_coursier:
-                raise T3EvidenceError(
-                    "JMH_PRECOMPILE_STDOUT_BINDING_INVALID"
-                )
+                raise T3EvidenceError(error_leaf)
     return lines[0], lines[1], lines[2]
 
 
@@ -1737,85 +1839,42 @@ def validate_jmh_stdout_precompile_binding(
     ):
         raise T3EvidenceError("JMH_RUN_STDOUT_BINDING_INVALID")
 
-    def canonical_absolute_path(raw_path: str) -> Path:
-        path = Path(raw_path)
-        if (
-            path.anchor != os.sep
-            or path.as_posix() != raw_path
-            or ".." in path.parts
-        ):
-            raise T3EvidenceError("JMH_RUN_STDOUT_BINDING_INVALID")
-        return path
-
-    class_input = canonical_absolute_path(processing.group(2))
-    source_root = canonical_absolute_path(generated.group(1))
-    resource_root = canonical_absolute_path(generated.group(2))
-    class_input_id = str(
-        runtime_generator.get("classInputPathId", "")
+    error_leaf = "JMH_RUN_STDOUT_BINDING_INVALID"
+    class_input = _canonical_absolute_physical_path(
+        processing.group(2),
+        error_leaf=error_leaf,
     )
-    if not class_input_id.startswith("SCALA_WORKSPACE/"):
-        raise T3EvidenceError("JMH_RUN_STDOUT_BINDING_INVALID")
-    class_input_relative = Path(
-        class_input_id.removeprefix("SCALA_WORKSPACE/")
+    source_root = _canonical_absolute_physical_path(
+        generated.group(1),
+        error_leaf=error_leaf,
+    )
+    resource_root = _canonical_absolute_physical_path(
+        generated.group(2),
+        error_leaf=error_leaf,
+    )
+    class_input_id = runtime_generator.get("classInputPathId")
+    class_input_relative = _canonical_portable_relative_path(
+        class_input_id,
+        prefix="SCALA_WORKSPACE/",
+        error_leaf=error_leaf,
     )
     if (
-        not class_input.is_absolute()
-        or len(class_input_relative.parts) < 2
+        len(class_input_relative.parts) < 2
         or tuple(class_input.parts[-len(class_input_relative.parts) :])
         != class_input_relative.parts
     ):
-        raise T3EvidenceError("JMH_RUN_STDOUT_BINDING_INVALID")
-    runtime_workspace = Path(
-        *class_input.parts[: -len(class_input_relative.parts)]
+        raise T3EvidenceError(error_leaf)
+    runtime_workspace = _canonical_physical_directory(
+        Path(*class_input.parts[: -len(class_input_relative.parts)]),
+        error_leaf=error_leaf,
     )
-    if (
-        runtime_workspace.anchor != os.sep
-        or runtime_workspace.as_posix() != str(runtime_workspace)
-        or ".." in runtime_workspace.parts
-    ):
-        raise T3EvidenceError("JMH_RUN_STDOUT_BINDING_INVALID")
-    try:
-        resolved_workspace = runtime_workspace.resolve(strict=True)
-        workspace_components = [
-            Path(runtime_workspace.anchor).joinpath(
-                *runtime_workspace.parts[1 : index + 1]
-            )
-            for index in range(1, len(runtime_workspace.parts))
-        ]
-        workspace_metadata = [
-            os.lstat(component) for component in workspace_components
-        ]
-    except (OSError, RuntimeError) as error:
-        raise T3EvidenceError(
-            "JMH_RUN_STDOUT_BINDING_INVALID"
-        ) from error
-    if (
-        resolved_workspace != runtime_workspace
-        or not workspace_metadata
-        or not stat.S_ISDIR(workspace_metadata[-1].st_mode)
-        or any(
-            stat.S_ISLNK(metadata.st_mode)
-            for metadata in workspace_metadata
-        )
-    ):
-        raise T3EvidenceError("JMH_RUN_STDOUT_BINDING_INVALID")
 
     def runtime_workspace_path(path_id: Any) -> Path:
-        if (
-            not isinstance(path_id, str)
-            or not path_id.startswith("SCALA_WORKSPACE/")
-        ):
-            raise T3EvidenceError("JMH_RUN_STDOUT_BINDING_INVALID")
-        raw_relative = path_id.removeprefix("SCALA_WORKSPACE/")
-        relative = Path(raw_relative)
-        if (
-            not raw_relative
-            or relative.is_absolute()
-            or ".." in relative.parts
-            or relative.as_posix() != raw_relative
-        ):
-            raise T3EvidenceError("JMH_RUN_STDOUT_BINDING_INVALID")
-        return runtime_workspace / relative
+        return runtime_workspace / _canonical_portable_relative_path(
+            path_id,
+            prefix="SCALA_WORKSPACE/",
+            error_leaf=error_leaf,
+        )
 
     if (
         class_input != runtime_workspace_path(class_input_id)
