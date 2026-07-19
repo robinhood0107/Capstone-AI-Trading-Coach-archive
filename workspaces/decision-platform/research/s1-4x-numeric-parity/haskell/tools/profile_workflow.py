@@ -1721,18 +1721,23 @@ def mark_profile_measurement_entered(path: Path) -> dict[str, str]:
 
 
 def parse_criterion_qualification_reports(
-    reports: object,
+    raw_document: object,
     *,
     expected_case_order: Sequence[str],
 ) -> dict[str, float]:
-    """Criterion raw mean seconds를 exact 7-case order로 추출한다."""
+    """Criterion 1.6.4.0 raw envelope에서 exact 7-case mean seconds를 추출한다."""
 
     if (
-        not isinstance(reports, list)
+        not isinstance(raw_document, list)
+        or len(raw_document) != 3
+        or raw_document[0] != "criterion"
+        or raw_document[1] != "1.6.4.0"
+        or not isinstance(raw_document[2], list)
         or len(expected_case_order) != 7
         or len(set(expected_case_order)) != 7
     ):
-        raise WorkflowError("CRITERION_QUALIFICATION_REPORT_SET_INVALID")
+        raise WorkflowError("CRITERION_QUALIFICATION_DOCUMENT_INVALID")
+    reports = raw_document[2]
     parsed: dict[str, float] = {}
     for report in reports:
         if not isinstance(report, dict):
