@@ -47,11 +47,23 @@ def load_module():
     return module
 
 
-def expect_t3_error(module, operation, message: str) -> None:
+def expect_t3_error(
+    module,
+    operation,
+    message: str,
+    *,
+    expected_prefix: str | None = None,
+) -> None:
     try:
         operation()
-    except module.T3EvidenceError:
-        pass
+    except module.T3EvidenceError as error:
+        if (
+            expected_prefix is not None
+            and not str(error).startswith(expected_prefix)
+        ):
+            raise AssertionError(
+                f"{message}: unexpected leaf {error}"
+            ) from error
     else:
         raise AssertionError(message)
 
@@ -339,6 +351,34 @@ def selector_fixture(
     capability_plan_sha = module.sha256_file(capability_plan_path)
     java_sha = toolchain_lock["jdk"]["javaExecutableSha256"]
     javac_sha = toolchain_lock["jdk"]["javacExecutableSha256"]
+    jdk_modules_identity = module.jmh_precompile._stat_identity(
+        os.stat(
+            Path(os.environ["JAVA_HOME"]) / "lib/modules",
+            follow_symlinks=False,
+        )
+    )
+
+    def closure_identity_sha256(
+        closure_root: Path,
+        values: list[dict[str, str]],
+    ) -> str:
+        identities = [
+            {
+                "path": item["path"],
+                "fileIdentity": (
+                    module.jmh_precompile._file_identity_value(
+                        module.jmh_precompile._stat_identity(
+                            os.stat(
+                                closure_root / item["path"],
+                                follow_symlinks=False,
+                            )
+                        )
+                    )
+                ),
+            }
+            for item in values
+        ]
+        return canonical_sha256(identities)
 
     scala_cli = scala_cli_override or root / "scala-cli"
     if scala_cli_override is None:
@@ -348,9 +388,25 @@ def selector_fixture(
 
     stable_properties = dict(module.EXPECTED_STABLE_SYSTEM_PROPERTIES)
     ambient_options = dict(module.EXPECTED_AMBIENT_JVM_OPTIONS)
-    effective_arguments = ["-Djmh.separateClasspathJAR=true"]
+    reported_argument = "-Djmh.separateClasspathJAR=true"
+    compile_command_sha256 = "8" * 64
 
-    def fork(index: int) -> dict:
+    def fork(
+        index: int,
+        *,
+        tmp_directory: Path = Path("/sealed/smoke/jmh-tmp"),
+    ) -> dict:
+        input_arguments = [
+            reported_argument,
+            f"-Djava.io.tmpdir={tmp_directory}",
+            "-XX:+UnlockDiagnosticVMOptions",
+            "-XX:+UnlockExperimentalVMOptions",
+            "-DcompilerBlackholesEnabled=true",
+            (
+                "-XX:CompileCommandFile="
+                f"{tmp_directory}/jmh-{index}.compilecommand"
+            ),
+        ]
         return {
             "schemaVersion": "s1.4x-scala-jvm-fork-evidence-v1",
             "forkIndex": index,
@@ -359,8 +415,16 @@ def selector_fixture(
             "runtimeVersion": "25.0.3+9-LTS",
             "vendor": "Eclipse Adoptium",
             "javaHomePathId": "TEMURIN_25_0_3_9_LTS",
-            "inputArguments": effective_arguments,
-            "inputArgumentFiles": [],
+            "inputArguments": input_arguments,
+            "inputArgumentFiles": [
+                {
+                    "argumentIndex": len(input_arguments) - 1,
+                    "argumentPrefix": "-XX:CompileCommandFile=",
+                    "pathId": "JMH_COMPILE_COMMAND_FILE",
+                    "sha256": compile_command_sha256,
+                    "fileIdentitySha256": "7" * 64,
+                }
+            ],
             "stableSystemProperties": stable_properties,
             "ambientJvmOptionVariables": ambient_options,
             "systemPropertiesSha256": module.canonical_pairs_sha256(
@@ -384,6 +448,7 @@ def selector_fixture(
     allowlist_path = root / "scala-jvm-argument-allowlist.v1.json"
     write_json(allowlist_path, allowlist)
     allowlist_sha = module.sha256_file(allowlist_path)
+    effective_arguments = allowlist["effectiveJvmArguments"]
 
     qualification_value = qualification(plan, scores)
     qualification_value["benchmarkPlanSha256"] = plan_sha
@@ -418,9 +483,13 @@ def selector_fixture(
             benchmark, logical_operations, include_regex = (
                 module.benchmark_case_contract(plan, case_id)
             )
+            case_tmp_directory = Path(
+                f"/sealed/qualification/r{repetition}/{profile}/"
+                f"case-{case_index:02d}/jmh-tmp"
+            )
             forks = [
                 {
-                    **fork(index),
+                    **fork(index, tmp_directory=case_tmp_directory),
                     "runtimeClasspathSha256": (
                         f"{repetition * 1000 + case_index * 10 + index:064x}"
                     ),
@@ -458,7 +527,10 @@ def selector_fixture(
                         "scoreUnit": "ns/op",
                         "rawData": [[score] * 8 for _ in range(3)],
                     },
-                    "jvmArgs": effective_arguments,
+                    "jvmArgs": [
+                        reported_argument,
+                        f"-Djava.io.tmpdir={case_tmp_directory}",
+                    ],
                 }
             ]
             native_path = case_root / "native.json"
@@ -568,6 +640,14 @@ def selector_fixture(
                         "sha256": module.sha256_file(class_path),
                     }
                 )
+            generated_sources_identity_sha = closure_identity_sha256(
+                generated_source_root,
+                generated_sources,
+            )
+            generated_classes_identity_sha = closure_identity_sha256(
+                generated_class_root,
+                generated_classes,
+            )
             precompile_portable = [
                 "SCALA_CLI_1_15_0",
                 "--power",
@@ -624,11 +704,13 @@ def selector_fixture(
                     "pathId": class_output_id,
                     "kind": "directory",
                     "sha256": "a" * 64,
+                    "identitySha256": "1" * 64,
                 },
                 {
                     "pathId": generated_resource_id,
                     "kind": "directory",
                     "sha256": "e" * 64,
+                    "identitySha256": "2" * 64,
                 },
                 {
                     "pathId": (
@@ -637,11 +719,13 @@ def selector_fixture(
                     ),
                     "kind": "file",
                     "sha256": "b" * 64,
+                    "identitySha256": "3" * 64,
                 },
                 {
                     "pathId": generated_class_output_id,
                     "kind": "directory",
                     "sha256": generated_classes_sha,
+                    "identitySha256": generated_classes_identity_sha,
                 },
             ]
             physical_workspace = Path("/sealed/scala-workspace")
@@ -664,21 +748,32 @@ def selector_fixture(
                 / "https/repo.example/org/openjdk/jmh/"
                 "jmh-core/1.37/jmh-core-1.37.jar"
             )
-            generator_classpath_prefix = (
+            generator_stdout_prefix = (
                 f'Processing 147 classes from {generator_input_path} '
                 'with "reflection" generator\n'
                 f"Writing out Java source to {generated_source_path} "
                 f"and resources to {generated_resource_path}\n"
-                f"{class_output_path}:{generated_resource_path}:"
-                f"{dependency_path}:{generated_class_root}\n"
             )
+            runtime_classpath = (
+                f"{class_output_path}:{generated_resource_path}:"
+                f"{dependency_path}:{generated_class_root}"
+            )
+            generator_classpath_prefix = (
+                generator_stdout_prefix + runtime_classpath + "\n"
+            )
+            runtime_classpath_sha = hashlib.sha256(
+                runtime_classpath.encode("utf-8")
+            ).hexdigest()
+            for fork_value in forks:
+                fork_value["runtimeClasspathSha256"] = runtime_classpath_sha
+            write_json(fork_path, forks)
             precompile_stdout.write_text(
                 generator_classpath_prefix,
                 encoding="utf-8",
                 newline="\n",
             )
             stdout_path.write_text(
-                generator_classpath_prefix + "# JMH version: 1.37\n",
+                generator_stdout_prefix + "# JMH version: 1.37\n",
                 encoding="utf-8",
                 newline="\n",
             )
@@ -704,6 +799,11 @@ def selector_fixture(
                     ),
                     "jdkModulesSha256": (
                         toolchain_lock["jdk"]["jdkModulesSha256"]
+                    ),
+                    "jdkModulesFileIdentity": (
+                        module.jmh_precompile._file_identity_value(
+                            jdk_modules_identity
+                        )
                     ),
                 },
                 "scalaCompile": {
@@ -749,14 +849,21 @@ def selector_fixture(
                 "generatedSourcesSha256": canonical_sha256(
                     generated_sources
                 ),
+                "generatedSourcesIdentitySha256": (
+                    generated_sources_identity_sha
+                ),
                 "classpathEntries": classpath_entries,
                 "classpathEntriesSha256": canonical_sha256(
                     classpath_entries
                 ),
+                "runtimeClasspathSha256": runtime_classpath_sha,
                 "scalaClassOutputPathId": class_output_id,
                 "generatedClassOutputPathId": generated_class_output_id,
                 "generatedClasses": generated_classes,
                 "generatedClassesSha256": generated_classes_sha,
+                "generatedClassesIdentitySha256": (
+                    generated_classes_identity_sha
+                ),
                 "javacProcess": {
                     "portableArgv": javac_portable,
                     "portableArgvSha256": canonical_sha256(
@@ -791,6 +898,8 @@ def selector_fixture(
                 "system",
                 "--coursier-validate-checksums",
                 *module.PROFILE_CLI_ARGUMENTS[profile],
+                "--java-prop",
+                "java.io.tmpdir=EVIDENCE_ROOT/jmh-tmp",
                 "--jmh",
                 "--jmh-version",
                 "1.37",
@@ -1312,26 +1421,15 @@ def sequential_qualification_selector_contract(
     module,
     *,
     root: Path,
-    plan: dict,
+    template: dict,
 ) -> None:
-    """실제 qualification shell 뒤 죽은 FD 없이 selector를 연속 실행한다."""
+    """두 실제 shell wrapper 사이의 pinned FD 수명 경계를 가볍게 검증한다."""
 
     scala_cli = Path.home() / ".local/bin/scala-cli"
     java_home = Path(os.environ["JAVA_HOME"])
-    template_root = root / "template"
-    template = selector_fixture(
-        module,
-        root=template_root,
-        plan=plan,
-        scores={"A": 100.0, "B": 95.0, "C": 96.0},
-        scala_cli_override=scala_cli,
-    )
     result_dir = root / "result"
     correctness_root = result_dir / "scala/profiles"
-    shutil.copytree(
-        template["correctness_artifact_root"],
-        correctness_root,
-    )
+    correctness_root.mkdir(parents=True)
     output_root = root / "qualification"
     shim_root = root / "shim"
     shim_root.mkdir()
@@ -1341,42 +1439,34 @@ def sequential_qualification_selector_contract(
 import importlib.util
 import os
 import pathlib
-import shutil
 import sys
 
-target = pathlib.Path(sys.argv[1])
+arguments = sys.argv[1:]
+if arguments[:3] == ["-E", "-s", "-S"]:
+    arguments = arguments[3:]
+target = pathlib.Path(arguments[0])
+fd_names = (
+    "S1_4X_SCALA_CLI_EXEC_PATH",
+    "S1_4X_SCALA_JAVA_PINNED_FD_PATH",
+    "S1_4X_SCALA_JAVAC_PINNED_FD_PATH",
+)
+if target.name == "t3_evidence.py":
+    if any(name in os.environ for name in fd_names):
+        raise SystemExit("selector inherited dead qualification FD environment")
+    output = pathlib.Path(sys.argv[sys.argv.index("--output") + 1])
+    output.write_text('{"selectedProfileId":"B"}\\n', encoding="utf-8")
+    raise SystemExit(0)
 if target.name != "run_profile_qualification.py":
     os.execv("/usr/bin/python3", ["/usr/bin/python3", *sys.argv[1:]])
-sys.path.insert(0, str(target.parent))
-specification = importlib.util.spec_from_file_location(
-    "run_profile_qualification_contract",
-    target,
+if any(name not in os.environ for name in fd_names):
+    raise SystemExit("qualification wrapper omitted pinned FD environment")
+output = pathlib.Path(sys.argv[sys.argv.index("--output-dir") + 1])
+output.mkdir(parents=True)
+(output / "scala-profile-qualification.v1.json").write_text(
+    '{"status":"PASS"}\\n',
+    encoding="utf-8",
 )
-module = importlib.util.module_from_spec(specification)
-sys.modules[specification.name] = module
-specification.loader.exec_module(module)
-template_root = pathlib.Path(os.environ["S1_4X_TEST_TEMPLATE_ROOT"])
-output_root = pathlib.Path(os.environ["S1_4X_TEST_OUTPUT_ROOT"])
-
-def mocked_run_checked(command, *, environment):
-    del environment
-    if "--output-dir" in command:
-        destination = pathlib.Path(
-            command[command.index("--output-dir") + 1]
-        )
-        source = template_root / destination.relative_to(output_root)
-        shutil.copytree(source, destination)
-        return
-    if "--output" in command:
-        destination = pathlib.Path(command[command.index("--output") + 1])
-        source = template_root / destination.relative_to(output_root)
-        shutil.copyfile(source, destination)
-        return
-    raise AssertionError(f"unexpected qualification command: {command!r}")
-
-module.run_checked = mocked_run_checked
-sys.argv = sys.argv[1:]
-raise SystemExit(module.main())
+raise SystemExit(0)
 """,
         encoding="utf-8",
         newline="\n",
@@ -1422,8 +1512,6 @@ raise SystemExit(module.main())
             "S1_4X_SCALA_JVM_ALLOWLIST_RESULT": str(
                 template["jvm_allowlist_path"]
             ),
-            "S1_4X_TEST_TEMPLATE_ROOT": str(template_root),
-            "S1_4X_TEST_OUTPUT_ROOT": str(output_root),
         }
     )
     (root / "cache").mkdir()
@@ -1479,6 +1567,142 @@ raise SystemExit(module.main())
     assert selected["selectedProfileId"] == "B"
 
 
+def exact_qualification_owner_gate_contract(
+    module,
+    *,
+    root: Path,
+    template: dict,
+) -> None:
+    """실제 -E -s -S parent의 첫 child에서 JDK gate positive path를 검증한다."""
+
+    root.mkdir(parents=True)
+    tools_root = SCALA_ROOT / "tools"
+    marker = root / "owner-gate-pass.json"
+    fake_uv = root / "uv-gate-probe"
+    fake_uv.write_text(
+        f"""#!/usr/bin/python3
+import importlib.util
+import json
+import os
+import pathlib
+import sys
+
+tools_root = pathlib.Path({str(tools_root)!r})
+sys.path.insert(0, str(tools_root))
+helper_path = tools_root / "precompile_jmh_generated_java.py"
+specification = importlib.util.spec_from_file_location(
+    "precompile_jmh_generated_java_exact_owner_child",
+    helper_path,
+)
+module = importlib.util.module_from_spec(specification)
+sys.modules[specification.name] = module
+specification.loader.exec_module(module)
+snapshot = module._jdk_modules_snapshot(
+    pathlib.Path(os.environ["JAVA_HOME"]) / "lib/modules",
+    label="TEST_EXACT_QUALIFICATION_OWNER",
+)
+module._verify_jdk_modules_snapshot(
+    snapshot,
+    label="TEST_EXACT_QUALIFICATION_OWNER",
+)
+pathlib.Path({str(marker)!r}).write_text(
+    json.dumps({{"sha256": snapshot.sha256}}) + "\\n",
+    encoding="utf-8",
+)
+output = pathlib.Path(sys.argv[sys.argv.index("--output") + 1])
+output.write_text('{{"status":"PASS"}}\\n', encoding="utf-8")
+""",
+        encoding="utf-8",
+        newline="\n",
+    )
+    fake_uv.chmod(0o755)
+    fake_jmh = root / "jmh-stop-after-owner-gate"
+    fake_jmh.write_text(
+        "#!/usr/bin/env bash\nexit 91\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    fake_jmh.chmod(0o755)
+    output_root = root / "qualification-output"
+    scala_cli = Path.home() / ".local/bin/scala-cli"
+    java_home = Path(os.environ["JAVA_HOME"])
+    pinned_paths = (
+        scala_cli,
+        java_home / "bin/java",
+        java_home / "bin/javac",
+    )
+    descriptors = tuple(
+        os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        for path in pinned_paths
+    )
+    try:
+        environment = {
+            key: value
+            for key, value in os.environ.items()
+            if not key.startswith("PYTHON")
+            and key
+            != module.jmh_precompile.JDK_MODULES_GATE_SNAPSHOT_VARIABLE
+        }
+        environment.update(
+            {
+                "S1_4X_BENCHMARK_RUN_MODE": "qualification",
+                "S1_4X_SCALA_CLI_BIN": str(scala_cli),
+                "S1_4X_SCALA_CLI_EXEC_PATH": (
+                    f"/proc/self/fd/{descriptors[0]}"
+                ),
+                "S1_4X_SCALA_JAVA_PINNED_FD_PATH": (
+                    f"/proc/self/fd/{descriptors[1]}"
+                ),
+                "S1_4X_SCALA_JAVAC_PINNED_FD_PATH": (
+                    f"/proc/self/fd/{descriptors[2]}"
+                ),
+            }
+        )
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-E",
+                "-s",
+                "-S",
+                str(tools_root / "run_profile_qualification.py"),
+                "--plan",
+                str(S1_ROOT / "benchmarks/benchmark-plan.v1.json"),
+                "--scala-root",
+                str(SCALA_ROOT),
+                "--correctness-root",
+                str(template["correctness_artifact_root"]),
+                "--jmh-runner",
+                str(fake_jmh),
+                "--host-validator",
+                str(S1_ROOT / "oracle/validate_environment.py"),
+                "--uv",
+                str(fake_uv),
+                "--jvm-allowlist",
+                str(template["jvm_allowlist_path"]),
+                "--output-dir",
+                str(output_root),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=environment,
+            pass_fds=descriptors,
+        )
+    finally:
+        for descriptor in descriptors:
+            os.close(descriptor)
+    assert completed.returncode == 1, (
+        completed.stdout,
+        completed.stderr,
+    )
+    assert "SUBPROCESS_FAILED" in completed.stderr
+    assert json.loads(marker.read_text(encoding="utf-8"))["sha256"] == (
+        json.loads((SCALA_ROOT / "toolchain-lock.v1.json").read_text())[
+            "jdk"
+        ]["jdkModulesSha256"]
+    )
+
+
 def main() -> int:
     module = load_module()
     temporary_root = os.environ.get("S1_4X_TEST_TMP_ROOT")
@@ -1496,6 +1720,105 @@ def main() -> int:
             module,
             lambda: module.strict_json(nonfinite_json),
             "non-finite JSON number passed",
+        )
+        sealed_root = Path(directory) / "sealed"
+        narrow_root = sealed_root / "narrow"
+        narrow_root.mkdir(parents=True)
+        sealed_file = narrow_root / "evidence.bin"
+        sealed_file.write_bytes(b"sealed-evidence\n")
+        root_snapshot = module.SealedEvidenceSnapshot()
+        root_snapshot.capture(
+            sealed_file,
+            root=sealed_root,
+            label="test.root.broad",
+        )
+        expect_t3_error(
+            module,
+            lambda: root_snapshot.capture(
+                sealed_file,
+                root=narrow_root,
+                label="test.root.narrow",
+            ),
+            "cached evidence escaped its original root contract",
+            expected_prefix="SEALED_EVIDENCE_ROOT_MISMATCH",
+        )
+
+        hardlink_source = narrow_root / "hardlink-source.bin"
+        hardlink_target = narrow_root / "hardlink-target.bin"
+        hardlink_source.write_bytes(b"hardlink\n")
+        os.link(hardlink_source, hardlink_target)
+        expect_t3_error(
+            module,
+            lambda: module.SealedEvidenceSnapshot().capture(
+                hardlink_source,
+                root=narrow_root,
+                label="test.hardlink",
+            ),
+            "hardlinked sealed evidence passed",
+            expected_prefix="SEALED_EVIDENCE_NOT_SINGLE_REGULAR",
+        )
+
+        symlink_target = narrow_root / "symlink-target.bin"
+        symlink_target.symlink_to(sealed_file)
+        expect_t3_error(
+            module,
+            lambda: module.SealedEvidenceSnapshot().capture(
+                symlink_target,
+                root=narrow_root,
+                label="test.symlink",
+            ),
+            "symlinked sealed evidence passed",
+            expected_prefix="SEALED_EVIDENCE_OPEN_FAILED",
+        )
+
+        aba_file = narrow_root / "aba.bin"
+        aba_file.write_bytes(b"before\n")
+        aba_snapshot = module.SealedEvidenceSnapshot()
+        aba_snapshot.capture(
+            aba_file,
+            root=narrow_root,
+            label="test.aba",
+        )
+        aba_file.write_bytes(b"changed")
+        aba_file.write_bytes(b"before\n")
+        expect_t3_error(
+            module,
+            aba_snapshot.verify_unchanged,
+            "restored-byte ABA evidence passed",
+            expected_prefix="SEALED_EVIDENCE_PATH_SUBSTITUTED",
+        )
+
+        post_open_file = narrow_root / "post-open.bin"
+        post_open_file.write_bytes(b"same-bytes\n")
+        replacement = narrow_root / "post-open-replacement.bin"
+        replacement.write_bytes(b"same-bytes\n")
+        post_open_snapshot = module.SealedEvidenceSnapshot()
+        post_open_snapshot.capture(
+            post_open_file,
+            root=narrow_root,
+            label="test.postOpen",
+        )
+        original_open = post_open_snapshot._open_lexical
+        open_count = 0
+
+        def replace_after_last_open(path: Path, *, root: Path, label: str):
+            nonlocal open_count
+            descriptor, identity = original_open(
+                path,
+                root=root,
+                label=label,
+            )
+            open_count += 1
+            if open_count == 2:
+                os.replace(replacement, post_open_file)
+            return descriptor, identity
+
+        post_open_snapshot._open_lexical = replace_after_last_open
+        expect_t3_error(
+            module,
+            post_open_snapshot.verify_unchanged,
+            "same-byte pathname replacement after final open passed",
+            expected_prefix="SEALED_EVIDENCE_PATH_SUBSTITUTED",
         )
 
     policy = json.loads((S1_ROOT / "contract/scala-source-policy.v1.json").read_text())
@@ -1537,6 +1860,16 @@ def main() -> int:
     selector_temporary = tempfile.TemporaryDirectory(dir=temporary_root)
     selector_root = Path(selector_temporary.name)
     selector_index = 0
+    full_generated_source_paths = (
+        module.jmh_precompile.expected_generated_source_paths()
+    )
+    assert len(full_generated_source_paths) == 30
+    # 30-file exact JMH closure는 focused helper test가 전부 검증한다. 이 테스트는
+    # 63-case selector schema를 한 generated source/class pair로 반복 검증한다.
+    selector_generated_source_paths = full_generated_source_paths[:1]
+    module.jmh_precompile.expected_generated_source_paths = (
+        lambda: selector_generated_source_paths
+    )
 
     def selector_inputs(
         scores: dict[str, float | list[float]],
@@ -1551,9 +1884,42 @@ def main() -> int:
         )
 
     selected_inputs = selector_inputs({"A": 100.0, "B": 95.0, "C": 96.0})
+    exact_qualification_owner_gate_contract(
+        module,
+        root=selector_root / "exact-owner-gate",
+        template=selected_inputs,
+    )
+    selector_snapshot = module.SealedEvidenceSnapshot()
+    selected_inputs["evidence_snapshot"] = selector_snapshot
+    original_regular_snapshot = (
+        module.jmh_precompile._snapshot_regular_file
+    )
+    jdk_modules_path = Path(os.environ["JAVA_HOME"]) / "lib/modules"
+    jdk_modules_full_reads = 0
+
+    def counted_regular_snapshot(
+        path: Path,
+        *,
+        label: str,
+        retain_payload: bool = True,
+    ):
+        nonlocal jdk_modules_full_reads
+        if path == jdk_modules_path:
+            jdk_modules_full_reads += 1
+        return original_regular_snapshot(
+            path,
+            label=label,
+            retain_payload=retain_payload,
+        )
+
+    module.jmh_precompile._snapshot_regular_file = (
+        counted_regular_snapshot
+    )
     selected = module.select_scala_profile(**selected_inputs)
     assert selected["selectedProfileId"] == "B"
     assert selected["fallbackExecuted"] is False
+    selected_inputs.pop("evidence_snapshot")
+    del selector_snapshot
     witness_run = json.loads(
         (
             selected_inputs["qualification_artifact_root"]
@@ -1600,10 +1966,11 @@ def main() -> int:
         ),
         "self-consistent fabricated live fstat witness passed",
     )
+    del witness_snapshot
     sequential_qualification_selector_contract(
         module,
         root=selector_root / "sequential",
-        plan=plan,
+        template=selected_inputs,
     )
 
     case_order = plan["scalaProfileQualification"]["qualificationCaseOrder"]
@@ -1655,6 +2022,41 @@ def main() -> int:
         0.8,
     )
 
+    qualification_path = (
+        selected_inputs["qualification_artifact_root"]
+        / "scala-profile-qualification.v1.json"
+    )
+    qualification_bytes = qualification_path.read_bytes()
+
+    def expect_qualification_error(
+        value: dict,
+        message: str,
+        *,
+        expected_prefix: str,
+    ) -> None:
+        tampered = value["qualification"]
+        tampered["selectorConfigSha256"] = module.selector_config_sha256(
+            policy=plan["scalaProfileQualification"],
+            benchmark_plan_sha256=value["benchmark_plan_sha256"],
+            blocks=tampered["blocks"],
+        )
+        write_json(qualification_path, tampered)
+        value["qualification_sha256"] = module.sha256_file(
+            qualification_path
+        )
+        call_value = dict(value)
+        call_value["evidence_snapshot"] = module.SealedEvidenceSnapshot()
+        try:
+            expect_t3_error(
+                module,
+                lambda: module.select_scala_profile(**call_value),
+                message,
+                expected_prefix=expected_prefix,
+            )
+        finally:
+            call_value.pop("evidence_snapshot")
+            qualification_path.write_bytes(qualification_bytes)
+
     bad_latin = dict(selected_inputs)
     bad_latin["qualification"] = json.loads(
         json.dumps(selected_inputs["qualification"])
@@ -1664,10 +2066,10 @@ def main() -> int:
         "A",
         "C",
     ]
-    expect_t3_error(
-        module,
-        lambda: module.select_scala_profile(**bad_latin),
+    expect_qualification_error(
+        bad_latin,
         "Latin order tamper passed",
+        expected_prefix="PROFILE_LATIN_ORDER_MISMATCH:1",
     )
 
     bad_host_closure = dict(selected_inputs)
@@ -1677,10 +2079,10 @@ def main() -> int:
     bad_host_closure["qualification"]["blocks"][0]["profileEvidence"][0][
         "caseCount"
     ] = 6
-    expect_t3_error(
-        module,
-        lambda: module.select_scala_profile(**bad_host_closure),
+    expect_qualification_error(
+        bad_host_closure,
         "per-profile host/JVM closure tamper passed",
+        expected_prefix="PROFILE_HOST_JVM_CASE_CLOSURE_MISMATCH:1:A",
     )
 
     qualification_tampers = []
@@ -1698,35 +2100,55 @@ def main() -> int:
         "rawNativeJsonSha256"
     )
     qualification_tampers.append(
-        (missing_measurement_sha, "measurement SHA omission passed")
+        (
+            missing_measurement_sha,
+            "measurement SHA omission passed",
+            "PROFILE_MEASUREMENTS_MISSING:1",
+        )
     )
     extra_measurement_field = qualification_tamper()
     extra_measurement_field["qualification"]["blocks"][0]["measurements"][0][
         "forged"
     ] = True
     qualification_tampers.append(
-        (extra_measurement_field, "measurement extra field passed")
+        (
+            extra_measurement_field,
+            "measurement extra field passed",
+            "PROFILE_MEASUREMENTS_MISSING:1",
+        )
     )
     profile_jvm_tamper = qualification_tamper()
     profile_jvm_tamper["qualification"]["blocks"][0]["profileEvidence"][0][
         "effectiveJvmArgsSha256"
     ] = SHA
     qualification_tampers.append(
-        (profile_jvm_tamper, "profile JVM hash tamper passed")
+        (
+            profile_jvm_tamper,
+            "profile JVM hash tamper passed",
+            "PROFILE_HOST_JVM_CASE_CLOSURE_MISMATCH:1:A",
+        )
     )
     block_jvm_tamper = qualification_tamper()
     block_jvm_tamper["qualification"]["blocks"][0][
         "effectiveJvmArgsSha256"
     ] = SHA
     qualification_tampers.append(
-        (block_jvm_tamper, "block JVM hash tamper passed")
+        (
+            block_jvm_tamper,
+            "block JVM hash tamper passed",
+            "PROFILE_BLOCK_HASH_CLOSURE_MISMATCH:1",
+        )
     )
     block_host_tamper = qualification_tamper()
     block_host_tamper["qualification"]["blocks"][0][
         "hostValiditySha256"
     ] = SHA
     qualification_tampers.append(
-        (block_host_tamper, "block host hash tamper passed")
+        (
+            block_host_tamper,
+            "block host hash tamper passed",
+            "PROFILE_BLOCK_HASH_CLOSURE_MISMATCH:1",
+        )
     )
     case_order_tamper = qualification_tamper()
     case_order_tamper["qualification"]["blocks"][0]["profileEvidence"][0][
@@ -1735,33 +2157,58 @@ def main() -> int:
         reversed(plan["scalaProfileQualification"]["qualificationCaseOrder"])
     )
     qualification_tampers.append(
-        (case_order_tamper, "actual case order tamper passed")
+        (
+            case_order_tamper,
+            "actual case order tamper passed",
+            "PROFILE_HOST_JVM_CASE_CLOSURE_MISMATCH:1:A",
+        )
     )
     timestamp_tamper = qualification_tamper()
     timestamp_tamper["qualification"]["blocks"][0]["profileEvidence"][0][
         "endedAt"
     ] = "2026-07-17T00:00:00.000000Z"
     qualification_tampers.append(
-        (timestamp_tamper, "reversed profile timestamp passed")
+        (
+            timestamp_tamper,
+            "reversed profile timestamp passed",
+            "PROFILE_HOST_JVM_CASE_CLOSURE_MISMATCH:1:A",
+        )
     )
     cli_identity_tamper = qualification_tamper()
     cli_identity_tamper["qualification"]["blocks"][0]["profileEvidence"][0][
         "scalaCliBinarySha256"
     ] = "b" * 64
     qualification_tampers.append(
-        (cli_identity_tamper, "Scala CLI identity tamper passed")
+        (
+            cli_identity_tamper,
+            "Scala CLI identity tamper passed",
+            "PROFILE_HOST_JVM_CASE_CLOSURE_MISMATCH:1:A",
+        )
     )
     bool_score = qualification_tamper()
     bool_score["qualification"]["blocks"][0]["measurements"][0][
         "scoreNsPerInvocation"
     ] = True
-    qualification_tampers.append((bool_score, "bool selector score passed"))
-    for tampered_inputs, message in qualification_tampers:
-        expect_t3_error(
-            module,
-            lambda value=tampered_inputs: module.select_scala_profile(**value),
-            message,
+    qualification_tampers.append(
+        (
+            bool_score,
+            "bool selector score passed",
+            "PROFILE_SCORE_INVALID",
         )
+    )
+    for tampered_inputs, message, expected_prefix in qualification_tampers:
+        expect_qualification_error(
+            tampered_inputs,
+            message,
+            expected_prefix=expected_prefix,
+        )
+    assert jdk_modules_full_reads == 2, (
+        "63-case selector와 synthetic metadata negatives가 JDK modules를 "
+        f"gate 전후 1회씩만 읽어야 한다: {jdk_modules_full_reads}"
+    )
+    module.jmh_precompile._snapshot_regular_file = (
+        original_regular_snapshot
+    )
 
     raw_correctness = (
         selected_inputs["correctness_artifact_root"]
@@ -1771,26 +2218,51 @@ def main() -> int:
     raw_correctness_value = json.loads(raw_correctness_bytes)
     raw_correctness_value["aggregateStatus"] = "FAIL"
     write_json(raw_correctness, raw_correctness_value)
-    expect_t3_error(
-        module,
-        lambda: module.select_scala_profile(**selected_inputs),
-        "raw correctness byte tamper passed",
+    raw_correctness_inputs = dict(selected_inputs)
+    raw_correctness_inputs["evidence_snapshot"] = (
+        module.SealedEvidenceSnapshot()
     )
-    raw_correctness.write_bytes(raw_correctness_bytes)
+    try:
+        expect_t3_error(
+            module,
+            lambda: module.select_scala_profile(
+                **raw_correctness_inputs
+            ),
+            "raw correctness byte tamper passed",
+            expected_prefix=(
+                "PROFILE_CORRECTNESS_RAW_HASH_DRIFT:"
+                "A:propertyReportSha256"
+            ),
+        )
+    finally:
+        raw_correctness.write_bytes(raw_correctness_bytes)
+        raw_correctness_inputs.pop("evidence_snapshot")
 
-    raw_tamper_inputs = selected_inputs
+    raw_tamper_inputs = dict(selected_inputs)
+    raw_tamper_inputs["evidence_snapshot"] = (
+        module.SealedEvidenceSnapshot()
+    )
     raw_native = (
         raw_tamper_inputs["qualification_artifact_root"]
         / "r1/A/case-01/native.json"
     )
+    raw_native_bytes = raw_native.read_bytes()
     raw_value = json.loads(raw_native.read_text())
     raw_value[0]["primaryMetric"]["score"] = 77.0
     write_json(raw_native, raw_value)
-    expect_t3_error(
-        module,
-        lambda: module.select_scala_profile(**raw_tamper_inputs),
-        "raw JMH byte tamper passed",
-    )
+    try:
+        expect_t3_error(
+            module,
+            lambda: module.select_scala_profile(**raw_tamper_inputs),
+            "raw JMH byte tamper passed",
+            expected_prefix=(
+                "QUALIFICATION_NATIVE_VALIDATION_DRIFT:"
+                f"1:A:{case_order[0]}"
+            ),
+        )
+    finally:
+        raw_native.write_bytes(raw_native_bytes)
+        raw_tamper_inputs.pop("evidence_snapshot")
 
     marker_path = (
         selected_inputs["qualification_artifact_root"]
@@ -1821,6 +2293,9 @@ def main() -> int:
             expected_run_mode="qualification",
         ),
         "measurement-ready marker identity tamper passed",
+    )
+    module.jmh_precompile.expected_generated_source_paths = (
+        lambda: full_generated_source_paths
     )
 
     capability_plan = json.loads(
@@ -1981,6 +2456,7 @@ def main() -> int:
     reported_jmh_arguments = [
         "-Dscala.sources=/sealed/source.scala",
         "-Dscala.source.names=source.scala",
+        "-Djava.io.tmpdir=/sealed/smoke/jmh-tmp",
     ]
     compile_command_sha256 = "8" * 64
     observed_jmh_arguments = [
@@ -1988,7 +2464,10 @@ def main() -> int:
         "-XX:+UnlockDiagnosticVMOptions",
         "-XX:+UnlockExperimentalVMOptions",
         "-DcompilerBlackholesEnabled=true",
-        "-XX:CompileCommandFile=/tmp/jmh-smoke-123.compilecommand",
+        (
+            "-XX:CompileCommandFile="
+            "/sealed/smoke/jmh-tmp/jmh-smoke-123.compilecommand"
+        ),
     ]
     fork_evidence = [
         {
@@ -2006,6 +2485,7 @@ def main() -> int:
                     "argumentPrefix": "-XX:CompileCommandFile=",
                     "pathId": "JMH_COMPILE_COMMAND_FILE",
                     "sha256": compile_command_sha256,
+                    "fileIdentitySha256": "7" * 64,
                 }
             ],
             "stableSystemProperties": stable_properties,
@@ -2035,15 +2515,22 @@ def main() -> int:
     )
     assert jvm_allowlist["plannedCliJvmArguments"] == []
     assert jvm_allowlist["effectiveJvmArguments"] == [
-        *observed_jmh_arguments[:-1],
+        *reported_jmh_arguments[:-1],
+        module.JMH_TMPDIR_PORTABLE_ARGUMENT,
+        *observed_jmh_arguments[len(reported_jmh_arguments) : -1],
         (
             "-XX:CompileCommandFile=JMH_COMPILE_COMMAND_FILE"
             f"#sha256={compile_command_sha256}"
         ),
     ]
     for index, fork_value in enumerate(fork_evidence, start=1):
+        fork_tmp = f"/sealed/qualification-{index}/jmh-tmp"
+        fork_value["inputArguments"][len(reported_jmh_arguments) - 1] = (
+            f"-Djava.io.tmpdir={fork_tmp}"
+        )
         fork_value["inputArguments"][-1] = (
-            f"-XX:CompileCommandFile=/tmp/jmh-qualification-{index}.compilecommand"
+            f"-XX:CompileCommandFile={fork_tmp}/"
+            f"jmh-qualification-{index}.compilecommand"
         )
     effective_jvm = module.validate_effective_jvm_evidence(
         fork_evidence,
@@ -2094,6 +2581,23 @@ def main() -> int:
         ),
         "forged JMH CompileCommandFile argv binding passed",
     )
+    forbidden_tmp = json.loads(json.dumps(fork_evidence))
+    forbidden_tmp[0]["inputArguments"][len(reported_jmh_arguments) - 1] = (
+        "-Djava.io.tmpdir=/tmp/jmh-tmp"
+    )
+    forbidden_tmp[0]["inputArguments"][-1] = (
+        "-XX:CompileCommandFile=/tmp/jmh-tmp/jmh.compilecommand"
+    )
+    expect_t3_error(
+        module,
+        lambda: module.validate_effective_jvm_evidence(
+            forbidden_tmp,
+            expected_forks=3,
+            allowlist=jvm_allowlist,
+            allowlist_sha256="1" * 64,
+        ),
+        "forbidden global tmp JMH argument file passed",
+    )
     missing_property = json.loads(json.dumps(fork_evidence))
     missing_property[0]["stableSystemProperties"].pop("java.vm.name")
     expect_t3_error(
@@ -2138,7 +2642,10 @@ def main() -> int:
         logical_operations_per_invocation=32,
     )
     assert validated["nativeValue"] == 12.5
-    assert validated["reportedJvmArguments"] == reported_jmh_arguments
+    assert validated["reportedJvmArguments"] == [
+        *reported_jmh_arguments[:-1],
+        module.JMH_TMPDIR_PORTABLE_ARGUMENT,
+    ]
     assert validated["effectiveJvmArguments"] == (
         jvm_allowlist["effectiveJvmArguments"]
     )

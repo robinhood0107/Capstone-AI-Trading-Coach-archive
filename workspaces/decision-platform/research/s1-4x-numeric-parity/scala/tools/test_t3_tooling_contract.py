@@ -260,6 +260,8 @@ def main() -> int:
         "S1_4X_SCALA_JAVA_PINNED_FD_PATH",
         "S1_4X_SCALA_JAVAC_PINNED_FD_PATH",
         "javacExecutableSha256",
+        "compgen -e",
+        'python3 -E -s -S "$SCALA_ROOT/tools/run_profile_qualification.py"',
     ):
         assert marker in qualification
     for marker in (
@@ -268,8 +270,27 @@ def main() -> int:
         "JAVAC_PINNED_FD_PATH_REQUIRED",
         "JAVAC_PINNED_FD_IDENTITY_MISMATCH",
         "generatedJavaPrecompileReceiptSha256",
+        "JDK_MODULES_GATE_SNAPSHOT_VARIABLE",
+        "_verify_regular_file_snapshot",
+        "QUALIFICATION_JDK_MODULES_POST_GATE_DRIFT",
     ):
         assert marker in qualification_runner
+    for chain_script in (
+        "run-profile-qualification.sh",
+        "compile-benchmarks.sh",
+        "run-jmh-native-smoke.sh",
+        "select-proven-profile.sh",
+        "assert-selected-profile.sh",
+    ):
+        python_lines = [
+            line
+            for line in script(chain_script).splitlines()
+            if "python3 " in line and not line.lstrip().startswith("#")
+        ]
+        assert python_lines, chain_script
+        assert all(
+            "python3 -E -s -S " in line for line in python_lines
+        ), (chain_script, python_lines)
     assert "select-profile" in selector and "--check" in selector
     assert "selected-profile.scala" in selected_assertion
     assert "source-inputs.v1.json" in selected_assertion
@@ -323,7 +344,6 @@ def main() -> int:
         "S1_4X_LARGE_FIXTURE_ROOT",
         '--coursier-cache "$COURSIER_CACHE"',
         '--jmh-stdout "$OUTPUT_DIR/jmh.stdout"',
-        "--print-classpath",
     ):
         assert marker in native_smoke
     assert "$S1_ROOT/contract/fixtures" not in native_smoke
@@ -341,6 +361,14 @@ def main() -> int:
     )
     assert "S1_4X_MEASUREMENT_READY_MARKER" in native_smoke
     assert "measurementReadyMarkerSha256" in native_smoke
+    for marker in (
+        'jmh_tmpdir="$OUTPUT_DIR/jmh-tmp"',
+        'export S1_4X_JMH_TMPDIR="$jmh_tmpdir"',
+        '--java-prop "java.io.tmpdir=$jmh_tmpdir"',
+        '--fork-evidence "$OUTPUT_DIR/fork-evidence.normalized.json"',
+    ):
+        assert marker in native_smoke
+    assert "--print-classpath" not in native_smoke
     benchmark_invocation = (
         SCALA_ROOT
         / "benchmarks/scala/ai/trading/coach/s14x/benchmark"
@@ -378,6 +406,17 @@ def main() -> int:
         "inputArgumentFiles",
         "JMH_COMPILE_COMMAND_FILE",
         "CompileCommandFile=",
+        "S1_4X_JMH_TMPDIR",
+        "FileChannel.open",
+        "LinkOption.NOFOLLOW_LINKS",
+        "UnixFileIdentity",
+        'Path.of("/proc/self/fd")',
+        "descriptorReferencesLockedChannel",
+        "handleBefore == handleMiddle",
+        "handleMiddle == handleAfter",
+        "before == handleBefore",
+        '"unix:dev,ino,mode,nlink,size,lastModifiedTime,ctime"',
+        "java.util.Arrays.equals(firstBytes, secondBytes)",
     ):
         assert marker in jvm_evidence
 

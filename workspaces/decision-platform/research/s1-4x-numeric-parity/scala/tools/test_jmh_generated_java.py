@@ -5,11 +5,13 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import json
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
+from dataclasses import replace
 from pathlib import Path
 
 
@@ -94,6 +96,179 @@ module._verify_executable_stability(identity, label="PARENT_TEST")
         completed.stdout,
         completed.stderr,
     )
+
+
+def verify_sitecustomize_gate_spoof_rejected(
+    *,
+    helper_path: Path,
+    qualification_script: Path,
+    gate_file: Path,
+) -> None:
+    """신뢰 script 실행 전 sitecustomize가 만든 owner gate를 거부한다."""
+
+    site_root = gate_file.parent / "qualification-gate-site"
+    site_root.mkdir()
+    sitecustomize = site_root / "sitecustomize.py"
+    sitecustomize.write_text(
+        r"""
+import importlib.util
+import json
+import os
+import pathlib
+import subprocess
+import sys
+
+helper_path = pathlib.Path(os.environ["S1_4X_GATE_TEST_HELPER"])
+gate_file = pathlib.Path(os.environ["S1_4X_GATE_TEST_FILE"])
+sys.path.insert(0, str(helper_path.parent))
+specification = importlib.util.spec_from_file_location(
+    "precompile_jmh_generated_java_gate_parent",
+    helper_path,
+)
+module = importlib.util.module_from_spec(specification)
+sys.modules[specification.name] = module
+specification.loader.exec_module(module)
+snapshot = module._snapshot_regular_file(
+    gate_file,
+    label="TEST_QUALIFICATION_GATE_PARENT",
+    retain_payload=False,
+)
+gate = module._regular_file_gate_value(snapshot)
+environment = os.environ.copy()
+environment[module.JDK_MODULES_GATE_SNAPSHOT_VARIABLE] = json.dumps(
+    gate,
+    allow_nan=False,
+    ensure_ascii=False,
+    separators=(",", ":"),
+    sort_keys=True,
+)
+environment["S1_4X_BENCHMARK_RUN_MODE"] = "qualification"
+environment.pop("PYTHONPATH", None)
+environment.pop("S1_4X_GATE_TEST_HELPER", None)
+environment.pop("S1_4X_GATE_TEST_FILE", None)
+child_script = r'''
+import importlib.util
+import pathlib
+import sys
+
+helper_path, gate_file, expected_sha256 = sys.argv[1:]
+sys.path.insert(0, str(pathlib.Path(helper_path).parent))
+specification = importlib.util.spec_from_file_location(
+    "precompile_jmh_generated_java_gate_child",
+    helper_path,
+)
+module = importlib.util.module_from_spec(specification)
+sys.modules[specification.name] = module
+specification.loader.exec_module(module)
+snapshot = module._jdk_modules_snapshot(
+    pathlib.Path(gate_file),
+    label="TEST_QUALIFICATION_GATE_CHILD",
+)
+assert snapshot.sha256 == expected_sha256
+module._verify_jdk_modules_snapshot(
+    snapshot,
+    label="TEST_QUALIFICATION_GATE_CHILD",
+)
+'''
+completed = subprocess.run(
+    [
+        sys.executable,
+        "-c",
+        child_script,
+        str(helper_path),
+        str(gate_file),
+        snapshot.sha256,
+    ],
+    check=False,
+    capture_output=True,
+    text=True,
+    env=environment,
+)
+if (
+    completed.returncode == 0
+    or "JDK_MODULES_GATE_OWNER_INVALID" not in completed.stderr
+):
+    os.write(2, (completed.stdout + completed.stderr).encode("utf-8"))
+    os._exit(1)
+os._exit(0)
+""",
+        encoding="utf-8",
+        newline="\n",
+    )
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "PYTHONPATH": str(site_root),
+            "S1_4X_GATE_TEST_HELPER": str(helper_path),
+            "S1_4X_GATE_TEST_FILE": str(gate_file),
+        }
+    )
+    # 겉보기 script argv와 interpreter identity만 맞춘 pre-main spoof다.
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(qualification_script),
+            str(helper_path),
+            str(gate_file),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+    assert completed.returncode == 0, (
+        completed.stdout,
+        completed.stderr,
+    )
+
+
+def verify_isolated_python_ignores_sitecustomize(
+    *,
+    qualification_script: Path,
+    root: Path,
+) -> None:
+    """Production의 -E -s -S argv가 ambient Python code injection을 막는다."""
+
+    site_root = root / "python-isolation-site"
+    site_root.mkdir()
+    marker = root / "sitecustomize-executed"
+    (site_root / "sitecustomize.py").write_text(
+        "from pathlib import Path\n"
+        f"Path({str(marker)!r}).write_text('executed')\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = str(site_root)
+    control = subprocess.run(
+        [sys.executable, "-c", "pass"],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+    assert control.returncode == 0, (control.stdout, control.stderr)
+    assert marker.is_file(), "control Python did not load sitecustomize"
+    marker.unlink()
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-E",
+            "-s",
+            "-S",
+            str(qualification_script),
+            "--help",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+    assert completed.returncode == 0, (
+        completed.stdout,
+        completed.stderr,
+    )
+    assert not marker.exists(), "isolated qualification Python loaded sitecustomize"
 
 
 def main() -> int:
@@ -302,6 +477,7 @@ def main() -> int:
                 "pathId": item.path_id,
                 "kind": item.kind,
                 "sha256": item.sha256,
+                "identitySha256": item.identity_sha256,
             }
             for item in classpath.entries
         ]
@@ -312,42 +488,68 @@ def main() -> int:
             evidence_dir=generated_classes.parent,
         )
         post_run_stdout = (
-            generator_stdout
-            + "# JMH version: 1.37\n"
+            "\n".join(generator_stdout.splitlines()[:2])
+            + "\n# JMH version: 1.37\n"
         )
-        post_run = helper.classpath_closure(
+        runtime_classpath_sha256 = helper.require_jmh_stdout_binding(
+            generator_stdout,
             post_run_stdout,
-            workspace=workspace,
-            coursier_cache=coursier,
-            evidence_dir=generated_classes.parent,
-            allow_trailing=True,
         )
-        helper.require_matching_classpath(classpath, post_run)
-        assert (
-            post_run.generator_class_input_sha256
-            == classpath.generator_class_input_sha256
+        assert runtime_classpath_sha256 == classpath.runtime_classpath_sha256
+        helper.require_runtime_classpath_evidence(
+            runtime_classpath_sha256,
+            [{"runtimeClasspathSha256": runtime_classpath_sha256}],
         )
-        assert (
-            post_run.generated_resource_root_sha256
-            == classpath.generated_resource_root_sha256
+        expect_error(
+            helper,
+            "JMH_RUN_STDOUT_BINDING_INVALID",
+            lambda: helper.require_jmh_stdout_binding(
+                generator_stdout,
+                post_run_stdout.replace("Processing 147", "Processing 146"),
+            ),
+        )
+        expect_error(
+            helper,
+            "JMH_RUN_CLASSPATH_DRIFT",
+            lambda: helper.require_runtime_classpath_evidence(
+                runtime_classpath_sha256,
+                [{"runtimeClasspathSha256": "0" * 64}],
+            ),
         )
         alternate_dependency = dependency.with_name("jmh-core-copy.jar")
         alternate_dependency.write_bytes(b"other-jar-bytes\n")
         forged_run = helper.classpath_closure(
-            post_run_stdout.replace(
+            generator_stdout.replace(
                 f":{dependency}\n",
                 f":{dependency}:{alternate_dependency}\n",
             ),
             workspace=workspace,
             coursier_cache=coursier,
             evidence_dir=generated_classes.parent,
-            allow_trailing=True,
         )
         alternate_dependency.unlink()
         expect_error(
             helper,
             "JMH_RUN_CLASSPATH_DRIFT",
             lambda: helper.require_matching_classpath(classpath, forged_run),
+        )
+        forged_directory_identity = replace(
+            classpath,
+            entries=(
+                replace(
+                    classpath.entries[0],
+                    identity_sha256="0" * 64,
+                ),
+                *classpath.entries[1:],
+            ),
+        )
+        expect_error(
+            helper,
+            "JMH_RUN_CLASSPATH_DRIFT",
+            lambda: helper.require_matching_classpath(
+                classpath,
+                forged_directory_identity,
+            ),
         )
         dependency.write_bytes(b"tampered\n")
         expect_error(
@@ -376,6 +578,77 @@ def main() -> int:
                 label="TEST_DEPENDENCY",
             ),
         )
+        gate_file = root / "jdk-modules-gate.bin"
+        gate_file.write_bytes(b"parent-gate-bytes\n")
+        gate_snapshot = helper._snapshot_regular_file(
+            gate_file,
+            label="TEST_GATE",
+            retain_payload=False,
+        )
+        gate_variable = helper.JDK_MODULES_GATE_SNAPSHOT_VARIABLE
+        previous_gate = os.environ.get(gate_variable)
+        previous_run_mode = os.environ.get(
+            "S1_4X_BENCHMARK_RUN_MODE"
+        )
+        parent_gate = helper._regular_file_gate_value(gate_snapshot)
+        assert parent_gate["ownerProcess"]["pid"] == os.getpid()
+        assert parent_gate["ownerProcess"]["uid"] == os.getuid()
+        verify_sitecustomize_gate_spoof_rejected(
+            helper_path=TOOLS_ROOT
+            / "precompile_jmh_generated_java.py",
+            qualification_script=TOOLS_ROOT
+            / "run_profile_qualification.py",
+            gate_file=gate_file,
+        )
+        verify_isolated_python_ignores_sitecustomize(
+            qualification_script=TOOLS_ROOT
+            / "run_profile_qualification.py",
+            root=root,
+        )
+        os.environ[gate_variable] = json.dumps(
+            parent_gate,
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        standalone_file = root / "standalone-forged-gate.bin"
+        standalone_file.write_bytes(b"not-the-pinned-jdk-modules\n")
+        standalone_snapshot = helper._snapshot_regular_file(
+            standalone_file,
+            label="TEST_STANDALONE_GATE",
+            retain_payload=False,
+        )
+        forged_gate = helper._regular_file_gate_value(
+            standalone_snapshot
+        )
+        forged_gate["sha256"] = "0" * 64
+        os.environ[gate_variable] = json.dumps(
+            forged_gate,
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        os.environ["S1_4X_BENCHMARK_RUN_MODE"] = "smoke"
+        expect_error(
+            helper,
+            "JDK_MODULES_GATE_CONTEXT_INVALID",
+            lambda: helper._jdk_modules_snapshot(
+                standalone_file,
+                label="TEST_STANDALONE_GATE",
+            ),
+        )
+        if previous_gate is None:
+            os.environ.pop(gate_variable, None)
+        else:
+            os.environ[gate_variable] = previous_gate
+        if previous_run_mode is None:
+            os.environ.pop("S1_4X_BENCHMARK_RUN_MODE", None)
+        else:
+            os.environ[
+                "S1_4X_BENCHMARK_RUN_MODE"
+            ] = previous_run_mode
         hardlink = dependency.with_name("jmh-core-hardlink.jar")
         os.link(dependency, hardlink)
         expect_error(
