@@ -258,8 +258,19 @@ class NumericParityCorrectnessWorkflowTests(unittest.TestCase):
             "run-profile-qualification.sh",
             "select-proven-profile.sh",
             "test_workflow_input_closure.py",
+            "haskell_evidence.py",
+            "module-safety",
+            "S1_4X_VECTOR_SOURCE_ARCHIVE",
         ):
             self.assertIn(token, authoritative)
+        self.assertIn(
+            "vector-0.13.2.0/vector-0.13.2.0.tar.gz",
+            authoritative,
+        )
+        self.assertIn(
+            "28f203c786cbf8ac6dc3fea3378ec36f34173d505fb4a1dd60fc8418ad91c423",
+            authoritative,
+        )
         _assert_job_local_large_fixture(
             self,
             block=authoritative,
@@ -371,6 +382,8 @@ class NumericParityBenchmarkWorkflowTests(unittest.TestCase):
             "select-proven-profile.sh",
             "check-format.sh",
             "check-hlint.sh",
+            "haskell_evidence.py",
+            "module-safety",
             "run-ghc-9.14.1-compatibility.sh",
             "validate-ghc-9.14.1-compatibility.sh",
             "coverage_execution.py",
@@ -378,10 +391,13 @@ class NumericParityBenchmarkWorkflowTests(unittest.TestCase):
             "run-integration-correctness.sh",
             "build-oci-image.sh",
             "run-oci-correctness.sh",
-            "test_s1_4r_regression_boundary.py",
+            "regression_gate.py",
+            "assemble_final_candidate_evidence.py",
+            "final_candidate_audit.py",
             "materialize_large_fixtures.py",
         ):
             self.assertIn(token, source)
+        self.assertIn("S1_4X_VECTOR_SOURCE_ARCHIVE", source)
         self.assertIn("--output-dir", source)
         self.assertIn("ghc-9.14.1-compatibility.v1.json", source)
         self.assertEqual(
