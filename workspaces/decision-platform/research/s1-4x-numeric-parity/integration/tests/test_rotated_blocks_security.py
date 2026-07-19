@@ -725,6 +725,9 @@ def test_benchmark_environment_is_boundary_least_privilege_and_haskell_clean(
         haskell_dependencies,
         haskell_evidence,
         boundary_id="haskell",
+        large_fixture_input=runner.ValidatedLargeFixtureInput(
+            root=tmp_path / "large-fixture-root"
+        ),
     )
 
     self_forbidden = {
@@ -745,6 +748,10 @@ def test_benchmark_environment_is_boundary_least_privilege_and_haskell_clean(
     assert environment["S1_4X_HASKELL_BASELINE_CORRECTNESS"].startswith(
         "/proc/self/fd/"
     )
+    assert environment["S1_4X_LARGE_FIXTURE_ROOT"] == str(
+        tmp_path / "large-fixture-root"
+    )
+    assert all("RECEIPT" not in key for key in environment)
 
 
 def test_timeout_termination_reaps_leader_and_remaining_process_group(
@@ -1097,6 +1104,13 @@ def _install_execute_fakes(
         "_verify_source_commit_binding",
         lambda *_args, **_kwargs: None,
     )
+    monkeypatch.setattr(
+        runner,
+        "_validate_large_fixture_input",
+        lambda **_kwargs: runner.ValidatedLargeFixtureInput(
+            root=Path("/validated/large-fixture-root")
+        ),
+    )
 
     def fake_process(
         command: list[str],
@@ -1150,6 +1164,8 @@ def _execute(
         output_root=tmp_path / "outputs",
         run_id="run-timeout",
         repo_root=tmp_path,
+        large_fixture_root=tmp_path / "large-fixture-root",
+        large_fixture_receipt=tmp_path / "large-fixture-receipt.json",
     )
 
 

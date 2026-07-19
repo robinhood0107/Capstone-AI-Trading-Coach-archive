@@ -145,6 +145,41 @@ def _assert_common_workflow_contract(
         case.assertIn("persist-credentials: false", block, job_id)
 
 
+def _assert_job_local_large_fixture(
+    case: unittest.TestCase,
+    *,
+    block: str,
+    exports_root: bool,
+) -> None:
+    case.assertEqual(block.count("materialize_large_fixtures.py"), 2)
+    case.assertEqual(
+        block.count("materialize_large_fixtures.py\" materialize"),
+        1,
+    )
+    case.assertEqual(
+        block.count("materialize_large_fixtures.py\" check"),
+        1,
+    )
+    case.assertIn(
+        'LARGE_FIXTURE_ROOT="$RUNNER_TEMP/s1-4x-large-fixtures"',
+        block,
+    )
+    case.assertIn(
+        'LARGE_FIXTURE_RECEIPT="$RUNNER_TEMP/'
+        's1-4x-large-fixture-receipt.json"',
+        block,
+    )
+    case.assertEqual(block.count('--output-root "$LARGE_FIXTURE_ROOT"'), 2)
+    case.assertEqual(block.count('--receipt "$LARGE_FIXTURE_RECEIPT"'), 2)
+    case.assertNotIn("contract/fixtures/large/generated", block)
+    case.assertNotIn("S1_4X_LARGE_FIXTURE_RECEIPT", block)
+    if exports_root:
+        case.assertIn(
+            "S1_4X_LARGE_FIXTURE_ROOT=$LARGE_FIXTURE_ROOT",
+            block,
+        )
+
+
 class NumericParityCorrectnessWorkflowTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -170,11 +205,17 @@ class NumericParityCorrectnessWorkflowTests(unittest.TestCase):
         for token in (
             "validate_contract.py",
             "--check-all",
-            "generate_large_fixtures.py",
+            "materialize_large_fixtures.py",
             "test_workflow_contract.py",
             "referenceSourceTreeCount",
         ):
             self.assertIn(token, block)
+        _assert_job_local_large_fixture(
+            self,
+            block=block,
+            exports_root=False,
+        )
+        self.assertNotIn('generate_large_fixtures.py" --check', block)
 
     def test_scala_compiler_and_profile_jobs(self) -> None:
         compiler = self.jobs["scala-compiler-lint-tests"]
@@ -200,6 +241,11 @@ class NumericParityCorrectnessWorkflowTests(unittest.TestCase):
             "actions/upload-artifact",
         ):
             self.assertIn(token, selection)
+        _assert_job_local_large_fixture(
+            self,
+            block=selection,
+            exports_root=True,
+        )
 
     def test_haskell_authoritative_and_compatibility_jobs(self) -> None:
         authoritative = self.jobs["haskell-authoritative-selection"]
@@ -214,6 +260,11 @@ class NumericParityCorrectnessWorkflowTests(unittest.TestCase):
             "test_workflow_input_closure.py",
         ):
             self.assertIn(token, authoritative)
+        _assert_job_local_large_fixture(
+            self,
+            block=authoritative,
+            exports_root=True,
+        )
 
         compatibility = self.jobs["haskell-ghc-9-14-compatibility"]
         self.assertIn("needs: haskell-authoritative-selection", compatibility)
@@ -240,6 +291,7 @@ class NumericParityCorrectnessWorkflowTests(unittest.TestCase):
             "mismatchCount",
         ):
             self.assertIn(token, comparator)
+        self.assertNotIn("materialize_large_fixtures.py", comparator)
 
         for job_id in ("scala-oci-correctness", "haskell-oci-correctness"):
             block = self.jobs[job_id]
@@ -247,6 +299,8 @@ class NumericParityCorrectnessWorkflowTests(unittest.TestCase):
             self.assertIn("runtimeNetwork", block)
             self.assertIn('"none"', block)
             self.assertIn("actions/upload-artifact", block)
+            self.assertNotIn("materialize_large_fixtures.py", block)
+            self.assertNotIn("S1_4X_LARGE_FIXTURE_ROOT", block)
 
         scala_oci = self.jobs["scala-oci-correctness"]
         self.assertIn("build-oci-image.sh", scala_oci)
@@ -270,6 +324,7 @@ class NumericParityCorrectnessWorkflowTests(unittest.TestCase):
         ):
             self.assertIn(token, regression)
         self.assertNotIn("S1_4R_EXECUTION_BOUNDARY=oci", regression)
+        self.assertNotIn('generate_large_fixtures.py" --check', self.text)
 
 
 class NumericParityBenchmarkWorkflowTests(unittest.TestCase):
@@ -324,6 +379,7 @@ class NumericParityBenchmarkWorkflowTests(unittest.TestCase):
             "build-oci-image.sh",
             "run-oci-correctness.sh",
             "test_s1_4r_regression_boundary.py",
+            "materialize_large_fixtures.py",
         ):
             self.assertIn(token, source)
         self.assertIn("--output-dir", source)
@@ -340,6 +396,8 @@ class NumericParityBenchmarkWorkflowTests(unittest.TestCase):
             ),
             1,
         )
+        self.assertEqual(source.count("materialize_large_fixtures.py"), 2)
+        self.assertNotIn('generate_large_fixtures.py" --check', source)
 
     def test_full_mode_binds_exact_v3_runtime_and_evidence_roles(self) -> None:
         timing = self.jobs["bounded-timing"]
@@ -378,9 +436,23 @@ class NumericParityBenchmarkWorkflowTests(unittest.TestCase):
                 f'--runtime-evidence "{role}=',
                 timing,
             )
+        for argument in (
+            "--large-fixture-root \"$S1_4X_LARGE_FIXTURE_ROOT\"",
+            "--large-fixture-receipt \"$LARGE_FIXTURE_RECEIPT\"",
+        ):
+            self.assertIn(argument, timing)
 
     def test_two_bounded_modes_and_artifact_policy(self) -> None:
         timing = self.jobs["bounded-timing"]
+        _assert_job_local_large_fixture(
+            self,
+            block=timing,
+            exports_root=True,
+        )
+        self.assertNotIn(
+            'S1_4X_LARGE_FIXTURE_ROOT="$RESULT_DIR',
+            timing,
+        )
         for token in (
             'case "${{ inputs.matrix }}" in',
             "smallest)",
