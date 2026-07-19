@@ -1,0 +1,14 @@
+FROM docker.io/library/haskell@sha256:417d4bc30ac7d8d5ff04ec97937f86eb508b0c76bfd1a39b5ec225688531aa9d
+
+ARG S1_4X_BINARY_SHA256
+
+COPY --chmod=0555 s1-4x-haskell /usr/local/bin/s1-4x-haskell
+COPY --chown=65532:65532 fixtures /opt/s1-4x/fixtures
+
+RUN printf '%s  %s\n' "$S1_4X_BINARY_SHA256" /usr/local/bin/s1-4x-haskell \
+      | sha256sum -c - \
+    && find /opt/s1-4x/fixtures -type d -exec chmod 0555 '{}' + \
+    && find /opt/s1-4x/fixtures -type f -exec chmod 0444 '{}' +
+
+USER 65532:65532
+ENTRYPOINT ["/usr/local/bin/s1-4x-haskell"]

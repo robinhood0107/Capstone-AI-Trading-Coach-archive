@@ -1,0 +1,11 @@
+snapshot: lts-24.50
+compiler: ghc-9.14.1
+compiler-check: match-exact
+system-ghc: true
+install-ghc: false
+packages:
+  - .
+flags:
+  math-functions:
+    system-erf: false
+    system-expm1: false

@@ -1,0 +1,137 @@
+name: s1-4x-haskell
+version: 0.1.0.0
+github: robinhood0107/Capstone-AI-Trading-Coach
+license: MIT
+author: Park Jongjin
+maintainer: robinhood0107
+category: Finance
+synopsis: Isolated Haskell numeric parity candidate for S1.4X
+description: See README.md.
+
+language: GHC2024
+
+default-extensions:
+  - NoCPP
+  - NoDeriveAnyClass
+  - NoDerivingVia
+  - NoForeignFunctionInterface
+  - NoGeneralizedNewtypeDeriving
+  - NoLinearTypes
+  - NoMagicHash
+  - NoRebindableSyntax
+  - NoStrict
+  - NoTemplateHaskell
+  - OverloadedStrings
+
+ghc-options:
+  - -Wall
+  - -Werror
+  - -Wcompat
+  - -Widentities
+  - -Wincomplete-patterns
+  - -Wincomplete-uni-patterns
+  - -Wincomplete-record-updates
+  - -Wincomplete-record-selectors
+  - -Wpartial-fields
+  - -Wredundant-constraints
+  - -Wmissing-deriving-strategies
+  - -Wmissing-export-lists
+  - -Wmissing-import-lists
+  - -Wmissing-signatures
+  - -Wmissing-home-modules
+  - -Wunused-packages
+  - -Woperator-whitespace-ext-conflict
+
+internal-libraries:
+  s1-4x-core:
+    source-dirs: src/core
+    dependencies:
+      # numeric core는 Contract/process shell package를 볼 수 없는 별도 component다.
+      - base
+      - deepseq
+      - math-functions == 0.3.4.4
+      - vector == 0.13.2.0
+
+library:
+  source-dirs: src/contract
+  dependencies:
+    # compiler boot package version은 exact compiler/boot-set manifest가 소유한다.
+    - base
+    - SHA == 1.6.4.4
+    - aeson == 2.2.5.0
+    - attoparsec == 0.14.4
+    - binary
+    - bytestring
+    - containers
+    - directory
+    - filepath
+    - s1-4x-core
+    - scientific
+    - text
+    - unix
+    - vector == 0.13.2.0
+
+executables:
+  s1-4x-haskell:
+    main: Main.hs
+    source-dirs: app
+    ghc-options:
+      - -threaded
+      - -rtsopts
+      - -with-rtsopts=-N1
+    dependencies:
+      # compiler boot packages are intentionally unbounded; Stack's exact compiler
+      # and boot-set manifest own these versions.
+      - base
+      - bytestring
+      - containers
+      - directory
+      - filepath
+      - s1-4x-haskell
+
+tests:
+  s1-4x-haskell-test:
+    main: Main.hs
+    source-dirs: test
+    ghc-options:
+      - -main-is S14X.TestMain.main
+    dependencies:
+      - QuickCheck == 2.15.0.1
+      - aeson == 2.2.5.0
+      - base
+      - bytestring
+      - containers
+      - directory
+      - filepath
+      - s1-4x-haskell
+      - s1-4x-core
+      - tasty == 1.5.4
+      - tasty-hunit == 0.10.2
+      - tasty-quickcheck == 0.11.1
+      - text
+      - time
+      - unix
+      - vector == 0.13.2.0
+
+benchmarks:
+  s1-4x-haskell-benchmark:
+    main: Main.hs
+    source-dirs: benchmark
+    ghc-options:
+      - -main-is S14X.BenchmarkMain.main
+      - -threaded
+      - -rtsopts
+    dependencies:
+      - aeson == 2.2.5.0
+      - base
+      - binary
+      - bytestring
+      - criterion == 1.6.4.0
+      - deepseq
+      - directory
+      - filepath
+      - process
+      - s1-4x-haskell
+      - s1-4x-core
+      - text
+      - vector == 0.13.2.0

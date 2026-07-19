@@ -1,0 +1,124 @@
+{
+  "schemaVersion": "s1.4x-haskell-toolchain-lock-v1",
+  "snapshot": "lts-24.50",
+  "mergedToolchainProvenance": {
+    "path": "contract/toolchain-provenance.v1.json",
+    "sha256": "cd9e29a22473fba6203daa4f3a0cbaa57b8b6e5c5fc22de05ca0801c404ffa98",
+    "schemaPath": "contract/schemas/toolchain-provenance.schema.json",
+    "schemaSha256": "6dc1701aa04903d4b611929da83fef0a02645c846654dca213811c8b941376bd"
+  },
+  "contractProjection": {
+    "stackPolicy": "GHCup-managed exact-version installation",
+    "stackInstallCommand": "ghcup install stack 3.11.1",
+    "ghcupToolId": "GHCUP_0_2_6_2_LINUX_X86_64",
+    "ghcupVersion": "0.2.6.2",
+    "ghcupReleaseUri": "https://github.com/haskell/ghcup-hs/releases/tag/v0.2.6.2",
+    "ghcupAssetUri": "https://github.com/haskell/ghcup-hs/releases/download/v0.2.6.2/x86_64-linux-ghcup-0.2.6.2",
+    "ghcupAssetSha256": "9ed5da5449b48043a0d17e767c05d2ef585e25a639bb934329496c6d2fad9cf8",
+    "ghcupMetadataCommit": "0341867f2d419567cf42ea6931e031b00ab3a922",
+    "ghcupMetadataUri": "https://github.com/haskell/ghcup-metadata/commit/0341867f2d419567cf42ea6931e031b00ab3a922",
+    "ghcupMetadataRawUri": "https://raw.githubusercontent.com/haskell/ghcup-metadata/0341867f2d419567cf42ea6931e031b00ab3a922/ghcup-0.1.0.yaml",
+    "ghcupMetadataRawSha256": "49c8a036ce399587205a11ac24e73465cadc5f3232e9418a9d87f4b7f746c4ec",
+    "stackDistributionChannel": "ghcup-managed",
+    "stackArchiveUri": "https://downloads.haskell.org/~ghcup/unofficial-bindists/stack/3.11.1/stack-3.11.1-linux-x86_64.tar.gz",
+    "stackArchiveSha256": "ca3cc5e89d87d1b85594a866de4062671d19ec039cd2401df70d4ccff03ffed9",
+    "stackBinPathId": "GHCUP_STACK_3_11_1",
+    "stackBinResolver": "ghcup whereis stack 3.11.1",
+    "stackBinSha256": "923dbd137756652c67b376e2447c655b87fcc373f4d104b5073bca913471ecbe",
+    "stackNumericVersion": "3.11.1",
+    "upstreamStandaloneAssetUri": "https://github.com/commercialhaskell/stack/releases/download/v3.11.1/stack-3.11.1-linux-x86_64-bin",
+    "upstreamStandaloneAssetSha256": "67c66e918801c41ae4d286b1c91f9124f691c1c7d56071b53889cf4a5c667550",
+    "upstreamStandaloneAssetRole": "comparison-only-not-installed-provenance"
+  },
+  "resolvedTools": {
+    "ghcup": {
+      "pathId": "GHCUP_0_2_6_2_LINUX_X86_64",
+      "version": "0.2.6.2",
+      "sha256": "9ed5da5449b48043a0d17e767c05d2ef585e25a639bb934329496c6d2fad9cf8"
+    },
+    "authoritativeGhc": {
+      "pathId": "GHCUP_GHC_9_10_3",
+      "version": "9.10.3",
+      "sha256": "d0c0dd79a1bcc5dce3c9e73613c1be51f61b78d5ef7c0970ffe9f142a90a5e2c"
+    },
+    "compatibilityGhc": {
+      "pathId": "GHCUP_GHC_9_14_1",
+      "version": "9.14.1",
+      "sha256": "ecfd54b4161699f574d2b163bdc817c54df08a08a310323e43b41ab5fc413ef1"
+    },
+    "stack": {
+      "pathId": "GHCUP_STACK_3_11_1",
+      "version": "3.11.1",
+      "sha256": "923dbd137756652c67b376e2447c655b87fcc373f4d104b5073bca913471ecbe"
+    },
+    "hlint": {
+      "pathId": "HLINT_3_10",
+      "version": "3.10",
+      "sha256": "3ff3fb4b571876d668ddf4ad0245769c19a640283fabb0c2629038aa34197f62"
+    },
+    "stylishHaskell": {
+      "pathId": "STYLISH_HASKELL_0_15_1_0",
+      "version": "0.15.1.0",
+      "sha256": "385dc27bc2d0fb654e76ecadfb57bc0b7e1c58afe74f19923e20b696e6fe0d7b"
+    }
+  },
+  "resolverAssertions": {
+    "authoritativeGhc": [
+      "--offline",
+      "run",
+      "--quick",
+      "--ghc",
+      "9.10.3",
+      "--stack",
+      "3.11.1",
+      "--",
+      "ghc",
+      "--numeric-version"
+    ],
+    "authoritativeStack": [
+      "--offline",
+      "run",
+      "--quick",
+      "--ghc",
+      "9.10.3",
+      "--stack",
+      "3.11.1",
+      "--",
+      "stack",
+      "--numeric-version"
+    ],
+    "compatibilityGhc": [
+      "--offline",
+      "run",
+      "--quick",
+      "--ghc",
+      "9.14.1",
+      "--stack",
+      "3.11.1",
+      "--",
+      "ghc",
+      "--numeric-version"
+    ]
+  },
+  "compatibilityPlan": {
+    "status": "CURRENT_REPLAY_REQUIRED",
+    "acceptedMode": false,
+    "stackYamlPath": "haskell/stack-ghc-9.14.1.yaml",
+    "stackYamlSha256": "7e9effb7194df42a50fac175b079fbb07ce9edd7f09a048fe428bf20cec299da",
+    "stackLockPath": "haskell/stack-ghc-9.14.1.yaml.lock",
+    "stackLockSha256": "e376d075c33c8bc14aebc6f27c6de3a6be81056354a1fc332d71f959f4870154",
+    "historicalFailureEvidencePath": "haskell/ghc-compatibility-solve-failure.v1.json",
+    "historicalFailureEvidenceSha256": "ffbef3c6eb36499272568f7d024763903fcea3fd3e9f14de7e7963d5b20e7ac6",
+    "currentResultPublication": "transient-output-only"
+  },
+  "stackConfigurations": {
+    "authoritativePath": "haskell/stack.yaml",
+    "authoritativeSha256": "6e4c63c2e9e918210d01e8d17a3dbb50565d48f00e254bb750bb36379cd6b09e",
+    "compatibilityPath": "haskell/stack-ghc-9.14.1.yaml",
+    "compatibilitySha256": "7e9effb7194df42a50fac175b079fbb07ce9edd7f09a048fe428bf20cec299da",
+    "compatibilityLockPath": "haskell/stack-ghc-9.14.1.yaml.lock",
+    "compatibilityLockSha256": "e376d075c33c8bc14aebc6f27c6de3a6be81056354a1fc332d71f959f4870154",
+    "authoritativeLockPath": "haskell/stack.yaml.lock",
+    "authoritativeLockSha256": "e376d075c33c8bc14aebc6f27c6de3a6be81056354a1fc332d71f959f4870154"
+  }
+}

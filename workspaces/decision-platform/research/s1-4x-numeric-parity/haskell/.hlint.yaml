@@ -1,0 +1,91 @@
+- arguments:
+    - -XGHC2024
+    - -XNoCPP
+    - -XNoTemplateHaskell
+    - -XNoMagicHash
+    - -XNoRebindableSyntax
+    - -XNoForeignFunctionInterface
+    - -XNoLinearTypes
+    - -XNoStrict
+    - -XNoGeneralizedNewtypeDeriving
+    - -XNoDerivingVia
+    - -XNoDeriveAnyClass
+- ignore:
+    name: Use isAsciiUpper
+    within:
+      - S14X.Contract.Process
+- ignore:
+    name: Use isAsciiLower
+    within:
+      - S14X.Contract.Process
+- ignore:
+    name: Avoid partial function
+    within:
+      - S14X.Core.NumericPrimitives
+      - S14X.PropertyCases
+- modules:
+    - name:
+        - Control.Monad.IO.Class
+        - Debug.Trace
+        - Foreign
+        - Foreign.C
+        - Foreign.Ptr
+        - GHC.IO.Unsafe
+        - System.IO.Unsafe
+        - System.Random
+      within: []
+    - name:
+        - System.Environment
+      within:
+        - Main
+        - S14X.BenchmarkMain
+        - S14X.PropertyEvidence
+        - S14X.TestMain
+    - name:
+        - System.IO
+      within:
+        - Main
+        - S14X.AtomicOutputSpec
+        - S14X.Contract.AtomicOutput
+- functions:
+    - name:
+        - "!!"
+        - Control.Exception.throw
+        - Control.Exception.throwIO
+        - Data.Either.fromLeft
+        - Data.Either.fromRight
+        - Data.Maybe.fromJust
+        - error
+        - foldl1
+        - fromJust
+        - fromLeft
+        - fromRight
+        - head
+        - init
+        - last
+        - maximum
+        - minimum
+        - read
+        - tail
+        - throw
+        - throwIO
+        - undefined
+        - unsafeCoerce
+        - unsafeDupablePerformIO
+        - unsafeInterleaveIO
+        - unsafePerformIO
+      within: []
+- extensions:
+    - name:
+        - CPP
+        - DeriveAnyClass
+        - DerivingVia
+        - ForeignFunctionInterface
+        - GeneralizedNewtypeDeriving
+        - LinearTypes
+        - MagicHash
+        - Strict
+        - TemplateHaskell
+        - Trustworthy
+        - Unsafe
+      within: []

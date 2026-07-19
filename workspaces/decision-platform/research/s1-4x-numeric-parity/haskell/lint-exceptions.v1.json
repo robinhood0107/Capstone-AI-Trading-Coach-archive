@@ -1,0 +1,125 @@
+{
+  "schemaVersion": "s1.4x-suppression-exceptions-v1",
+  "entries": [
+    {
+      "language": "haskell",
+      "file": "src/contract/S14X/Contract/Process.hs",
+      "rule": "Use isAsciiUpper",
+      "symbol": "isAsciiAlphaNumeric",
+      "reason": "The transport contract accepts ASCII identifiers and basenames only; replacing an explicit A-Z range must not broaden or obscure that boundary.",
+      "focusedTest": "test/S14X/ContractSpec.hs: Unicode digits cannot enter SHA or path contracts",
+      "owner": "S1.4X",
+      "expiresWhen": "HLint offers an ASCII-range-preserving replacement whose contract is compiler-pinned and focused-tested."
+    },
+    {
+      "language": "haskell",
+      "file": "src/contract/S14X/Contract/Process.hs",
+      "rule": "Use isAsciiLower",
+      "symbol": "isLowerAscii",
+      "reason": "The transport contract deliberately spells out the lowercase ASCII range used by request, fixture, field, and path identifiers.",
+      "focusedTest": "test/S14X/ContractSpec.hs: Unicode digits cannot enter SHA or path contracts",
+      "owner": "S1.4X",
+      "expiresWhen": "The explicit frozen ASCII identifier grammar is replaced by an equally narrow audited primitive."
+    },
+    {
+      "language": "haskell",
+      "file": "src/core/S14X/Core/NumericPrimitives.hs",
+      "rule": "Avoid partial function",
+      "symbol": "pureSort:div",
+      "reason": "The divisor is the nonzero literal 2 and the branch proves vector length is greater than one before midpoint selection.",
+      "focusedTest": "test/S14X/CoreSpec.hs: pure sort midpoint division is total on every guarded length",
+      "owner": "S1.4X",
+      "expiresWhen": "HLint distinguishes a nonzero literal divisor from an unchecked divisor."
+    },
+    {
+      "language": "haskell",
+      "file": "test/S14X/PropertyCases.hs",
+      "rule": "Avoid partial function",
+      "symbol": "affineQuantileSamples:mod",
+      "reason": "The divisor is the nonzero literal 4; the generator excludes HF7 knot counts while preserving readable mathematical intent.",
+      "focusedTest": "test/S14X/PropertyCases.hs: var-cvar.shift-and-positive-scale",
+      "owner": "S1.4X",
+      "expiresWhen": "HLint distinguishes a nonzero literal divisor from an unchecked divisor."
+    },
+    {
+      "language": "haskell",
+      "file": "test/S14X/PropertyCases.hs",
+      "rule": "Avoid partial function",
+      "symbol": "functionFixtureId:fromEnum",
+      "reason": "FunctionId is a frozen contiguous derived Enum and the existing numeric fixture IDs are preserved for recursive negative-zero evidence.",
+      "focusedTest": "test/S14X/PropertyCases.hs: recursive-negative-zero-normalization",
+      "owner": "S1.4X",
+      "expiresWhen": "The frozen property fixture-ID contract no longer uses the FunctionId enumeration."
+    },
+    {
+      "language": "haskell",
+      "file": "test/S14X/AtomicOutputSpec.hs",
+      "rule": "Avoid restricted module",
+      "symbol": "System.IO(hClose,openBinaryTempFile)",
+      "reason": "The reviewed IO-only test reserves a filesystem-unique name, closes the reserved handle, and never enters the numeric core.",
+      "focusedTest": "test/S14X/AtomicOutputSpec.hs: racing publishers expose exactly one complete winner",
+      "owner": "S1.4X",
+      "expiresWhen": "The base or directory package exposes an equally secure cross-process temporary-directory primitive without a new dependency."
+    },
+    {
+      "language": "haskell",
+      "file": "app/Main.hs",
+      "rule": "Avoid restricted module",
+      "symbol": "System.Environment(getArgs)",
+      "reason": "The executable shell reads only its frozen request, fixture-root, and output CLI options before entering the validated process boundary.",
+      "focusedTest": "tools/tests/test_hlint_inventory.py: test_exact_module_allowances_bind_every_import",
+      "owner": "S1.4X",
+      "expiresWhen": "The executable receives its three absolute paths through a typed launcher without reading process arguments directly."
+    },
+    {
+      "language": "haskell",
+      "file": "app/Main.hs",
+      "rule": "Avoid restricted module",
+      "symbol": "System.IO(stderr)",
+      "reason": "The executable writes only the frozen transport-error envelope to stderr and never exposes payloads, paths, or exception text.",
+      "focusedTest": "tools/tests/test_hlint_inventory.py: test_exact_module_allowances_bind_every_import",
+      "owner": "S1.4X",
+      "expiresWhen": "The process shell can emit the frozen error envelope without importing the System.IO handle."
+    },
+    {
+      "language": "haskell",
+      "file": "benchmark/Main.hs",
+      "rule": "Avoid restricted module",
+      "symbol": "System.Environment(getExecutablePath,lookupEnv)",
+      "reason": "The benchmark shell reads only frozen launcher inputs and uses getExecutablePath solely to self-report the actual Criterion process before every timed kernel.",
+      "focusedTest": "tools/tests/test_hlint_inventory.py: test_exact_module_allowances_bind_every_import",
+      "owner": "S1.4X",
+      "expiresWhen": "Criterion exposes a typed runtime identity and all frozen launcher inputs without System.Environment."
+    },
+    {
+      "language": "haskell",
+      "file": "test/S14X/PropertyEvidence.hs",
+      "rule": "Avoid restricted module",
+      "symbol": "System.Environment(getExecutablePath)",
+      "reason": "The property-evidence test shell hashes and records the actual compiled test executable path without reading ambient variables or entering the numeric core.",
+      "focusedTest": "tools/tests/test_hlint_inventory.py: test_exact_module_allowances_bind_every_import",
+      "owner": "S1.4X",
+      "expiresWhen": "The property runner can report its actual executable identity without importing System.Environment."
+    },
+    {
+      "language": "haskell",
+      "file": "test/Main.hs",
+      "rule": "Avoid restricted module",
+      "symbol": "System.Environment(getArgs)",
+      "reason": "The test entry reads only Tasty runner arguments while all candidate source and fixture contracts remain inside the test modules.",
+      "focusedTest": "tools/tests/test_hlint_inventory.py: test_exact_module_allowances_bind_every_import",
+      "owner": "S1.4X",
+      "expiresWhen": "The test runner no longer needs to forward command-line arguments to Tasty."
+    },
+    {
+      "language": "haskell",
+      "file": "src/contract/S14X/Contract/AtomicOutput.hs",
+      "rule": "Avoid restricted module",
+      "symbol": "System.IO(Handle,hClose,hFlush,hSetBinaryMode,openBinaryTempFile)",
+      "reason": "The reviewed IO shell writes and flushes a same-directory binary temporary inode before exclusive hard-link publication; numeric core modules cannot import this component.",
+      "focusedTest": "test/S14X/AtomicOutputSpec.hs: existing output is never replaced",
+      "owner": "S1.4X",
+      "expiresWhen": "A higher-level atomic publish primitive provides the same no-replace and same-filesystem guarantees without direct handles."
+    }
+  ]
+}

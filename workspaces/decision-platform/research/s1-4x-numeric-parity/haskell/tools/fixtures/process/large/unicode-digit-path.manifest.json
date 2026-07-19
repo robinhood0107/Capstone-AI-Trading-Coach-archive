@@ -1,0 +1,17 @@
+{
+  "schemaVersion": "s1.4x-binary-array-v1",
+  "fixtureId": "unicode-digit-path",
+  "argumentName": "prices",
+  "fileName": "unicode-digit-١.f64le",
+  "encoding": "ieee754-binary64",
+  "dtype": "float64",
+  "byteOrder": "little",
+  "arrayOrder": "C",
+  "shape": [
+    1
+  ],
+  "count": 1,
+  "byteLength": 8,
+  "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "generator": {}
+}
