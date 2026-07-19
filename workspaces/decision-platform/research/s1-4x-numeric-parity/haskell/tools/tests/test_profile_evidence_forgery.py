@@ -201,6 +201,9 @@ class ProfileEvidenceForgeryTests(unittest.TestCase):
             marker_script_pinned_fd_path="/proc/self/fd/71",
             marker_script_sha256="6" * 64,
             marker_argv=[
+                "/usr/bin/env",
+                "-a",
+                "/usr/bin/python3",
                 "/proc/self/fd/70",
                 "/proc/self/fd/71",
                 "mark-measurement-entered",

@@ -7,6 +7,8 @@ import argparse
 import ctypes
 import fcntl
 import hashlib
+import importlib
+import importlib.metadata
 import json
 import os
 import re
@@ -128,6 +130,22 @@ class PinnedExecutable:
     sha256: str
     mode: int
     identity: tuple[int, int, int, int, int, int]
+
+
+@dataclass(frozen=True)
+class BenchmarkPythonRuntime:
+    """Outer pin snapshot과 venv/dependency route를 benchmark 끝까지 보존한다."""
+
+    source_path: Path
+    fd_path: Path
+    descriptor: int
+    sha256: str
+    mode: int
+    identity: tuple[int, int, int, int, int, int]
+    configuration_path: Path
+    configuration_sha256: str
+    configuration_identity: tuple[int, int, int, int, int, int, int]
+    dependency_closure: tuple[str, str, str]
 
 
 @dataclass(frozen=True)
@@ -406,6 +424,273 @@ def pinned_executable_environment(
         mode=mode,
         identity=identity,
     )
+
+
+def _full_stat_identity(
+    value: os.stat_result,
+) -> tuple[int, int, int, int, int, int, int]:
+    """Source/config route continuity에 쓰는 full stat identity다."""
+
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_size,
+        value.st_mode,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+        value.st_nlink,
+    )
+
+
+def _shell_stat_identity(path: Path) -> str:
+    """Outer Bash pin과 동일한 GNU stat 표현으로 initial snapshot을 비교한다."""
+
+    matched = re.fullmatch(r"/proc/self/fd/([0-9]+)", str(path))
+    pass_fds = () if matched is None else (int(matched.group(1)),)
+    stat_environment = {"LC_ALL": "C", "PATH": "/usr/bin:/bin"}
+    if "TZ" in os.environ:
+        stat_environment["TZ"] = os.environ["TZ"]
+    try:
+        completed = subprocess.run(
+            [
+                "/usr/bin/stat",
+                "-Lc",
+                "%d:%i:%s:%f:%y:%z:%h",
+                "--",
+                str(path),
+            ],
+            env=stat_environment,
+            check=False,
+            capture_output=True,
+            text=True,
+            pass_fds=pass_fds,
+        )
+    except OSError as exc:
+        raise BlockError("BENCHMARK_PYTHON_INITIAL_CLOSURE_STAT_FAILED") from exc
+    if completed.returncode != 0 or completed.stderr or not completed.stdout:
+        raise BlockError("BENCHMARK_PYTHON_INITIAL_CLOSURE_STAT_FAILED")
+    return completed.stdout.rstrip("\n")
+
+
+def _snapshot_benchmark_python_runtime(
+    pinned: PinnedExecutable,
+    *,
+    require_current_process: bool,
+) -> BenchmarkPythonRuntime:
+    """Source/FD/config/dependency를 한 accepted venv route snapshot으로 묶는다."""
+
+    source = pinned.source_path
+    configuration = source.parent.parent / "pyvenv.cfg"
+    try:
+        source_before = os.lstat(source)
+        configuration_before = os.lstat(configuration)
+        if (
+            source.resolve(strict=True) != source
+            or configuration.resolve(strict=True) != configuration
+        ):
+            raise BlockError("BENCHMARK_PYTHON_ROUTE_NONCANONICAL")
+        (
+            descriptor,
+            _,
+            executable_sha256,
+            executable_mode,
+            executable_identity,
+        ) = _read_pinned_fd(
+            fd_path=pinned.fd_path,
+            label="BENCHMARK_PYTHON",
+            max_bytes=1024 * 1024 * 1024,
+            executable=True,
+            capture_payload=False,
+        )
+        configuration_payload = configuration.read_bytes()
+        probe_code = (
+            "import importlib.metadata, json, os, sys\n"
+            "import jsonschema, numpy\n"
+            "p=os.environ['S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH']\n"
+            "d=int(p.rsplit('/',1)[1]); f=os.fstat(d)\n"
+            "e=os.stat('/proc/self/exe')\n"
+            "print(json.dumps({"
+            "'implementation':sys.implementation.name,"
+            "'version':list(sys.version_info[:3]),"
+            "'executable':sys.executable,"
+            "'prefix':sys.prefix,"
+            "'basePrefix':sys.base_prefix,"
+            "'jsonschema':importlib.metadata.version('jsonschema'),"
+            "'numpy':importlib.metadata.version('numpy'),"
+            "'numpyModule':numpy.__version__,"
+            "'identityMatches':"
+            "[f.st_dev,f.st_ino,f.st_size]=="
+            "[e.st_dev,e.st_ino,e.st_size]"
+            "},sort_keys=True))\n"
+        )
+        completed = subprocess.run(
+            [str(source), "-B", "-I", "-c", probe_code],
+            executable=str(pinned.fd_path),
+            cwd=source.parent.parent,
+            env={
+                "LC_ALL": "C",
+                "PATH": "/usr/bin:/bin",
+                "S1_4X_BENCHMARK_PYTHON_BIN": str(source),
+                "S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH": str(
+                    pinned.fd_path
+                ),
+            },
+            check=False,
+            capture_output=True,
+            text=True,
+            pass_fds=(pinned.descriptor,),
+        )
+        source_after = os.lstat(source)
+        configuration_after = os.lstat(configuration)
+    except OSError as exc:
+        raise BlockError("BENCHMARK_PYTHON_ROUTE_STAT_FAILED") from exc
+    source_identity = _full_stat_identity(source_before)
+    configuration_identity = _full_stat_identity(configuration_before)
+    expected_executable_identity = (
+        pinned.identity[0],
+        pinned.identity[1],
+        pinned.identity[2],
+        pinned.mode,
+        pinned.identity[3],
+        pinned.identity[4],
+        pinned.identity[5],
+    )
+    if (
+        source.parent.name != "bin"
+        or not stat.S_ISREG(source_before.st_mode)
+        or source_before.st_mode & 0o111 == 0
+        or not stat.S_ISREG(configuration_before.st_mode)
+        or source_identity != expected_executable_identity
+        or source_identity != _full_stat_identity(source_after)
+        or configuration_identity
+        != _full_stat_identity(configuration_after)
+        or descriptor != pinned.descriptor
+        or executable_mode != pinned.mode
+        or executable_identity != pinned.identity
+        or executable_sha256 != pinned.sha256
+    ):
+        raise BlockError("BENCHMARK_PYTHON_SOURCE_FD_MISMATCH")
+    if completed.returncode != 0 or completed.stderr:
+        raise BlockError("BENCHMARK_PYTHON_DEPENDENCY_CLOSURE_MISMATCH")
+    try:
+        probe = json.loads(completed.stdout)
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise BlockError(
+            "BENCHMARK_PYTHON_DEPENDENCY_CLOSURE_MISMATCH"
+        ) from exc
+    dependency_closure = (
+        probe.get("jsonschema"),
+        probe.get("numpy"),
+        probe.get("numpyModule"),
+    )
+    if (
+        set(probe)
+        != {
+            "implementation",
+            "version",
+            "executable",
+            "prefix",
+            "basePrefix",
+            "jsonschema",
+            "numpy",
+            "numpyModule",
+            "identityMatches",
+        }
+        or probe.get("implementation") != "cpython"
+        or probe.get("version") != [3, 12, 13]
+        or probe.get("executable") != str(source)
+        or probe.get("prefix") != str(source.parent.parent)
+        or probe.get("basePrefix") == probe.get("prefix")
+        or dependency_closure != ("4.26.0", "2.5.1", "2.5.1")
+        or probe.get("identityMatches") is not True
+    ):
+        raise BlockError("BENCHMARK_PYTHON_DEPENDENCY_CLOSURE_MISMATCH")
+    if require_current_process:
+        try:
+            current = os.stat("/proc/self/exe")
+            current_dependencies = (
+                importlib.metadata.version("jsonschema"),
+                importlib.metadata.version("numpy"),
+                str(
+                    getattr(
+                        importlib.import_module("numpy"),
+                        "__version__",
+                        "",
+                    )
+                ),
+            )
+        except (
+            ImportError,
+            importlib.metadata.PackageNotFoundError,
+            OSError,
+        ) as exc:
+            raise BlockError(
+                "BENCHMARK_PYTHON_CURRENT_PROCESS_MISMATCH"
+            ) from exc
+        if (
+            sys.implementation.name != "cpython"
+            or sys.version_info[:3] != (3, 12, 13)
+            or sys.executable != str(source)
+            or Path(sys.prefix) != source.parent.parent
+            or sys.prefix == sys.base_prefix
+            or _full_stat_identity(current) != expected_executable_identity
+            or current_dependencies != dependency_closure
+        ):
+            raise BlockError("BENCHMARK_PYTHON_CURRENT_PROCESS_MISMATCH")
+    return BenchmarkPythonRuntime(
+        source_path=source,
+        fd_path=pinned.fd_path,
+        descriptor=pinned.descriptor,
+        sha256=pinned.sha256,
+        mode=pinned.mode,
+        identity=pinned.identity,
+        configuration_path=configuration,
+        configuration_sha256=hashlib.sha256(
+            configuration_payload
+        ).hexdigest(),
+        configuration_identity=configuration_identity,
+        dependency_closure=dependency_closure,
+    )
+
+
+def _benchmark_python_runtime() -> BenchmarkPythonRuntime:
+    """Outer pin initial closure와 현재 helper process를 exact 비교한다."""
+
+    pinned = pinned_executable_environment(
+        "S1_4X_BENCHMARK_PYTHON",
+        label="MARKER_PYTHON",
+    )
+    runtime = _snapshot_benchmark_python_runtime(
+        pinned,
+        require_current_process=True,
+    )
+    initial = {
+        "route": os.environ.get(
+            "S1_4X_BENCHMARK_PYTHON_INITIAL_ROUTE_IDENTITY"
+        ),
+        "configurationIdentity": os.environ.get(
+            "S1_4X_BENCHMARK_PYTHON_INITIAL_VENV_IDENTITY"
+        ),
+        "configurationSha256": os.environ.get(
+            "S1_4X_BENCHMARK_PYTHON_INITIAL_VENV_SHA256"
+        ),
+        "dependencies": os.environ.get(
+            "S1_4X_BENCHMARK_PYTHON_INITIAL_DEPENDENCIES"
+        ),
+    }
+    present = {name for name, value in initial.items() if value is not None}
+    if present and present != set(initial):
+        raise BlockError("BENCHMARK_PYTHON_INITIAL_CLOSURE_INCOMPLETE")
+    if present and (
+        initial["route"] != _shell_stat_identity(runtime.source_path)
+        or initial["route"] != _shell_stat_identity(runtime.fd_path)
+        or initial["configurationIdentity"]
+        != _shell_stat_identity(runtime.configuration_path)
+        or initial["configurationSha256"] != runtime.configuration_sha256
+        or initial["dependencies"] != "|".join(runtime.dependency_closure)
+    ):
+        raise BlockError("BENCHMARK_PYTHON_INITIAL_CLOSURE_CHANGED")
+    return runtime
 
 
 def load_pinned_toolchain() -> tuple[PinnedExecutable, ...]:
@@ -1475,6 +1760,7 @@ def run_pinned_subprocess(
     capture_output: bool,
     pinned_files: Sequence[PinnedRegularFile] = (),
     timeout: int | None = None,
+    benchmark_python_runtime: BenchmarkPythonRuntime | None = None,
 ) -> subprocess.CompletedProcess[bytes]:
     """검증한 executable과 sealed source FD를 모든 nested process에 상속한다."""
 
@@ -1530,8 +1816,43 @@ def run_pinned_subprocess(
             != _LINUX_REQUIRED_MEMFD_SEALS
         ):
             raise BlockError(f"{pinned_file.label}_PINNED_FD_NOT_SEALED")
-    return subprocess.run(
-        list(command),
+    execution_target = next(
+        executable
+        for executable in pinned_executables
+        if str(command[0]) == str(executable.fd_path)
+    )
+    before_python_runtime: BenchmarkPythonRuntime | None = None
+    execution_command = list(command)
+    executable_path: str | None = None
+    if benchmark_python_runtime is not None:
+        expected_python = PinnedExecutable(
+            label="MARKER_PYTHON",
+            source_path=benchmark_python_runtime.source_path,
+            fd_path=benchmark_python_runtime.fd_path,
+            descriptor=benchmark_python_runtime.descriptor,
+            sha256=benchmark_python_runtime.sha256,
+            mode=benchmark_python_runtime.mode,
+            identity=benchmark_python_runtime.identity,
+        )
+        before_python_runtime = _snapshot_benchmark_python_runtime(
+            expected_python,
+            require_current_process=False,
+        )
+        if before_python_runtime != benchmark_python_runtime:
+            raise BlockError("BENCHMARK_PYTHON_CLOSURE_CHANGED_BEFORE_CHILD")
+    if execution_target.label == "MARKER_PYTHON":
+        if (
+            benchmark_python_runtime is None
+            or execution_target.source_path
+            != benchmark_python_runtime.source_path
+            or execution_target.fd_path != benchmark_python_runtime.fd_path
+        ):
+            raise BlockError("BENCHMARK_PYTHON_EXECUTION_BINDING_MISSING")
+        execution_command[0] = str(benchmark_python_runtime.source_path)
+        executable_path = str(benchmark_python_runtime.fd_path)
+    completed = subprocess.run(
+        execution_command,
+        executable=executable_path,
         cwd=cwd,
         env=dict(environment),
         check=False,
@@ -1540,6 +1861,26 @@ def run_pinned_subprocess(
         pass_fds=descriptors,
         timeout=timeout,
     )
+    if benchmark_python_runtime is not None:
+        expected_python = PinnedExecutable(
+            label="MARKER_PYTHON",
+            source_path=benchmark_python_runtime.source_path,
+            fd_path=benchmark_python_runtime.fd_path,
+            descriptor=benchmark_python_runtime.descriptor,
+            sha256=benchmark_python_runtime.sha256,
+            mode=benchmark_python_runtime.mode,
+            identity=benchmark_python_runtime.identity,
+        )
+        after_python_runtime = _snapshot_benchmark_python_runtime(
+            expected_python,
+            require_current_process=False,
+        )
+        if (
+            after_python_runtime != before_python_runtime
+            or after_python_runtime != benchmark_python_runtime
+        ):
+            raise BlockError("BENCHMARK_PYTHON_CLOSURE_CHANGED_AFTER_CHILD")
+    return completed
 
 
 def _require_absolute_regular(path: Path, *, label: str) -> Path:
@@ -1981,6 +2322,7 @@ def _run_shared_json_command(
     environment: Mapping[str, str],
     pinned_executables: Sequence[PinnedExecutable],
     pinned_files: Sequence[PinnedRegularFile],
+    benchmark_python_runtime: BenchmarkPythonRuntime,
     timeout: int = 300,
 ) -> dict[str, Any]:
     if (
@@ -1997,6 +2339,7 @@ def _run_shared_json_command(
         capture_output=True,
         pinned_files=pinned_files,
         timeout=timeout,
+        benchmark_python_runtime=benchmark_python_runtime,
     )
     if completed.returncode != 0:
         raise BlockError(f"{label}_FAILED:{completed.returncode}")
@@ -2020,6 +2363,7 @@ def _require_sha_fields(document: Mapping[str, Any], fields: Sequence[str]) -> N
 def run_block(arguments: argparse.Namespace) -> dict[str, Any]:
     """한 family의 preflight, Criterion 실행, shared evidence 발행을 수행한다."""
 
+    benchmark_python_runtime = _benchmark_python_runtime()
     repo_root = _require_absolute_directory(arguments.repo_root, label="REPO_ROOT")
     numeric_root = (
         repo_root
@@ -2183,9 +2527,14 @@ def run_block(arguments: argparse.Namespace) -> dict[str, Any]:
         label="STACK_YAML",
     )
 
-    marker_python = pinned_executable_environment(
-        "S1_4X_BENCHMARK_PYTHON",
+    marker_python = PinnedExecutable(
         label="MARKER_PYTHON",
+        source_path=benchmark_python_runtime.source_path,
+        fd_path=benchmark_python_runtime.fd_path,
+        descriptor=benchmark_python_runtime.descriptor,
+        sha256=benchmark_python_runtime.sha256,
+        mode=benchmark_python_runtime.mode,
+        identity=benchmark_python_runtime.identity,
     )
     marker_script = pin_regular_file(
         numeric_root / "benchmarks/run_rotated_blocks.py",
@@ -2193,6 +2542,9 @@ def run_block(arguments: argparse.Namespace) -> dict[str, Any]:
         max_bytes=16 * 1024 * 1024,
     )
     marker_argv = [
+        "/usr/bin/env",
+        "-a",
+        str(marker_python.source_path),
         str(marker_python.fd_path),
         str(marker_script.fd_path),
         "mark-measurement-entered",
@@ -2245,6 +2597,7 @@ def run_block(arguments: argparse.Namespace) -> dict[str, Any]:
         environment=environment,
         pinned_executables=runtime_executables,
         pinned_files=(ledger_script,),
+        benchmark_python_runtime=benchmark_python_runtime,
     )
     if ledger_result != {
         "boundaryId": "haskell",
@@ -2277,6 +2630,9 @@ def run_block(arguments: argparse.Namespace) -> dict[str, Any]:
             "S1_4X_BENCHMARK_MARKER_PYTHON": str(
                 marker_python.fd_path
             ),
+            "S1_4X_BENCHMARK_MARKER_PYTHON_SOURCE_PATH": str(
+                marker_python.source_path
+            ),
             "S1_4X_BENCHMARK_MARKER_PYTHON_SHA256": marker_python.sha256,
             "S1_4X_BENCHMARK_MARKER_SCRIPT": str(marker_script.fd_path),
             "S1_4X_BENCHMARK_MARKER_SCRIPT_SHA256": marker_script.sha256,
@@ -2291,6 +2647,7 @@ def run_block(arguments: argparse.Namespace) -> dict[str, Any]:
         pinned_executables=runtime_executables,
         capture_output=False,
         pinned_files=(marker_script, *ghc_closure.pinned_launchers),
+        benchmark_python_runtime=benchmark_python_runtime,
     )
     finished_at = _iso_now()
     if completed.returncode != 0:
@@ -2300,13 +2657,7 @@ def run_block(arguments: argparse.Namespace) -> dict[str, Any]:
         path=qualification_path,
         pre_run=qualification,
     )
-    if (
-        pinned_executable_environment(
-            "S1_4X_BENCHMARK_PYTHON",
-            label="MARKER_PYTHON",
-        )
-        != marker_python
-    ):
+    if _benchmark_python_runtime() != benchmark_python_runtime:
         raise BlockError("MARKER_IDENTITY_CHANGED_DURING_RUN")
     _require_absolute_regular(raw_path, label="CRITERION_FAMILY_RAW")
     (
@@ -2513,6 +2864,7 @@ def run_block(arguments: argparse.Namespace) -> dict[str, Any]:
             ledger_script,
             *ghc_closure.pinned_launchers,
         ),
+        benchmark_python_runtime=benchmark_python_runtime,
     )
     if (
         set(producer_result)
@@ -2577,6 +2929,7 @@ def run_block(arguments: argparse.Namespace) -> dict[str, Any]:
             ledger_script,
             *ghc_closure.pinned_launchers,
         ),
+        benchmark_python_runtime=benchmark_python_runtime,
     )
     if (
         set(block_result)
@@ -2608,6 +2961,8 @@ def run_block(arguments: argparse.Namespace) -> dict[str, Any]:
         raise BlockError("PROFILE_SOURCE_CLOSURE_CHANGED_DURING_BLOCK")
     if load_pinned_toolchain() != pinned_executables:
         raise BlockError("PINNED_TOOLCHAIN_CHANGED_DURING_BLOCK")
+    if _benchmark_python_runtime() != benchmark_python_runtime:
+        raise BlockError("BENCHMARK_PYTHON_CHANGED_DURING_BLOCK")
     validate_authoritative_ghc_closure(ghc_closure)
     if (
         sha256_file(ghc_install_closure_path)

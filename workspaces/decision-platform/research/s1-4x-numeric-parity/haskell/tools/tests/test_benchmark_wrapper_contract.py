@@ -158,37 +158,42 @@ class BenchmarkWrapperContractTests(unittest.TestCase):
                     root / run_id / rotation / "haskell" / family
                 )
                 block_dir.mkdir(parents=True)
-                completed = subprocess.run(
-                    [
-                        str(WRAPPER),
-                        "--plan",
-                        str(root / "missing-plan.json"),
-                        "--block-dir",
-                        str(block_dir),
-                        "--qualification",
-                        str(root / "missing-qualification.json"),
-                        "--boundary",
-                        "haskell",
-                        "--selector",
-                        f"haskell/{family}",
-                        "--family",
-                        family,
-                        "--rotation",
-                        rotation,
-                        "--outer-repetition",
-                        "1",
-                        "--run-id",
-                        run_id,
-                        "--benchmark-subject-commit",
-                        "a" * 40,
-                    ],
-                    cwd=HASKELL_ROOT.parents[4],
-                    env=environment,
-                    check=False,
-                    capture_output=True,
-                    text=True,
-                    pass_fds=tuple(descriptors),
-                )
+                integration_root = HASKELL_ROOT.parent / "integration"
+                integration_root.mkdir()
+                try:
+                    completed = subprocess.run(
+                        [
+                            str(WRAPPER),
+                            "--plan",
+                            str(root / "missing-plan.json"),
+                            "--block-dir",
+                            str(block_dir),
+                            "--qualification",
+                            str(root / "missing-qualification.json"),
+                            "--boundary",
+                            "haskell",
+                            "--selector",
+                            f"haskell/{family}",
+                            "--family",
+                            family,
+                            "--rotation",
+                            rotation,
+                            "--outer-repetition",
+                            "1",
+                            "--run-id",
+                            run_id,
+                            "--benchmark-subject-commit",
+                            "a" * 40,
+                        ],
+                        cwd=HASKELL_ROOT.parents[4],
+                        env=environment,
+                        check=False,
+                        capture_output=True,
+                        text=True,
+                        pass_fds=tuple(descriptors),
+                    )
+                finally:
+                    integration_root.rmdir()
             finally:
                 for descriptor in descriptors:
                     os.close(descriptor)

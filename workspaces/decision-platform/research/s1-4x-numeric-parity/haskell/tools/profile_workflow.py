@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib
 import importlib.metadata
 import importlib.util
 import json
@@ -152,6 +153,10 @@ class BenchmarkPythonRuntime:
     sha256: str
     mode: int
     identity: tuple[int, int, int, int, int, int]
+    configuration_path: Path
+    configuration_sha256: str
+    configuration_identity: tuple[int, int, int, int, int, int, int]
+    dependency_closure: tuple[str, str, str]
 
 
 @dataclass(frozen=True)
@@ -221,6 +226,59 @@ def _benchmark_python_full_identity(
     )
 
 
+def _benchmark_python_dependency_closure() -> tuple[str, str, str]:
+    """현재 venv의 exact metadata와 imported NumPy version을 함께 읽는다."""
+
+    try:
+        importlib.import_module("jsonschema")
+        numpy = importlib.import_module("numpy")
+        closure = (
+            importlib.metadata.version("jsonschema"),
+            importlib.metadata.version("numpy"),
+            str(getattr(numpy, "__version__", "")),
+        )
+    except (
+        ImportError,
+        importlib.metadata.PackageNotFoundError,
+    ) as exc:
+        raise WorkflowError(
+            "BENCHMARK_PYTHON_DEPENDENCY_CLOSURE_INVALID"
+        ) from exc
+    return closure
+
+
+def _benchmark_python_shell_stat_identity(path: Path) -> str:
+    """Bash pin 단계가 기록한 GNU stat full identity와 같은 표현을 만든다."""
+
+    matched = re.fullmatch(r"/proc/self/fd/([0-9]+)", str(path))
+    pass_fds = () if matched is None else (int(matched.group(1)),)
+    stat_environment = {"LC_ALL": "C", "PATH": "/usr/bin:/bin"}
+    if "TZ" in os.environ:
+        stat_environment["TZ"] = os.environ["TZ"]
+    try:
+        completed = subprocess.run(
+            [
+                "/usr/bin/stat",
+                "-Lc",
+                "%d:%i:%s:%f:%y:%z:%h",
+                "--",
+                str(path),
+            ],
+            env=stat_environment,
+            check=False,
+            capture_output=True,
+            text=True,
+            pass_fds=pass_fds,
+        )
+    except OSError as exc:
+        raise WorkflowError(
+            "BENCHMARK_PYTHON_INITIAL_CLOSURE_STAT_FAILED"
+        ) from exc
+    if completed.returncode != 0 or completed.stderr or not completed.stdout:
+        raise WorkflowError("BENCHMARK_PYTHON_INITIAL_CLOSURE_STAT_FAILED")
+    return completed.stdout.rstrip("\n")
+
+
 def _benchmark_python_runtime() -> BenchmarkPythonRuntime:
     """현재 process와 inherited FD를 accepted CPython 3.12.13 bytes에 결속한다."""
 
@@ -283,16 +341,12 @@ def _benchmark_python_runtime() -> BenchmarkPythonRuntime:
                 raise WorkflowError("BENCHMARK_PYTHON_PINNED_FD_SHORT_READ")
             digest.update(chunk)
             offset += len(chunk)
+        configuration_payload = venv_configuration.read_bytes()
+        dependency_closure = _benchmark_python_dependency_closure()
         pinned = os.fstat(descriptor)
         current = os.stat("/proc/self/exe")
         source_after = os.lstat(source_path)
         configuration_after = os.lstat(venv_configuration)
-        jsonschema_version = importlib.metadata.version("jsonschema")
-        numpy_version = importlib.metadata.version("numpy")
-    except importlib.metadata.PackageNotFoundError as exc:
-        raise WorkflowError(
-            "BENCHMARK_PYTHON_DEPENDENCY_CLOSURE_INVALID"
-        ) from exc
     except OSError as exc:
         raise WorkflowError("BENCHMARK_PYTHON_RUNTIME_FSTAT_FAILED") from exc
     source_identity = _benchmark_python_full_identity(source_before)
@@ -336,10 +390,45 @@ def _benchmark_python_runtime() -> BenchmarkPythonRuntime:
         or sys.executable != source_value
         or Path(sys.prefix) != venv_root
         or sys.prefix == sys.base_prefix
-        or jsonschema_version != "4.26.0"
-        or numpy_version != "2.5.1"
+        or dependency_closure != ("4.26.0", "2.5.1", "2.5.1")
     ):
         raise WorkflowError("BENCHMARK_PYTHON_RUNTIME_IDENTITY_INVALID")
+    initial_environment = {
+        "route": os.environ.get(
+            "S1_4X_BENCHMARK_PYTHON_INITIAL_ROUTE_IDENTITY"
+        ),
+        "configurationIdentity": os.environ.get(
+            "S1_4X_BENCHMARK_PYTHON_INITIAL_VENV_IDENTITY"
+        ),
+        "configurationSha256": os.environ.get(
+            "S1_4X_BENCHMARK_PYTHON_INITIAL_VENV_SHA256"
+        ),
+        "dependencies": os.environ.get(
+            "S1_4X_BENCHMARK_PYTHON_INITIAL_DEPENDENCIES"
+        ),
+    }
+    present_initial_values = {
+        name for name, value in initial_environment.items() if value is not None
+    }
+    if present_initial_values and present_initial_values != set(
+        initial_environment
+    ):
+        raise WorkflowError("BENCHMARK_PYTHON_INITIAL_CLOSURE_INCOMPLETE")
+    configuration_sha256 = hashlib.sha256(
+        configuration_payload
+    ).hexdigest()
+    if present_initial_values and (
+        initial_environment["route"]
+        != _benchmark_python_shell_stat_identity(source_path)
+        or initial_environment["route"]
+        != _benchmark_python_shell_stat_identity(Path(fd_value))
+        or initial_environment["configurationIdentity"]
+        != _benchmark_python_shell_stat_identity(venv_configuration)
+        or initial_environment["configurationSha256"]
+        != configuration_sha256
+        or initial_environment["dependencies"] != "|".join(dependency_closure)
+    ):
+        raise WorkflowError("BENCHMARK_PYTHON_INITIAL_CLOSURE_CHANGED")
     return BenchmarkPythonRuntime(
         source_path=source_path,
         fd_path=Path(fd_value),
@@ -347,6 +436,10 @@ def _benchmark_python_runtime() -> BenchmarkPythonRuntime:
         sha256=expected_sha256,
         mode=pinned.st_mode,
         identity=pinned_identity,
+        configuration_path=venv_configuration,
+        configuration_sha256=configuration_sha256,
+        configuration_identity=configuration_identity,
+        dependency_closure=dependency_closure,
     )
 
 
@@ -566,11 +659,13 @@ def build_qualification_command_witness(
     )
     raw_argv = list(marker_argv)
     if (
-        len(raw_argv) != 5
-        or raw_argv[0] != f"/proc/self/fd/{python_descriptor}"
-        or raw_argv[1] != f"/proc/self/fd/{script_descriptor}"
-        or raw_argv[2:4] != ["mark-measurement-entered", "--qualification"]
-        or not raw_argv[4].startswith("/")
+        len(raw_argv) != 8
+        or raw_argv[:3]
+        != ["/usr/bin/env", "-a", str(python_source_path)]
+        or raw_argv[3] != f"/proc/self/fd/{python_descriptor}"
+        or raw_argv[4] != f"/proc/self/fd/{script_descriptor}"
+        or raw_argv[5:7] != ["mark-measurement-entered", "--qualification"]
+        or not raw_argv[7].startswith("/")
     ):
         raise WorkflowError("QUALIFICATION_WITNESS_ARGV_INVALID")
     actual_python_sha256 = _read_descriptor_sha256(
@@ -609,6 +704,9 @@ def build_qualification_command_witness(
         },
     }
     normalized_argv = [
+        "/usr/bin/env",
+        "-a",
+        "S1_4X_BENCHMARK_CPYTHON_SOURCE_ARGV0",
         (
             "S1_4X_BENCHMARK_CPYTHON_3_12_13_SHA256_"
             f"{python_sha256.upper()}"
@@ -698,7 +796,7 @@ def validate_qualification_command_witness(
         ),
     }
     raw_argv = list(marker_argv)
-    for index, name in enumerate(("python", "script")):
+    for index, name in zip((3, 4), ("python", "script"), strict=True):
         binding = objects.get(name)
         source_path, source_sha256 = expected_sources[name]
         if (
@@ -717,7 +815,7 @@ def validate_qualification_command_witness(
             or binding.get("sourceBytesSha256") != source_sha256
             or type(binding.get("fdNumber")) is not int
             or binding["fdNumber"] < 3
-            or len(raw_argv) != 5
+            or len(raw_argv) != 8
             or raw_argv[index]
             != f"/proc/self/fd/{binding['fdNumber']}"
         ):
@@ -745,6 +843,9 @@ def validate_qualification_command_witness(
                 f"QUALIFICATION_WITNESS_{name.upper()}_FSTAT_INVALID"
             )
     expected_normalized = [
+        "/usr/bin/env",
+        "-a",
+        "S1_4X_BENCHMARK_CPYTHON_SOURCE_ARGV0",
         (
             "S1_4X_BENCHMARK_CPYTHON_3_12_13_SHA256_"
             f"{expected_sources['python'][1].upper()}"
@@ -760,8 +861,10 @@ def validate_qualification_command_witness(
     without_hash = dict(witness)
     witness_sha256 = without_hash.pop("witnessSha256", None)
     if (
-        raw_argv[2:4] != ["mark-measurement-entered", "--qualification"]
-        or not raw_argv[4].startswith("/")
+        raw_argv[:3]
+        != ["/usr/bin/env", "-a", str(python_source_path)]
+        or raw_argv[5:7] != ["mark-measurement-entered", "--qualification"]
+        or not raw_argv[7].startswith("/")
         or witness.get("objectsSha256") != canonical_sha256(objects)
         or witness.get("ownerArgvSha256") != canonical_sha256(raw_argv)
         or witness.get("markerPathId") != marker_path_id
@@ -1162,17 +1265,19 @@ def _validate_profile_marker(document: object, *, state: str) -> dict[str, Any]:
         or not marker_argv
         or any(type(argument) is not str or not argument for argument in marker_argv)
         or document["markerArgvSha256"] != canonical_sha256(marker_argv)
-        or document.get("markerPythonPinnedFdPath") != marker_argv[0]
-        or len(marker_argv) != 5
-        or marker_argv[1] != document.get("markerScriptPinnedFdPath")
-        or _pinned_fd_number(marker_argv[0]) is None
-        or _pinned_fd_number(marker_argv[1]) is None
-        or marker_argv[2:] != [
+        or len(marker_argv) != 8
+        or marker_argv[:3]
+        != ["/usr/bin/env", "-a", document.get("markerPythonPath")]
+        or document.get("markerPythonPinnedFdPath") != marker_argv[3]
+        or marker_argv[4] != document.get("markerScriptPinnedFdPath")
+        or _pinned_fd_number(marker_argv[3]) is None
+        or _pinned_fd_number(marker_argv[4]) is None
+        or marker_argv[5:] != [
             "mark-measurement-entered",
             "--qualification",
-            marker_argv[4],
+            marker_argv[7],
         ]
-        or not marker_argv[4].startswith("/")
+        or not marker_argv[7].startswith("/")
     ):
         raise WorkflowError("PROFILE_MARKER_ARGV_INVALID")
     _require_iso_utc(document.get("startedAt"), label="marker-started")
@@ -2633,11 +2738,12 @@ def _benchmark_python_source_route_identity(
     fd_value: str,
     *,
     phase: str,
+    expected_runtime: BenchmarkPythonRuntime | None = None,
 ) -> tuple[
     tuple[int, int, int, int, int, int, int],
     tuple[int, int, int, int, int, int, int],
 ]:
-    """argv0 venv route를 retained executable FD와 full stat으로 결속한다."""
+    """argv0 venv route를 최초 runtime closure와 full stat으로 결속한다."""
 
     matched = re.fullmatch(r"/proc/self/fd/([0-9]+)", fd_value)
     if (
@@ -2657,9 +2763,10 @@ def _benchmark_python_source_route_identity(
     source_path = Path(source_value)
     venv_configuration = source_path.parent.parent / "pyvenv.cfg"
     try:
-        source = os.lstat(source_path)
-        pinned = os.fstat(int(matched.group(1)))
-        configuration = os.lstat(venv_configuration)
+        descriptor = int(matched.group(1))
+        source_before = os.lstat(source_path)
+        pinned_before = os.fstat(descriptor)
+        configuration_before = os.lstat(venv_configuration)
         if (
             source_path.resolve(strict=True) != source_path
             or venv_configuration.resolve(strict=True) != venv_configuration
@@ -2667,24 +2774,91 @@ def _benchmark_python_source_route_identity(
             raise WorkflowError(
                 f"COMMAND_RUNTIME_SOURCE_ROUTE_NONCANONICAL:{phase}"
             )
+        digest = hashlib.sha256()
+        offset = 0
+        while offset < pinned_before.st_size:
+            chunk = os.pread(
+                descriptor,
+                min(1024 * 1024, pinned_before.st_size - offset),
+                offset,
+            )
+            if not chunk:
+                raise WorkflowError(
+                    f"COMMAND_RUNTIME_EXECUTABLE_SHORT_READ:{phase}"
+                )
+            digest.update(chunk)
+            offset += len(chunk)
+        configuration_payload = venv_configuration.read_bytes()
+        dependency_closure = _benchmark_python_dependency_closure()
+        source_after = os.lstat(source_path)
+        pinned_after = os.fstat(descriptor)
+        configuration_after = os.lstat(venv_configuration)
     except OSError as exc:
         raise WorkflowError(
             f"COMMAND_RUNTIME_SOURCE_ROUTE_STAT_FAILED:{phase}"
         ) from exc
-    source_identity = _benchmark_python_full_identity(source)
+    source_identity = _benchmark_python_full_identity(source_before)
+    pinned_identity = _benchmark_python_full_identity(pinned_before)
+    configuration_identity = _benchmark_python_full_identity(
+        configuration_before
+    )
     if (
         source_path.parent.name != "bin"
-        or not stat.S_ISREG(source.st_mode)
-        or source.st_mode & 0o111 == 0
-        or not stat.S_ISREG(configuration.st_mode)
-        or source_identity != _benchmark_python_full_identity(pinned)
+        or not stat.S_ISREG(source_before.st_mode)
+        or source_before.st_mode & 0o111 == 0
+        or not stat.S_ISREG(configuration_before.st_mode)
+        or (
+            expected_runtime is None
+            and source_identity != pinned_identity
+        )
+        or source_identity
+        != _benchmark_python_full_identity(source_after)
+        or pinned_identity
+        != _benchmark_python_full_identity(pinned_after)
+        or configuration_identity
+        != _benchmark_python_full_identity(configuration_after)
     ):
         raise WorkflowError(
             f"COMMAND_RUNTIME_SOURCE_ROUTE_IDENTITY_INVALID:{phase}"
         )
+    if expected_runtime is not None:
+        expected_source_identity = (
+            expected_runtime.identity[0],
+            expected_runtime.identity[1],
+            expected_runtime.identity[2],
+            expected_runtime.mode,
+            expected_runtime.identity[3],
+            expected_runtime.identity[4],
+            expected_runtime.identity[5],
+        )
+        if (
+            source_path != expected_runtime.source_path
+            or Path(fd_value) != expected_runtime.fd_path
+            or descriptor != expected_runtime.descriptor
+            or source_identity != expected_source_identity
+            or pinned_identity != expected_source_identity
+            or digest.hexdigest() != expected_runtime.sha256
+        ):
+            raise WorkflowError(
+                f"COMMAND_RUNTIME_EXECUTABLE_CLOSURE_CHANGED:{phase}"
+            )
+        if (
+            venv_configuration != expected_runtime.configuration_path
+            or configuration_identity
+            != expected_runtime.configuration_identity
+            or hashlib.sha256(configuration_payload).hexdigest()
+            != expected_runtime.configuration_sha256
+        ):
+            raise WorkflowError(
+                f"COMMAND_RUNTIME_VENV_CONFIGURATION_CHANGED:{phase}"
+            )
+        if dependency_closure != expected_runtime.dependency_closure:
+            raise WorkflowError(
+                f"COMMAND_RUNTIME_DEPENDENCY_CLOSURE_CHANGED:{phase}"
+            )
     return (
         source_identity,
-        _benchmark_python_full_identity(configuration),
+        configuration_identity,
     )
 
 
@@ -2694,6 +2868,7 @@ def _benchmark_python_subprocess_binding(
     descriptors: Sequence[int],
     *,
     phase: str,
+    expected_runtime: BenchmarkPythonRuntime | None = None,
 ) -> tuple[
     list[str],
     str | None,
@@ -2707,7 +2882,11 @@ def _benchmark_python_subprocess_binding(
 
     logical_command = list(command)
     runtime_fd = environment.get("S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH")
-    if not logical_command or runtime_fd is None or logical_command[0] != runtime_fd:
+    if not logical_command or runtime_fd is None:
+        if expected_runtime is not None:
+            raise WorkflowError(
+                f"COMMAND_RUNTIME_ENVIRONMENT_MISSING:{phase}"
+            )
         return logical_command, None, None
     source = environment.get("S1_4X_BENCHMARK_PYTHON_BIN")
     matched = re.fullmatch(r"/proc/self/fd/([0-9]+)", runtime_fd)
@@ -2715,13 +2894,20 @@ def _benchmark_python_subprocess_binding(
         source is None
         or matched is None
         or int(matched.group(1)) not in descriptors
+        or (
+            logical_command[0] == runtime_fd
+            and expected_runtime is None
+        )
     ):
         raise WorkflowError(f"COMMAND_RUNTIME_EXECUTION_BINDING_INVALID:{phase}")
     route_identity = _benchmark_python_source_route_identity(
         source,
         runtime_fd,
         phase=phase,
+        expected_runtime=expected_runtime,
     )
+    if logical_command[0] != runtime_fd:
+        return logical_command, None, route_identity
     return [source, *logical_command[1:]], runtime_fd, route_identity
 
 
@@ -2734,6 +2920,7 @@ def _assert_benchmark_python_route_unchanged(
         tuple[int, int, int, int, int, int, int],
     ]
     | None,
+    expected_runtime: BenchmarkPythonRuntime | None = None,
 ) -> None:
     """Nested child 전후 source/pyvenv.cfg route identity drift를 거부한다."""
 
@@ -2748,6 +2935,7 @@ def _assert_benchmark_python_route_unchanged(
             source,
             runtime_fd,
             phase=phase,
+            expected_runtime=expected_runtime,
         )
         != expected
     ):
@@ -2764,6 +2952,7 @@ def _run_logged(
     expected_exit_codes: frozenset[int] = frozenset({0}),
     pass_fds: Sequence[int] = (),
     portable_path_ids: Mapping[str, str] | None = None,
+    benchmark_python_runtime: BenchmarkPythonRuntime | None = None,
 ) -> dict[str, Any]:
     if phase not in CORRECTNESS_PHASES and not phase.startswith(("qualification-", "oci-")):
         raise WorkflowError(f"COMMAND_PHASE_INVALID:{phase}")
@@ -2789,6 +2978,7 @@ def _run_logged(
             environment,
             descriptors,
             phase=phase,
+            expected_runtime=benchmark_python_runtime,
         )
     )
     started_at = _iso_now()
@@ -2808,6 +2998,7 @@ def _run_logged(
         environment=environment,
         phase=phase,
         expected=source_route_identity,
+        expected_runtime=benchmark_python_runtime,
     )
     if _pass_fd_identities(descriptors, phase=phase) != before_fd_identities:
         raise WorkflowError(f"COMMAND_PASS_FD_IDENTITY_CHANGED:{phase}")
@@ -2903,6 +3094,7 @@ def _run_compatibility_logged(
     output_directory: Path,
     pass_fds: Sequence[int] = (),
     portable_path_ids: Mapping[str, str] | None = None,
+    benchmark_python_runtime: BenchmarkPythonRuntime | None = None,
 ) -> dict[str, Any]:
     """Compatibility 단계 하나를 raw stdout/stderr와 함께 실행해 기록한다."""
 
@@ -2933,6 +3125,7 @@ def _run_compatibility_logged(
             environment,
             descriptors,
             phase=phase,
+            expected_runtime=benchmark_python_runtime,
         )
     )
     started_at = _iso_now()
@@ -2954,6 +3147,7 @@ def _run_compatibility_logged(
         environment=environment,
         phase=phase,
         expected=source_route_identity,
+        expected_runtime=benchmark_python_runtime,
     )
     if _pass_fd_identities(descriptors, phase=phase) != before_fd_identities:
         raise WorkflowError(f"COMPATIBILITY_PASS_FD_IDENTITY_CHANGED:{phase}")
@@ -3103,6 +3297,7 @@ def _correctness(arguments: argparse.Namespace) -> None:
             environment=environment,
             phase="build",
             output_directory=output,
+            benchmark_python_runtime=python_runtime,
         ),
         _run_logged(
             test,
@@ -3110,6 +3305,7 @@ def _correctness(arguments: argparse.Namespace) -> None:
             environment=environment,
             phase="test",
             output_directory=output,
+            benchmark_python_runtime=python_runtime,
         ),
     ]
     candidate_binary = _find_candidate_binary(
@@ -3168,6 +3364,7 @@ def _correctness(arguments: argparse.Namespace) -> None:
                 environment=environment,
                 phase=process_phase,
                 output_directory=output,
+                benchmark_python_runtime=python_runtime,
             )
         )
         _absolute_regular(actual, label=f"{label.upper()}_ACTUAL")
@@ -3194,6 +3391,7 @@ def _correctness(arguments: argparse.Namespace) -> None:
                     compare_script.descriptor,
                 ),
                 portable_path_ids=python_path_ids,
+                benchmark_python_runtime=python_runtime,
             )
         )
         _comparison_status(comparison)
@@ -3613,6 +3811,7 @@ def _qualification(arguments: argparse.Namespace) -> None:
                         docker_client.descriptor,
                     ),
                     portable_path_ids=host_path_ids,
+                    benchmark_python_runtime=marker_python,
                 )
             finally:
                 # Host가 정책상 실패해도 route drift 검증은 생략하지 않는다.
@@ -3634,6 +3833,9 @@ def _qualification(arguments: argparse.Namespace) -> None:
             )
             marker_path = output / f"{prefix}-measurement-state.json"
             marker_argv = [
+                "/usr/bin/env",
+                "-a",
+                str(marker_python.source_path),
                 str(marker_python.fd_path),
                 str(marker_script.fd_path),
                 "mark-measurement-entered",
@@ -3712,6 +3914,9 @@ def _qualification(arguments: argparse.Namespace) -> None:
                     "S1_4X_LARGE_FIXTURE_ROOT": str(large_fixture_root),
                     "S1_4X_BENCHMARK_QUALIFICATION": str(marker_path),
                     "S1_4X_BENCHMARK_MARKER_PYTHON": str(marker_python.fd_path),
+                    "S1_4X_BENCHMARK_MARKER_PYTHON_SOURCE_PATH": str(
+                        marker_python.source_path
+                    ),
                     "S1_4X_BENCHMARK_MARKER_PYTHON_SHA256": (
                         configured_python_sha256
                     ),
@@ -3732,6 +3937,7 @@ def _qualification(arguments: argparse.Namespace) -> None:
                     marker_python.descriptor,
                     marker_script.descriptor,
                 ),
+                benchmark_python_runtime=marker_python,
             )
             finished_at = _iso_now()
             raw = strict_json_load(raw_report)
@@ -4130,6 +4336,7 @@ def _validate_correctness_receipt(
                 environment,
                 replay_descriptors,
                 phase=f"{label}-compare-replay",
+                expected_runtime=python_runtime,
             )
             completed = subprocess.run(
                 replay_execution_command,
@@ -4145,6 +4352,7 @@ def _validate_correctness_receipt(
                 environment=environment,
                 phase=f"{label}-compare-replay",
                 expected=replay_source_route_identity,
+                expected_runtime=python_runtime,
             )
             if (
                 completed.returncode != 0
@@ -5514,6 +5722,7 @@ def _replay_compatibility_success(arguments: argparse.Namespace) -> None:
             output_directory=output,
             pass_fds=pass_fds,
             portable_path_ids=portable_path_ids,
+            benchmark_python_runtime=python_runtime,
         )
         actual_records.append(record)
         portable_records.extend(
@@ -7070,6 +7279,7 @@ def _run_pinned_oci_docker_logged(
     environment: Mapping[str, str],
     phase: str,
     output_directory: Path,
+    benchmark_python_runtime: BenchmarkPythonRuntime,
 ) -> dict[str, Any]:
     """Docker command를 retained FD로만 실행하고 receipt에는 portable ID를 남긴다."""
 
@@ -7084,6 +7294,7 @@ def _run_pinned_oci_docker_logged(
         output_directory=output_directory,
         pass_fds=(client.descriptor,),
         portable_path_ids={str(client.fd_path): client.path_id},
+        benchmark_python_runtime=benchmark_python_runtime,
     )
 
 
@@ -7372,6 +7583,7 @@ def _oci_correctness(arguments: argparse.Namespace) -> None:
             environment=environment,
             phase=phase,
             output_directory=output,
+            benchmark_python_runtime=python_runtime,
         )
         after = snapshot_oci_docker_stage(
             stage=phase,
@@ -7419,6 +7631,7 @@ def _oci_correctness(arguments: argparse.Namespace) -> None:
             environment=environment,
             phase="oci-stack-build",
             output_directory=output,
+            benchmark_python_runtime=python_runtime,
         )
     ]
     context_show_command = build_oci_context_show_command(docker)
@@ -7676,6 +7889,7 @@ def _oci_correctness(arguments: argparse.Namespace) -> None:
                     compare_script.descriptor,
                 ),
                 portable_path_ids=compare_path_ids,
+                benchmark_python_runtime=python_runtime,
             )
         )
         _comparison_status(comparison)

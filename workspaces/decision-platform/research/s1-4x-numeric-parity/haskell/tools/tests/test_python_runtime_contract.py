@@ -125,17 +125,28 @@ class PythonRuntimeContractTests(unittest.TestCase):
             with self.subTest(wrapper=name):
                 self.assertIn("python-runtime.sh", source)
                 self.assertIn("s1_4x_pin_benchmark_python", source)
-                self.assertRegex(
-                    source,
-                    r"s1_4x_(?:run|exec)_benchmark_python",
-                )
-                self.assertIsNone(
-                    re.search(
-                        r'(?m)^\s*(?:exec\s+)?"\$(?:S1_4X_)?'
-                        r'BENCHMARK_PYTHON_PINNED_FD_PATH"',
+                if name == "run-benchmark-block.sh":
+                    self.assertIn(
+                        "s1_4x_assert_benchmark_python_closure",
                         source,
                     )
-                )
+                    self.assertIn(
+                        'exec /usr/bin/env -i -a "$BENCHMARK_PYTHON"',
+                        source,
+                    )
+                else:
+                    self.assertRegex(
+                        source,
+                        r"s1_4x_(?:run|exec)_benchmark_python",
+                    )
+                if name != "run-benchmark-block.sh":
+                    self.assertIsNone(
+                        re.search(
+                            r'(?m)^\s*(?:exec\s+)?"\$(?:S1_4X_)?'
+                            r'BENCHMARK_PYTHON_PINNED_FD_PATH"',
+                            source,
+                        )
+                    )
 
     def test_system_python_3_14_is_rejected(self) -> None:
         system_python = Path("/usr/bin/python3").resolve(strict=True)
@@ -210,6 +221,7 @@ class PythonRuntimeContractTests(unittest.TestCase):
                 "    portable_path_ids={\n"
                 "        fd_path: workflow._benchmark_python_path_id(runtime),\n"
                 "    },\n"
+                "    benchmark_python_runtime=runtime,\n"
                 ")\n"
                 "child = json.loads(\n"
                 "    (Path(sys.argv[1]) / 'canonical-compare.stdout').read_text()\n"

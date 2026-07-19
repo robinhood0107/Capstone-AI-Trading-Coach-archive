@@ -8,6 +8,7 @@ import os
 import sys
 import tempfile
 import unittest
+import venv
 from pathlib import Path
 
 
@@ -386,6 +387,54 @@ class OciCorrectnessContractTests(unittest.TestCase):
                 docker,
                 expected_sha256=hashlib.sha256(original).hexdigest(),
             )
+            python_root = root / "benchmark-python"
+            venv.EnvBuilder(with_pip=False, symlinks=False).create(
+                python_root
+            )
+            python_source = python_root / "bin/python"
+            python_descriptor = os.open(python_source, os.O_RDONLY)
+            python_fd_path = f"/proc/self/fd/{python_descriptor}"
+            python_stat = os.stat(python_source)
+            configuration = python_root / "pyvenv.cfg"
+            configuration_stat = os.stat(configuration)
+            runtime_environment = {
+                "S1_4X_BENCHMARK_PYTHON_BIN": str(python_source),
+                "S1_4X_BENCHMARK_PYTHON_SHA256": hashlib.sha256(
+                    python_source.read_bytes()
+                ).hexdigest(),
+                "S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH": python_fd_path,
+            }
+            python_runtime = helper.BenchmarkPythonRuntime(
+                source_path=python_source,
+                fd_path=Path(python_fd_path),
+                descriptor=python_descriptor,
+                sha256=runtime_environment[
+                    "S1_4X_BENCHMARK_PYTHON_SHA256"
+                ],
+                mode=python_stat.st_mode,
+                identity=(
+                    python_stat.st_dev,
+                    python_stat.st_ino,
+                    python_stat.st_size,
+                    python_stat.st_mtime_ns,
+                    python_stat.st_ctime_ns,
+                    python_stat.st_nlink,
+                ),
+                configuration_path=configuration,
+                configuration_sha256=hashlib.sha256(
+                    configuration.read_bytes()
+                ).hexdigest(),
+                configuration_identity=(
+                    configuration_stat.st_dev,
+                    configuration_stat.st_ino,
+                    configuration_stat.st_size,
+                    configuration_stat.st_mode,
+                    configuration_stat.st_mtime_ns,
+                    configuration_stat.st_ctime_ns,
+                    configuration_stat.st_nlink,
+                ),
+                dependency_closure=("4.26.0", "2.5.1", "2.5.1"),
+            )
             saved = root / "docker.original"
             try:
                 record = helper._run_pinned_oci_docker_logged(
@@ -396,9 +445,11 @@ class OciCorrectnessContractTests(unittest.TestCase):
                         "PATH": "/usr/bin:/bin",
                         "LC_ALL": "C",
                         "DOCKER_CONFIG": str(docker_config),
+                        **runtime_environment,
                     },
                     phase="oci-pinned-client",
                     output_directory=output,
+                    benchmark_python_runtime=python_runtime,
                 )
                 self.assertEqual(
                     (output / "oci-pinned-client.stdout").read_text(
@@ -423,15 +474,18 @@ class OciCorrectnessContractTests(unittest.TestCase):
                             "PATH": "/usr/bin:/bin",
                             "LC_ALL": "C",
                             "DOCKER_CONFIG": str(docker_config),
+                            **runtime_environment,
                         },
                         phase="oci-aba",
                         output_directory=output,
+                        benchmark_python_runtime=python_runtime,
                     )
                 self.assertFalse((output / "oci-aba.stdout").exists())
             finally:
                 if saved.exists():
                     docker.unlink(missing_ok=True)
                     saved.rename(docker)
+                os.close(python_descriptor)
                 os.close(pinned.descriptor)
 
     def test_oci_flow_uses_exact_client_sha_and_per_command_trust_snapshots(

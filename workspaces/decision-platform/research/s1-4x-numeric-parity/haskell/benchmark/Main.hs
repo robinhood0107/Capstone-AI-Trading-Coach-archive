@@ -291,6 +291,10 @@ setupBenchmarkEnvironment fixtureRoot qualificationPath benchmarkCases = do
 
 markMeasurementEntered :: FilePath -> IO ()
 markMeasurementEntered path = do
+  pythonSourcePath <-
+    verifiedMarkerSource
+      "S1_4X_BENCHMARK_MARKER_PYTHON_SOURCE_PATH"
+      "S1_4X_BENCHMARK_MARKER_PYTHON_SHA256"
   pythonPath <-
     verifiedMarkerInput
       "S1_4X_BENCHMARK_MARKER_PYTHON"
@@ -301,8 +305,11 @@ markMeasurementEntered path = do
       "S1_4X_BENCHMARK_MARKER_SCRIPT_SHA256"
   (exitCode, standardOutput, standardError) <-
     readProcessWithExitCode
-      pythonPath
-      [ markerPath,
+      "/usr/bin/env"
+      [ "-a",
+        pythonSourcePath,
+        pythonPath,
+        markerPath,
         "mark-measurement-entered",
         "--qualification",
         path
@@ -314,6 +321,16 @@ markMeasurementEntered path = do
         && null standardError
     )
     (fail "INVALID_PRE_RUN_QUALIFICATION_STATE")
+
+verifiedMarkerSource :: String -> String -> IO FilePath
+verifiedMarkerSource pathVariable shaVariable = do
+  path <- requiredConfiguredPath pathVariable
+  expectedSha256 <- requiredConfiguredValue shaVariable
+  payload <- BS.readFile path
+  unless
+    (sha256Hex payload == TextEncoding.encodeUtf8 (Text.pack expectedSha256))
+    (fail "benchmark marker Python source SHA-256 mismatch")
+  pure path
 
 verifiedMarkerInput :: String -> String -> IO FilePath
 verifiedMarkerInput pathVariable shaVariable = do

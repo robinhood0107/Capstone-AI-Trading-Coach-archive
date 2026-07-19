@@ -51,6 +51,10 @@ class CorrectnessProfileContractTests(unittest.TestCase):
                 sha256="a" * 64,
                 mode=0o100755,
                 identity=(1, 2, 3, 4, 5, 1),
+                configuration_path=Path("/tools/pyvenv.cfg"),
+                configuration_sha256="b" * 64,
+                configuration_identity=(6, 7, 8, 0o100644, 9, 10, 1),
+                dependency_closure=("4.26.0", "2.5.1", "2.5.1"),
             )
             with mock.patch.dict(
                 os.environ,

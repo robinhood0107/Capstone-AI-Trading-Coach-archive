@@ -464,6 +464,10 @@ class BenchmarkBlockHelperTests(unittest.TestCase):
                         prefix,
                         label="MARKER_PYTHON",
                     )
+                python_runtime = helper._snapshot_benchmark_python_runtime(
+                    pinned_python,
+                    require_current_process=False,
+                )
                 replacement = root / "replacement.py"
                 replacement.write_text(
                     'print(\'{"status": "FAIL"}\')\n',
@@ -487,6 +491,7 @@ class BenchmarkBlockHelperTests(unittest.TestCase):
                             environment=environment,
                             pinned_executables=(pinned_python,),
                             pinned_files=(pinned_script,),
+                            benchmark_python_runtime=python_runtime,
                         )
                         self.assertEqual(
                             result,

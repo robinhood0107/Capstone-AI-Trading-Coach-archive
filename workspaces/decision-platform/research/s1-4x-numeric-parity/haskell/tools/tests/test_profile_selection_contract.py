@@ -228,6 +228,9 @@ class ProfileSelectionContractTests(unittest.TestCase):
                 marker_script_pinned_fd_path="/proc/self/fd/71",
                 marker_script_sha256="6" * 64,
                 marker_argv=[
+                    "/usr/bin/env",
+                    "-a",
+                    "/usr/bin/python3.14",
                     "/proc/self/fd/70",
                     "/proc/self/fd/71",
                     "mark-measurement-entered",
@@ -271,6 +274,12 @@ class ProfileSelectionContractTests(unittest.TestCase):
                 ("jsonschema", "4.26.0"),
                 ("numpy", "2.5.1"),
             ):
+                package_root = site_packages / package
+                package_root.mkdir()
+                (package_root / "__init__.py").write_text(
+                    f'__version__ = "{version}"\n',
+                    encoding="utf-8",
+                )
                 metadata_root = (
                     site_packages / f"{package}-{version}.dist-info"
                 )
@@ -295,6 +304,9 @@ class ProfileSelectionContractTests(unittest.TestCase):
             python_fd_path = Path(f"/proc/self/fd/{python_descriptor}")
             marker_path = temporary_root / "measurement-state.json"
             marker_argv = [
+                "/usr/bin/env",
+                "-a",
+                str(python_source),
                 str(python_fd_path),
                 str(pinned_script.fd_path),
                 "mark-measurement-entered",
@@ -327,8 +339,7 @@ class ProfileSelectionContractTests(unittest.TestCase):
             )
             try:
                 completed = subprocess.run(
-                    [str(python_source), *marker_argv[1:]],
-                    executable=str(python_fd_path),
+                    marker_argv,
                     cwd=temporary_root,
                     env={
                         "LC_ALL": "C",
@@ -521,6 +532,9 @@ class ProfileSelectionContractTests(unittest.TestCase):
                     python_stat = os.fstat(python_descriptor)
                     script_stat = os.fstat(script_descriptor)
                     raw_argv = [
+                        "/usr/bin/env",
+                        "-a",
+                        str(python_source),
                         f"/proc/self/fd/{python_descriptor}",
                         f"/proc/self/fd/{script_descriptor}",
                         "mark-measurement-entered",

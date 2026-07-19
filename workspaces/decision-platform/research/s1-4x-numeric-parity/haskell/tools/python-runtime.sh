@@ -8,6 +8,8 @@ s1_4x_benchmark_python_route_identity() {
   local resolved_source
   local source_identity
   local pinned_identity
+  local actual_sha256
+  local expected_sha256="${S1_4X_BENCHMARK_PYTHON_SHA256:?S1_4X_BENCHMARK_PYTHON_SHA256 is required}"
 
   if [[ "$source_path" != /* \
     || ! -f "$source_path" \
@@ -43,6 +45,22 @@ s1_4x_benchmark_python_route_identity() {
     echo "benchmark Python source route does not match the pinned FD" >&2
     return 69
   fi
+  actual_sha256="$(
+    /usr/bin/sha256sum "$pinned_path" | /usr/bin/awk '{print $1}'
+  )" || {
+    echo "benchmark Python pinned FD SHA-256 failed" >&2
+    return 69
+  }
+  if [[ "$actual_sha256" != "$expected_sha256" ]]; then
+    echo "benchmark Python pinned FD SHA-256 mismatch" >&2
+    return 69
+  fi
+  if [[ -n "${S1_4X_BENCHMARK_PYTHON_INITIAL_ROUTE_IDENTITY:-}" \
+    && "$source_identity" \
+      != "$S1_4X_BENCHMARK_PYTHON_INITIAL_ROUTE_IDENTITY" ]]; then
+    echo "benchmark Python executable identity changed after pin" >&2
+    return 69
+  fi
   printf '%s\n' "$source_identity"
 }
 
@@ -51,6 +69,8 @@ s1_4x_benchmark_python_venv_identity() {
   local bin_directory="${source_path%/*}"
   local venv_root="${bin_directory%/*}"
   local configuration="$venv_root/pyvenv.cfg"
+  local configuration_identity
+  local configuration_sha256
   local resolved_configuration
 
   if [[ "$bin_directory" != "$venv_root/bin" \
@@ -69,7 +89,31 @@ s1_4x_benchmark_python_venv_identity() {
     echo "benchmark Python pyvenv.cfg route is unsafe" >&2
     return 69
   fi
-  /usr/bin/stat -Lc '%d:%i:%s:%f:%y:%z:%h' -- "$configuration"
+  configuration_identity="$(
+    /usr/bin/stat -Lc '%d:%i:%s:%f:%y:%z:%h' -- "$configuration"
+  )" || {
+    echo "benchmark Python pyvenv.cfg stat failed" >&2
+    return 69
+  }
+  configuration_sha256="$(
+    /usr/bin/sha256sum "$configuration" | /usr/bin/awk '{print $1}'
+  )" || {
+    echo "benchmark Python pyvenv.cfg SHA-256 failed" >&2
+    return 69
+  }
+  if [[ -n "${S1_4X_BENCHMARK_PYTHON_INITIAL_VENV_IDENTITY:-}" \
+    && "$configuration_identity" \
+      != "$S1_4X_BENCHMARK_PYTHON_INITIAL_VENV_IDENTITY" ]]; then
+    echo "benchmark Python pyvenv.cfg changed after pin" >&2
+    return 69
+  fi
+  if [[ -n "${S1_4X_BENCHMARK_PYTHON_INITIAL_VENV_SHA256:-}" \
+    && "$configuration_sha256" \
+      != "$S1_4X_BENCHMARK_PYTHON_INITIAL_VENV_SHA256" ]]; then
+    echo "benchmark Python pyvenv.cfg changed after pin" >&2
+    return 69
+  fi
+  printf '%s\n' "$configuration_identity"
 }
 
 s1_4x_prepare_benchmark_python_environment() {
@@ -87,6 +131,63 @@ s1_4x_prepare_benchmark_python_environment() {
     esac
   done < <(compgen -e)
   export PYTHONDONTWRITEBYTECODE=1
+}
+
+s1_4x_benchmark_python_dependency_closure() {
+  local dependency_closure
+
+  dependency_closure="$(
+    (
+      s1_4x_prepare_benchmark_python_environment || exit "$?"
+      exec -a "$S1_4X_BENCHMARK_PYTHON_BIN" \
+        "$S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH" -I -c \
+        'import importlib.metadata
+
+import jsonschema
+import numpy
+
+print(
+    importlib.metadata.version("jsonschema"),
+    importlib.metadata.version("numpy"),
+    numpy.__version__,
+    sep="|",
+)'
+    )
+  )" || {
+    echo "benchmark Python external venv dependency closure failed" >&2
+    return 69
+  }
+  if [[ "$dependency_closure" != "4.26.0|2.5.1|2.5.1" ]]; then
+    if [[ -n "${S1_4X_BENCHMARK_PYTHON_INITIAL_DEPENDENCIES:-}" ]]; then
+      echo "benchmark Python dependency closure changed after pin" >&2
+    else
+      echo "benchmark Python external venv dependency closure failed" >&2
+    fi
+    return 69
+  fi
+  if [[ -n "${S1_4X_BENCHMARK_PYTHON_INITIAL_DEPENDENCIES:-}" \
+    && "$dependency_closure" \
+      != "$S1_4X_BENCHMARK_PYTHON_INITIAL_DEPENDENCIES" ]]; then
+    echo "benchmark Python dependency closure changed after pin" >&2
+    return 69
+  fi
+  printf '%s\n' "$dependency_closure"
+}
+
+s1_4x_assert_benchmark_python_closure() {
+  local route_identity
+  local venv_identity
+  local dependency_closure
+
+  route_identity="$(s1_4x_benchmark_python_route_identity)" || return "$?"
+  venv_identity="$(s1_4x_benchmark_python_venv_identity)" || return "$?"
+  dependency_closure="$(
+    s1_4x_benchmark_python_dependency_closure
+  )" || return "$?"
+  printf '%s\n%s\n%s\n' \
+    "$route_identity" \
+    "$venv_identity" \
+    "$dependency_closure"
 }
 
 s1_4x_run_benchmark_python_binary_probe() {
@@ -109,31 +210,18 @@ s1_4x_run_benchmark_python_binary_probe() {
 }
 
 s1_4x_run_benchmark_python() {
-  local before_source_identity
-  local before_venv_identity
-  local after_source_identity
-  local after_venv_identity
+  local before_closure
+  local after_closure
   local child_status=0
 
-  before_source_identity="$(
-    s1_4x_benchmark_python_route_identity
-  )" || return "$?"
-  before_venv_identity="$(
-    s1_4x_benchmark_python_venv_identity
-  )" || return "$?"
+  before_closure="$(s1_4x_assert_benchmark_python_closure)" || return "$?"
   (
     s1_4x_prepare_benchmark_python_environment || exit "$?"
     exec -a "$S1_4X_BENCHMARK_PYTHON_BIN" \
       "$S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH" "$@"
   ) || child_status=$?
-  after_source_identity="$(
-    s1_4x_benchmark_python_route_identity
-  )" || return "$?"
-  after_venv_identity="$(
-    s1_4x_benchmark_python_venv_identity
-  )" || return "$?"
-  if [[ "$after_source_identity" != "$before_source_identity" \
-    || "$after_venv_identity" != "$before_venv_identity" ]]; then
+  after_closure="$(s1_4x_assert_benchmark_python_closure)" || return "$?"
+  if [[ "$after_closure" != "$before_closure" ]]; then
     echo "benchmark Python venv route changed during execution" >&2
     return 69
   fi
@@ -141,8 +229,7 @@ s1_4x_run_benchmark_python() {
 }
 
 s1_4x_exec_benchmark_python() {
-  s1_4x_benchmark_python_route_identity >/dev/null || return "$?"
-  s1_4x_benchmark_python_venv_identity >/dev/null || return "$?"
+  s1_4x_assert_benchmark_python_closure >/dev/null || return "$?"
   s1_4x_prepare_benchmark_python_environment || return "$?"
   exec -a "$S1_4X_BENCHMARK_PYTHON_BIN" \
     "$S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH" "$@"
@@ -158,6 +245,11 @@ s1_4x_pin_benchmark_python() {
   local runtime_identity
   local venv_before_identity
   local venv_after_identity
+
+  unset S1_4X_BENCHMARK_PYTHON_INITIAL_ROUTE_IDENTITY
+  unset S1_4X_BENCHMARK_PYTHON_INITIAL_VENV_IDENTITY
+  unset S1_4X_BENCHMARK_PYTHON_INITIAL_VENV_SHA256
+  unset S1_4X_BENCHMARK_PYTHON_INITIAL_DEPENDENCIES
 
   if [[ "$source_path" != /* \
     || "$source_path" == *":"* \
@@ -240,28 +332,9 @@ print(
     return 69
   fi
   venv_before_identity="$(s1_4x_benchmark_python_venv_identity)" || return "$?"
-  if ! s1_4x_run_benchmark_python -I -c \
-    'import importlib.metadata
-import os
-import sys
-
-import jsonschema
-import numpy
-
-source = os.environ["S1_4X_BENCHMARK_PYTHON_BIN"]
-expected_prefix = os.path.dirname(os.path.dirname(source))
-if (
-    sys.executable != source
-    or sys.prefix != expected_prefix
-    or sys.base_prefix == sys.prefix
-    or importlib.metadata.version("jsonschema") != "4.26.0"
-    or importlib.metadata.version("numpy") != "2.5.1"
-    or numpy.__version__ != "2.5.1"
-):
-    raise SystemExit("benchmark Python external venv dependency closure mismatch")'; then
-    echo "benchmark Python external venv dependency closure failed" >&2
-    return 69
-  fi
+  S1_4X_BENCHMARK_PYTHON_INITIAL_DEPENDENCIES="$(
+    s1_4x_benchmark_python_dependency_closure
+  )" || return "$?"
   venv_after_identity="$(s1_4x_benchmark_python_venv_identity)" || return "$?"
   if [[ "$venv_after_identity" != "$venv_before_identity" ]]; then
     echo "benchmark Python pyvenv.cfg changed during validation" >&2
@@ -272,4 +345,18 @@ if (
     echo "benchmark Python source route changed during validation" >&2
     return 69
   fi
+  S1_4X_BENCHMARK_PYTHON_INITIAL_ROUTE_IDENTITY="$after_identity"
+  S1_4X_BENCHMARK_PYTHON_INITIAL_VENV_IDENTITY="$venv_after_identity"
+  S1_4X_BENCHMARK_PYTHON_INITIAL_VENV_SHA256="$(
+    /usr/bin/sha256sum \
+      "${S1_4X_BENCHMARK_PYTHON_BIN%/*/*}/pyvenv.cfg" \
+      | /usr/bin/awk '{print $1}'
+  )" || {
+    echo "benchmark Python pyvenv.cfg SHA-256 failed" >&2
+    return 69
+  }
+  export S1_4X_BENCHMARK_PYTHON_INITIAL_ROUTE_IDENTITY
+  export S1_4X_BENCHMARK_PYTHON_INITIAL_VENV_IDENTITY
+  export S1_4X_BENCHMARK_PYTHON_INITIAL_VENV_SHA256
+  export S1_4X_BENCHMARK_PYTHON_INITIAL_DEPENDENCIES
 }
