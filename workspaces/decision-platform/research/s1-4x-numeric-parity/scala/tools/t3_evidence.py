@@ -1652,7 +1652,7 @@ def validate_jmh_stdout_precompile_binding(
     case_root: Path,
     snapshot: SealedEvidenceSnapshot,
 ) -> None:
-    """Actual JMH stdout의 첫 classpath 3행을 compile log/receipt와 exact 결속한다."""
+    """Actual JMH build-role과 fork classpath를 finalized receipt에 결속한다."""
 
     compile_artifact = snapshot.capture(
         compile_stdout,
@@ -1674,14 +1674,150 @@ def validate_jmh_stdout_precompile_binding(
         receipt=receipt,
         physical_case_root=artifact_root / case_root,
     )
+    runtime_closure = receipt.get("jmhRuntimeClosure")
+    if (
+        receipt.get("jmhRuntimeClosureSha256")
+        != canonical_sha256(runtime_closure)
+        or receipt.get("precompileRuntimeClasspathSha256")
+        != hashlib.sha256(prefix[2].encode("utf-8")).hexdigest()
+    ):
+        raise T3EvidenceError("JMH_RUN_STDOUT_BINDING_INVALID")
+    try:
+        jmh_precompile.validate_jmh_runtime_closure_evidence(
+            runtime_closure,
+            classpath_entries=receipt.get("classpathEntries"),
+            classpath_post_run=receipt.get("classpathPostRun"),
+            scala_class_output_path_id=receipt.get(
+                "scalaClassOutputPathId"
+            ),
+            jmh_generator=receipt.get("jmhGenerator"),
+            generated_sources_sha256=receipt.get(
+                "generatedSourcesSha256"
+            ),
+        )
+    except jmh_precompile.PrecompileError as error:
+        raise T3EvidenceError(
+            "JMH_RUN_STDOUT_BINDING_INVALID"
+        ) from error
+
+    if "\x00" in jmh_raw or "\r" in jmh_raw:
+        raise T3EvidenceError("JMH_RUN_STDOUT_BINDING_INVALID")
     jmh_lines = jmh_raw.splitlines()
-    runtime_classpath_sha256 = hashlib.sha256(
-        prefix[2].encode("utf-8")
-    ).hexdigest()
     if (
         len(jmh_lines) < 3
-        or tuple(jmh_lines[:2]) != prefix[:2]
         or jmh_lines[2] != "# JMH version: 1.37"
+    ):
+        raise T3EvidenceError("JMH_RUN_STDOUT_BINDING_INVALID")
+    processing = re.fullmatch(
+        r'Processing ([1-9][0-9]*) classes from (.+) '
+        r'with "reflection" generator',
+        jmh_lines[0],
+    )
+    generated = re.fullmatch(
+        r"Writing out Java source to (.+) and resources to (.+)",
+        jmh_lines[1],
+    )
+    runtime_generator = (
+        runtime_closure.get("generator")
+        if isinstance(runtime_closure, dict)
+        else None
+    )
+    runtime_entries = (
+        runtime_closure.get("runtimeClasspathEntries")
+        if isinstance(runtime_closure, dict)
+        else None
+    )
+    if (
+        processing is None
+        or generated is None
+        or not isinstance(runtime_generator, dict)
+        or not isinstance(runtime_entries, list)
+        or int(processing.group(1))
+        != runtime_generator.get("processedClassCount")
+    ):
+        raise T3EvidenceError("JMH_RUN_STDOUT_BINDING_INVALID")
+
+    class_input = Path(processing.group(2))
+    source_root = Path(generated.group(1))
+    resource_root = Path(generated.group(2))
+    class_input_id = str(
+        runtime_generator.get("classInputPathId", "")
+    )
+    if not class_input_id.startswith("SCALA_WORKSPACE/"):
+        raise T3EvidenceError("JMH_RUN_STDOUT_BINDING_INVALID")
+    class_input_relative = Path(
+        class_input_id.removeprefix("SCALA_WORKSPACE/")
+    )
+    if (
+        not class_input.is_absolute()
+        or len(class_input_relative.parts) < 2
+        or tuple(class_input.parts[-len(class_input_relative.parts) :])
+        != class_input_relative.parts
+    ):
+        raise T3EvidenceError("JMH_RUN_STDOUT_BINDING_INVALID")
+    runtime_workspace = Path(
+        *class_input.parts[: -len(class_input_relative.parts)]
+    )
+    if not runtime_workspace.is_absolute():
+        raise T3EvidenceError("JMH_RUN_STDOUT_BINDING_INVALID")
+
+    def runtime_workspace_path(path_id: Any) -> Path:
+        if (
+            not isinstance(path_id, str)
+            or not path_id.startswith("SCALA_WORKSPACE/")
+        ):
+            raise T3EvidenceError("JMH_RUN_STDOUT_BINDING_INVALID")
+        return runtime_workspace / path_id.removeprefix(
+            "SCALA_WORKSPACE/"
+        )
+
+    if (
+        class_input != runtime_workspace_path(class_input_id)
+        or source_root
+        != runtime_workspace_path(
+            runtime_generator.get("generatedSourceRootPathId")
+        )
+        or resource_root
+        != runtime_workspace_path(
+            runtime_generator.get("generatedResourceRootPathId")
+        )
+    ):
+        raise T3EvidenceError("JMH_RUN_STDOUT_BINDING_INVALID")
+
+    precompile_entries = receipt.get("classpathEntries")
+    precompile_paths = prefix[2].split(os.pathsep)
+    if (
+        not isinstance(precompile_entries, list)
+        or len(precompile_paths) != len(precompile_entries)
+        or len(runtime_entries) != len(precompile_entries)
+    ):
+        raise T3EvidenceError("JMH_RUN_STDOUT_BINDING_INVALID")
+    runtime_paths: list[str] = []
+    for precompile_path, precompile_item, runtime_item in zip(
+        precompile_paths,
+        precompile_entries,
+        runtime_entries,
+        strict=True,
+    ):
+        if (
+            not isinstance(precompile_item, dict)
+            or not isinstance(runtime_item, dict)
+        ):
+            raise T3EvidenceError("JMH_RUN_STDOUT_BINDING_INVALID")
+        precompile_path_id = precompile_item.get("pathId")
+        runtime_path_id = runtime_item.get("pathId")
+        if runtime_path_id == precompile_path_id:
+            runtime_paths.append(precompile_path)
+        else:
+            runtime_paths.append(
+                str(runtime_workspace_path(runtime_path_id))
+            )
+    runtime_classpath_sha256 = hashlib.sha256(
+        os.pathsep.join(runtime_paths).encode("utf-8")
+    ).hexdigest()
+    if (
+        runtime_closure.get("runtimeClasspathSha256")
+        != runtime_classpath_sha256
         or receipt.get("runtimeClasspathSha256")
         != runtime_classpath_sha256
         or not isinstance(fork_evidence, list)
@@ -1735,6 +1871,9 @@ def validate_generated_java_precompile(
         "classpathEntriesSha256",
         "classpathPostRun",
         "classpathPostRunSha256",
+        "jmhRuntimeClosure",
+        "jmhRuntimeClosureSha256",
+        "precompileRuntimeClasspathSha256",
         "runtimeClasspathSha256",
         "scalaClassOutputPathId",
         "generatedClassOutputPathId",
@@ -1882,9 +2021,9 @@ def validate_generated_java_precompile(
         receipt=receipt,
         physical_case_root=artifact_root / case_root,
     )
-    if receipt.get("runtimeClasspathSha256") != hashlib.sha256(
-        compile_prefix[2].encode("utf-8")
-    ).hexdigest():
+    if receipt.get(
+        "precompileRuntimeClasspathSha256"
+    ) != hashlib.sha256(compile_prefix[2].encode("utf-8")).hexdigest():
         raise T3EvidenceError("JMH_PRECOMPILE_STDOUT_BINDING_INVALID")
 
     generated_sources = receipt.get("generatedSources")
@@ -2091,6 +2230,37 @@ def validate_generated_java_precompile(
         raise T3EvidenceError(
             "JMH_PRECOMPILE_CLASSPATH_POST_RUN_INVALID"
         ) from error
+    runtime_closure = receipt.get("jmhRuntimeClosure")
+    if (
+        receipt.get("jmhRuntimeClosureSha256")
+        != canonical_sha256(runtime_closure)
+    ):
+        raise T3EvidenceError(
+            "JMH_PRECOMPILE_RUNTIME_CLOSURE_INVALID"
+        )
+    try:
+        jmh_precompile.validate_jmh_runtime_closure_evidence(
+            runtime_closure,
+            classpath_entries=classpath_entries,
+            classpath_post_run=classpath_post_run,
+            scala_class_output_path_id=class_output,
+            jmh_generator=generator,
+            generated_sources_sha256=receipt.get(
+                "generatedSourcesSha256"
+            ),
+        )
+    except jmh_precompile.PrecompileError as error:
+        raise T3EvidenceError(
+            "JMH_PRECOMPILE_RUNTIME_CLOSURE_INVALID"
+        ) from error
+    if (
+        not isinstance(runtime_closure, dict)
+        or receipt.get("runtimeClasspathSha256")
+        != runtime_closure.get("runtimeClasspathSha256")
+    ):
+        raise T3EvidenceError(
+            "JMH_PRECOMPILE_RUNTIME_CLOSURE_INVALID"
+        )
 
     generated_classes = receipt.get("generatedClasses")
     class_directory = artifact_root / case_root / jmh_precompile.GENERATED_CLASSES_NAME
