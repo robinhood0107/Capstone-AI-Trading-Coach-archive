@@ -773,7 +773,10 @@ def selector_fixture(
                 root / "_physical-scala-workspace"
             ).resolve()
             physical_workspace.mkdir(parents=True, exist_ok=True)
-            physical_coursier = Path("/sealed/coursier")
+            physical_coursier = (
+                root / "_physical-coursier"
+            ).resolve()
+            physical_coursier.mkdir(parents=True, exist_ok=True)
             runtime_class_output_id = (
                 "SCALA_WORKSPACE/.scala-build/"
                 "selector_runtime_jmh_feedface00/classes/main"
@@ -897,6 +900,8 @@ def selector_fixture(
                 / "https/repo.example/org/openjdk/jmh/"
                 "jmh-core/1.37/jmh-core-1.37.jar"
             )
+            dependency_path.parent.mkdir(parents=True, exist_ok=True)
+            dependency_path.write_bytes(b"fixture-jmh-core\n")
             generator_stdout_prefix = (
                 f'Processing 149 classes from {generator_input_path} '
                 'with "reflection" generator\n'
@@ -2126,6 +2131,410 @@ def main() -> int:
         "mixed JMH fork classpath evidence passed",
         expected_prefix="JMH_RUN_STDOUT_BINDING_INVALID",
     )
+
+    binding_compile_bytes = binding_compile_stdout.read_bytes()
+    binding_compile_text = binding_compile_bytes.decode("utf-8")
+    binding_compile_lines = binding_compile_text.splitlines()
+    compile_class_input_raw = binding_compile_lines[0].removeprefix(
+        "Processing 149 classes from "
+    ).removesuffix(' with "reflection" generator')
+    compile_source_root_raw, compile_resource_root_raw = (
+        binding_compile_lines[1]
+        .removeprefix("Writing out Java source to ")
+        .split(" and resources to ", maxsplit=1)
+    )
+    compile_generator_paths = [
+        compile_class_input_raw,
+        compile_source_root_raw,
+        compile_resource_root_raw,
+    ]
+    compile_classpath_paths = binding_compile_lines[2].split(os.pathsep)
+    compile_generator_labels = ("class", "source", "resource")
+    compile_classpath_labels = tuple(
+        f"classpath-{index}"
+        for index in range(len(compile_classpath_paths))
+    )
+
+    def compile_stdout_payload(
+        generator_paths: list[str],
+        classpath_paths: list[str],
+    ) -> bytes:
+        return (
+            f"Processing 149 classes from {generator_paths[0]} "
+            'with "reflection" generator\n'
+            f"Writing out Java source to {generator_paths[1]} "
+            f"and resources to {generator_paths[2]}\n"
+            f"{os.pathsep.join(classpath_paths)}\n"
+        ).encode("utf-8")
+
+    binding_jmh_text = binding_jmh_stdout.read_text(encoding="utf-8")
+    binding_jmh_class_input = Path(
+        binding_jmh_text.splitlines()[0]
+        .removeprefix("Processing 149 classes from ")
+        .removesuffix(' with "reflection" generator')
+    )
+    binding_runtime_generator = binding_receipt["jmhRuntimeClosure"][
+        "generator"
+    ]
+    binding_runtime_class_relative = Path(
+        binding_runtime_generator["classInputPathId"].removeprefix(
+            "SCALA_WORKSPACE/"
+        )
+    )
+    binding_runtime_workspace = Path(
+        *binding_jmh_class_input.parts[
+            : -len(binding_runtime_class_relative.parts)
+        ]
+    )
+
+    def close_compile_forgery(
+        stdout: bytes,
+    ) -> tuple[dict, list]:
+        value = json.loads(json.dumps(binding_receipt))
+        closure = value["jmhRuntimeClosure"]
+        paths = stdout.decode("utf-8").splitlines()[2].split(os.pathsep)
+        value["scalaCompile"]["stdoutSha256"] = hashlib.sha256(
+            stdout
+        ).hexdigest()
+        value["precompileRuntimeClasspathSha256"] = hashlib.sha256(
+            os.pathsep.join(paths).encode("utf-8")
+        ).hexdigest()
+        runtime_paths = [
+            (
+                precompile_path
+                if runtime_item["pathId"] == precompile_item["pathId"]
+                else str(
+                    binding_runtime_workspace
+                    / runtime_item["pathId"].removeprefix(
+                        "SCALA_WORKSPACE/"
+                    )
+                )
+            )
+            for precompile_path, precompile_item, runtime_item in zip(
+                paths,
+                value["classpathEntries"],
+                closure["runtimeClasspathEntries"],
+                strict=True,
+            )
+        ]
+        runtime_sha256 = hashlib.sha256(
+            os.pathsep.join(runtime_paths).encode("utf-8")
+        ).hexdigest()
+        closure["runtimeClasspathSha256"] = runtime_sha256
+        value["runtimeClasspathSha256"] = runtime_sha256
+        value["jmhRuntimeClosureSha256"] = canonical_sha256(closure)
+        forks = json.loads(json.dumps(binding_forks))
+        for fork in forks:
+            fork["runtimeClasspathSha256"] = runtime_sha256
+        return value, forks
+
+    def lexical_alias(raw_path: str, variant: str) -> str:
+        path = Path(raw_path)
+        if variant == "dot":
+            return f"{path.parent}/./{path.name}"
+        if variant == "double-separator":
+            return f"{path.parent}//{path.name}"
+        if variant == "trailing-separator":
+            return f"{raw_path}/"
+        raise AssertionError(f"unknown lexical alias variant: {variant}")
+
+    compile_variant_payloads: list[tuple[str, bytes]] = []
+    for variant in ("dot", "double-separator", "trailing-separator"):
+        for index, label in enumerate(compile_generator_labels):
+            generator_paths = list(compile_generator_paths)
+            generator_paths[index] = lexical_alias(
+                generator_paths[index],
+                variant,
+            )
+            compile_variant_payloads.append(
+                (
+                    f"{variant}:{label}",
+                    compile_stdout_payload(
+                        generator_paths,
+                        list(compile_classpath_paths),
+                    ),
+                )
+            )
+        for index, label in enumerate(compile_classpath_labels):
+            classpath_paths = list(compile_classpath_paths)
+            classpath_paths[index] = lexical_alias(
+                classpath_paths[index],
+                variant,
+            )
+            compile_variant_payloads.append(
+                (
+                    f"{variant}:{label}",
+                    compile_stdout_payload(
+                        list(compile_generator_paths),
+                        classpath_paths,
+                    ),
+                )
+            )
+
+    compile_generator = binding_receipt["jmhGenerator"]
+    compile_class_relative = Path(
+        compile_generator["classInputPathId"].removeprefix(
+            "SCALA_WORKSPACE/"
+        )
+    )
+    compile_workspace = Path(
+        *Path(compile_class_input_raw).parts[
+            : -len(compile_class_relative.parts)
+        ]
+    )
+
+    def workspace_payload(raw_workspace: str) -> bytes:
+        def physical(path_id: str) -> str:
+            return (
+                f"{raw_workspace}/"
+                + path_id.removeprefix("SCALA_WORKSPACE/")
+            )
+
+        generator_paths = [
+            physical(compile_generator["classInputPathId"]),
+            physical(compile_generator["generatedSourceRootPathId"]),
+            physical(compile_generator["generatedResourceRootPathId"]),
+        ]
+        classpath_paths = [
+            (
+                physical(item["pathId"])
+                if item["pathId"].startswith("SCALA_WORKSPACE/")
+                else raw_path
+            )
+            for raw_path, item in zip(
+                compile_classpath_paths,
+                binding_receipt["classpathEntries"],
+                strict=True,
+            )
+        ]
+        return compile_stdout_payload(generator_paths, classpath_paths)
+
+    def materialize_workspace(target_workspace: Path) -> None:
+        path_ids = [
+            compile_generator["classInputPathId"],
+            compile_generator["generatedSourceRootPathId"],
+            compile_generator["generatedResourceRootPathId"],
+            *[
+                item["pathId"]
+                for item in binding_receipt["classpathEntries"]
+                if item["pathId"].startswith("SCALA_WORKSPACE/")
+            ],
+        ]
+        for path_id in path_ids:
+            (
+                target_workspace
+                / path_id.removeprefix("SCALA_WORKSPACE/")
+            ).mkdir(parents=True, exist_ok=True)
+
+    (compile_workspace / "sentinel").mkdir(exist_ok=True)
+    sentinel_workspace_raw = f"{compile_workspace}/sentinel/.."
+    compile_variant_payloads.append(
+        (
+            "sentinel-dotdot:workspace",
+            workspace_payload(sentinel_workspace_raw),
+        )
+    )
+
+    symlink_compile_root = selector_root / "compile-symlink-roots"
+    symlink_compile_root.mkdir()
+    ancestor_target_parent = symlink_compile_root / "ancestor-target"
+    ancestor_target_workspace = ancestor_target_parent / "workspace"
+    materialize_workspace(ancestor_target_workspace)
+    ancestor_link_parent = symlink_compile_root / "ancestor-link"
+    ancestor_link_parent.symlink_to(
+        ancestor_target_parent,
+        target_is_directory=True,
+    )
+    compile_variant_payloads.append(
+        (
+            "ancestor-symlink:workspace",
+            workspace_payload(
+                str(ancestor_link_parent / "workspace")
+            ),
+        )
+    )
+    leaf_target_workspace = symlink_compile_root / "leaf-target-workspace"
+    materialize_workspace(leaf_target_workspace)
+    leaf_link_workspace = symlink_compile_root / "leaf-link-workspace"
+    leaf_link_workspace.symlink_to(
+        leaf_target_workspace,
+        target_is_directory=True,
+    )
+    compile_variant_payloads.append(
+        (
+            "leaf-symlink:workspace",
+            workspace_payload(str(leaf_link_workspace)),
+        )
+    )
+
+    coursier_entry_index = next(
+        index
+        for index, item in enumerate(binding_receipt["classpathEntries"])
+        if item["pathId"].startswith("COURSIER_CACHE/")
+    )
+    coursier_relative = Path(
+        binding_receipt["classpathEntries"][coursier_entry_index][
+            "pathId"
+        ].removeprefix("COURSIER_CACHE/")
+    )
+
+    def coursier_root_payload(raw_root: str) -> bytes:
+        classpath_paths = list(compile_classpath_paths)
+        classpath_paths[coursier_entry_index] = (
+            f"{raw_root}/{coursier_relative.as_posix()}"
+        )
+        return compile_stdout_payload(
+            list(compile_generator_paths),
+            classpath_paths,
+        )
+
+    coursier_symlink_root = selector_root / "coursier-symlink-roots"
+    coursier_symlink_root.mkdir()
+    coursier_ancestor_target = (
+        coursier_symlink_root / "ancestor-target"
+    )
+    coursier_dependency = coursier_ancestor_target / coursier_relative
+    coursier_dependency.parent.mkdir(parents=True)
+    coursier_dependency.write_bytes(b"fixture-jmh-core\n")
+    coursier_ancestor_link = coursier_symlink_root / "ancestor-link"
+    coursier_ancestor_link.symlink_to(
+        coursier_ancestor_target,
+        target_is_directory=True,
+    )
+    compile_variant_payloads.append(
+        (
+            "ancestor-symlink:coursier",
+            coursier_root_payload(str(coursier_ancestor_link)),
+        )
+    )
+    coursier_leaf_target = coursier_symlink_root / "leaf-target"
+    coursier_leaf_dependency = coursier_leaf_target / coursier_relative
+    coursier_leaf_dependency.parent.mkdir(parents=True)
+    coursier_leaf_dependency.write_bytes(b"fixture-jmh-core\n")
+    coursier_leaf_link = coursier_symlink_root / "leaf-link"
+    coursier_leaf_link.symlink_to(
+        coursier_leaf_target,
+        target_is_directory=True,
+    )
+    compile_variant_payloads.append(
+        (
+            "leaf-symlink:coursier",
+            coursier_root_payload(str(coursier_leaf_link)),
+        )
+    )
+
+    accepted_compile_variants: list[str] = []
+    for label, forged_stdout in compile_variant_payloads:
+        forged_receipt, forged_forks = close_compile_forgery(
+            forged_stdout
+        )
+        binding_compile_stdout.write_bytes(forged_stdout)
+        try:
+            try:
+                validate_binding(
+                    receipt_value=forged_receipt,
+                    forks_value=forged_forks,
+                )
+            except module.T3EvidenceError as error:
+                if not str(error).startswith(
+                    "JMH_PRECOMPILE_STDOUT_BINDING_INVALID"
+                ):
+                    raise AssertionError(
+                        f"{label}: unexpected leaf {error}"
+                    ) from error
+            else:
+                accepted_compile_variants.append(label)
+        finally:
+            binding_compile_stdout.write_bytes(binding_compile_bytes)
+
+    binding_receipt_bytes = binding_receipt_path.read_bytes()
+    typed_sentinel_stdout = workspace_payload(sentinel_workspace_raw)
+    typed_sentinel_receipt, typed_sentinel_forks = (
+        close_compile_forgery(typed_sentinel_stdout)
+    )
+    source_input_paths = sorted(
+        [
+            path
+            for path, metadata in selected_inputs[
+                "source_manifest"
+            ]["files"].items()
+            if metadata["role"]
+            in {"configuration", "main", "benchmark"}
+        ],
+        key=lambda value: value.encode("utf-8"),
+    )
+    jdk_modules_snapshot = module.jmh_precompile._snapshot_regular_file(
+        Path(os.environ["JAVA_HOME"]) / "lib/modules",
+        label="TEST_COMPILE_PATH_BINDING",
+        retain_payload=False,
+    )
+
+    def validate_typed_precompile(receipt_value: dict) -> None:
+        write_json(binding_receipt_path, receipt_value)
+        module.validate_generated_java_precompile(
+            receipt_path=binding_receipt_path,
+            artifact_root=binding_artifact_root,
+            case_root=binding_case_root,
+            profile="A",
+            scala_root=SCALA_ROOT,
+            scala_cli=selected_inputs["scala_cli"],
+            source_input_paths=source_input_paths,
+            source_manifest_sha256=selected_inputs[
+                "source_manifest_sha256"
+            ],
+            compiler_profiles_sha256=selected_inputs[
+                "compiler_profiles_sha256"
+            ],
+            jdk_modules_snapshot=jdk_modules_snapshot,
+            snapshot=module.SealedEvidenceSnapshot(),
+        )
+
+    accepted_full_typed_sentinel: list[str] = []
+    binding_compile_stdout.write_bytes(typed_sentinel_stdout)
+    try:
+        try:
+            validate_typed_precompile(typed_sentinel_receipt)
+        except module.T3EvidenceError as error:
+            if not str(error).startswith(
+                "JMH_PRECOMPILE_STDOUT_BINDING_INVALID"
+            ):
+                raise AssertionError(
+                    f"typed sentinel: unexpected leaf {error}"
+                ) from error
+        else:
+            accepted_full_typed_sentinel.append(
+                "validate_generated_java_precompile"
+            )
+        try:
+            validate_binding(
+                receipt_value=typed_sentinel_receipt,
+                forks_value=typed_sentinel_forks,
+            )
+        except module.T3EvidenceError as error:
+            if not str(error).startswith(
+                "JMH_PRECOMPILE_STDOUT_BINDING_INVALID"
+            ):
+                raise AssertionError(
+                    f"binding sentinel: unexpected leaf {error}"
+                ) from error
+        else:
+            accepted_full_typed_sentinel.append(
+                "validate_jmh_stdout_precompile_binding"
+            )
+    finally:
+        binding_compile_stdout.write_bytes(binding_compile_bytes)
+        binding_receipt_path.write_bytes(binding_receipt_bytes)
+
+    if accepted_compile_variants or accepted_full_typed_sentinel:
+        raise AssertionError(
+            "T3 accepted compile physical path aliases: "
+            + ", ".join(
+                [
+                    *accepted_compile_variants,
+                    *accepted_full_typed_sentinel,
+                ]
+            )
+        )
 
     binding_stdout_bytes = binding_jmh_stdout.read_bytes()
     binding_stdout_text = binding_stdout_bytes.decode("utf-8")
