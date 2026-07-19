@@ -1664,6 +1664,18 @@ class NativeBenchmarkBlockTests(TestCase):
             for evidence_case in evidence["cases"]:
                 evidence_case["executionReceiptSha256"] = updated_receipt_sha
 
+        def install_ghc_closure(document: dict[str, Any]) -> None:
+            closure_without_hash = {
+                field: value
+                for field, value in document.items()
+                if field != "closureSha256"
+            }
+            document["closureSha256"] = _canonical_sha256(closure_without_hash)
+            ghc_install_closure.write_text(
+                json.dumps(document, sort_keys=True),
+                encoding="utf-8",
+            )
+
         def install_family_raw(document: list[Any]) -> None:
             raw_path.write_text(json.dumps(document), encoding="utf-8")
             updated_raw_sha = hashlib.sha256(raw_path.read_bytes()).hexdigest()
@@ -1783,6 +1795,136 @@ class NativeBenchmarkBlockTests(TestCase):
                         profile="baseline-o0-fasm",
                     )
         install_receipt(receipt_document)
+
+        closure_semantic_mutations = {
+            "approved-wrapper-alias": lambda candidate, closure: (
+                candidate.__setitem__("approvedWrapperPath", str(latest_ghc)),
+                closure.__setitem__("approvedWrapperPath", str(latest_ghc)),
+            ),
+            "actual-compiler-sha": lambda candidate, closure: (
+                candidate.__setitem__("actualCompilerElfSha256", "0" * 64),
+                closure.__setitem__("actualCompilerElfSha256", "0" * 64),
+            ),
+            "actual-compiler-fd": lambda candidate, closure: (
+                candidate.__setitem__(
+                    "actualCompilerElfPinnedFdPath",
+                    "/proc/self/fd/2147483647",
+                ),
+                closure.__setitem__(
+                    "actualCompilerElfPinnedFdPath",
+                    "/proc/self/fd/2147483647",
+                ),
+            ),
+            "libdir-metadata-sha": lambda candidate, closure: (
+                candidate.__setitem__("libdirMetadataSha256", "0" * 64),
+                closure.__setitem__("libdirMetadataSha256", "0" * 64),
+            ),
+            "libdir-entry-count": lambda candidate, closure: (
+                candidate.__setitem__(
+                    "libdirMetadataEntryCount",
+                    candidate["libdirMetadataEntryCount"] + 1,
+                ),
+                closure.__setitem__(
+                    "libdirMetadataEntryCount",
+                    closure["libdirMetadataEntryCount"] + 1,
+                ),
+            ),
+            "libdir-total-bytes": lambda candidate, closure: (
+                candidate.__setitem__(
+                    "libdirMetadataTotalFileBytes",
+                    candidate["libdirMetadataTotalFileBytes"] + 1,
+                ),
+                closure.__setitem__(
+                    "libdirMetadataTotalFileBytes",
+                    closure["libdirMetadataTotalFileBytes"] + 1,
+                ),
+            ),
+            "distribution-bin-metadata": lambda candidate, closure: (
+                candidate.__setitem__("distributionBinMetadataSha256", "0" * 64),
+                closure.__setitem__("distributionBinMetadataSha256", "0" * 64),
+            ),
+            "auxiliary-elf-sha": lambda candidate, closure: (
+                candidate["auxiliaryElfSha256"].__setitem__("ghc-pkg", "0" * 64),
+                closure["auxiliaryElfSha256"].__setitem__("ghc-pkg", "0" * 64),
+            ),
+            "auxiliary-elf-fd": lambda candidate, closure: (
+                candidate["auxiliaryElfPinnedFdPath"].__setitem__(
+                    "runghc",
+                    "/proc/self/fd/2147483647",
+                ),
+                closure["auxiliaryElfPinnedFdPath"].__setitem__(
+                    "runghc",
+                    "/proc/self/fd/2147483647",
+                ),
+            ),
+            "output-launcher-sha": lambda candidate, closure: (
+                candidate["outputLauncherSha256"].__setitem__("ghc", "0" * 64),
+                closure["outputLauncherSha256"].__setitem__("ghc", "0" * 64),
+            ),
+            "scoring-binding": lambda candidate, closure: (
+                candidate.__setitem__(
+                    "scoringCompilerExecutionBinding",
+                    "pinned-fd-path",
+                ),
+                closure.__setitem__(
+                    "scoringCompilerExecutionBinding",
+                    "pinned-fd-path",
+                ),
+            ),
+        }
+        for mutation, mutate in closure_semantic_mutations.items():
+            with self.subTest(haskell_ghc_closure=mutation):
+                invalid_receipt = copy.deepcopy(receipt_document)
+                invalid_candidate = invalid_receipt["provenance"][
+                    "candidateProvenance"
+                ]
+                invalid_closure = copy.deepcopy(ghc_install_closure_document)
+                mutate(invalid_candidate, invalid_closure)
+                install_ghc_closure(invalid_closure)
+                install_receipt(invalid_receipt)
+                with self.assertRaisesRegex(
+                    GateError,
+                    "NATIVE_EXECUTION_PROVENANCE_INVALID",
+                ):
+                    validate_native_contract_evidence(
+                        evidence,
+                        boundary_id="haskell",
+                        selector_id=selector_id,
+                        block_directory=temporary,
+                        native_cases=cases,
+                        native_statistics_cases=statistics_cases,
+                        plan_path=plan_path,
+                        fixture_root_path=haskell_fixture_root,
+                        input_ledger_path=input_ledger,
+                        effective_runtime_arguments_sha256=(
+                            effective_options_sha256
+                        ),
+                        profile="baseline-o0-fasm",
+                    )
+        install_ghc_closure(copy.deepcopy(ghc_install_closure_document))
+        install_receipt(receipt_document)
+
+        authoritative_ghc_shim.unlink()
+        authoritative_ghc_shim.symlink_to(pinned_fd_paths["actualCompilerElf"])
+        with self.assertRaisesRegex(
+            GateError,
+            "NATIVE_EXECUTION_PROVENANCE_INVALID",
+        ):
+            validate_native_contract_evidence(
+                evidence,
+                boundary_id="haskell",
+                selector_id=selector_id,
+                block_directory=temporary,
+                native_cases=cases,
+                native_statistics_cases=statistics_cases,
+                plan_path=plan_path,
+                fixture_root_path=haskell_fixture_root,
+                input_ledger_path=input_ledger,
+                effective_runtime_arguments_sha256=effective_options_sha256,
+                profile="baseline-o0-fasm",
+            )
+        authoritative_ghc_shim.unlink()
+        authoritative_ghc_shim.symlink_to(launcher_fd_paths["ghc"])
 
         ephemeral_portable = copy.deepcopy(receipt_document)
         ephemeral_portable_candidate = ephemeral_portable["provenance"][
