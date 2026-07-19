@@ -319,6 +319,10 @@ def main() -> int:
         assert marker in native_smoke
     assert "$S1_ROOT/contract/fixtures" not in native_smoke
     assert "S1_4X_FIXTURE_MATERIALIZATION_RECEIPT" not in native_smoke
+    assert native_smoke.index("S1_4X_LARGE_FIXTURE_ROOT") < (
+        native_smoke.index('"$SCALA_ROOT/tools/assert-toolchain.sh"')
+    )
+    assert native_smoke.count("fixture_root_identity") >= 3
     assert "--server=true" not in native_smoke
     assert native_smoke.index("--server=false") < native_smoke.index(
         '--classpath "$precompiled_classes"'
