@@ -6,15 +6,28 @@
   "gate0MergeSha": "f2784ffb66272cf73ed1085d1719713fc7165113",
   "fixtureFreezeMergeSha": "49921c4dbf5ef66407211b7f0f56218ab563043d",
   "fixtureFreezeReviewedHeadSha": "41114ca2ce4a0c8274c830942cb01d0899d76d36",
+  "hostPolicyAmendment": {
+    "approvalToken": "S1_4X_BENCHMARK_HOST_POLICY_APPROVED",
+    "containerIdentitySemantics": "count-only-unverified",
+    "evidenceScope": "same-run-same-host",
+    "maximumRunningContainers": {
+      "before": 0,
+      "after": 4
+    },
+    "minimumAvailableMemoryGiB": {
+      "before": 8,
+      "after": 4
+    }
+  },
   "immutableInputs": {
-    "benchmarkPlanSha256": "caf00112f58723e277293f59ccedb48bbd9ec82d096d3118ee3a9ed72658d1d1",
+    "benchmarkPlanSha256": "9c8e9bb050a501b1ffc4f6db43a5ed3f4014a18c372feee29269b4626e11881d",
     "canonicalInputsSha256": "367ca5b8589f9c5b16e8c2e5dd2cfe7cc560a7de19559551c487beeefcf62e63",
     "canonicalResultsSha256": "59619337c415757a612bc923b32e2a174018b15dc67b2357b10ccb602fca1b6a",
-    "contractCanonicalRootSha256": "b6d994f5344be32d3f917297bef2329966b6ecffe9e9c274398a26d5ea0f712d",
-    "contractManifestSha256": "4dd4d688339805a1432f9da973dbda73621dd7ff5f1b423819292f8a29a72b2e",
-    "oracleCanonicalRootSha256": "7bf9653a7abe87807c44c44a1ca5eeeb985665167a7dc3b4476e2593157eeab2",
+    "contractCanonicalRootSha256": "2d5d2aa08355bc47bb3ab6515a2d3e5e03b3d41f500f985d1d92c9791fbc5d14",
+    "contractManifestSha256": "5f3c81e83eaad7c0d7c0e9a7d6bf882d47b033b370ccfb1e5abb200108f74bd3",
+    "oracleCanonicalRootSha256": "3ed1598f62c4d854eb7fd3905aa3758ef6c4525c4cdff92f9c3e18ec44cc9b36",
     "referenceLockSha256": "b55b81b933ad4749c77e3baa313f900dab18d808bc34285232f7b603993a6cb7",
     "toolchainProvenanceSha256": "cd9e29a22473fba6203daa4f3a0cbaa57b8b6e5c5fc22de05ca0801c404ffa98"
   },
-  "freezeSemantics": "identity-record-only"
+  "freezeSemantics": "identity-record-with-user-approved-host-policy-amendment"
 }
