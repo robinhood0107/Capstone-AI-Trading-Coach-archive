@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import importlib.util
 import json
@@ -317,6 +318,52 @@ class BenchmarkBlockHelperTests(unittest.TestCase):
                 self.assertEqual(identity, pinned.identity)
             finally:
                 os.close(pinned.descriptor)
+
+    @unittest.skipUnless(sys.platform == "linux", "Linux memfd ABI contract")
+    def test_linux_memfd_sealing_survives_missing_python_abi_exports(
+        self,
+    ) -> None:
+        helper = load_helper()
+        os_exports = (
+            "memfd_create",
+            "MFD_CLOEXEC",
+            "MFD_ALLOW_SEALING",
+        )
+        fcntl_exports = (
+            "F_ADD_SEALS",
+            "F_GET_SEALS",
+            "F_SEAL_SEAL",
+            "F_SEAL_SHRINK",
+            "F_SEAL_GROW",
+            "F_SEAL_WRITE",
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary).resolve() / "sealed-source.py"
+            source.write_bytes(b"print('sealed source')\n")
+            with (
+                mock.patch.dict(helper.os.__dict__, {}, clear=False),
+                mock.patch.dict(helper.fcntl.__dict__, {}, clear=False),
+            ):
+                for name in os_exports:
+                    helper.os.__dict__.pop(name, None)
+                for name in fcntl_exports:
+                    helper.fcntl.__dict__.pop(name, None)
+
+                pinned = helper.pin_regular_file(
+                    source,
+                    label="PYTHON_ABI_EXPORTS",
+                    max_bytes=1024,
+                )
+                try:
+                    self.assertEqual(
+                        helper.fcntl.fcntl(pinned.descriptor, 1034),
+                        0x000F,
+                    )
+                    with self.assertRaises(OSError) as blocked_write:
+                        os.write(pinned.descriptor, b"x")
+                    self.assertEqual(blocked_write.exception.errno, errno.EPERM)
+                finally:
+                    os.close(pinned.descriptor)
 
     def test_shared_python_executes_the_sealed_script_fd_after_path_swap(
         self,
