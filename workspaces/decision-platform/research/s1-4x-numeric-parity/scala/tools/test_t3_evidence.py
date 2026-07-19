@@ -3536,6 +3536,60 @@ def main() -> int:
         "java.vm.name": "OpenJDK 64-Bit Server VM",
     }
     benchmark_environment = dict(module.EXPECTED_BENCHMARK_ENVIRONMENT)
+    previous_sealed_environment = os.environ.get(
+        "S1_4X_SCALA_ENVIRONMENT_VALUES_SHA256"
+    )
+    os.environ["S1_4X_SCALA_ENVIRONMENT_VALUES_SHA256"] = "a" * 64
+    try:
+        sealed_output = Path("/sealed/block/scala/case-01")
+        sealed_workspace = module.jmh_scala_workspace(
+            sealed_output / "jmh-tmp"
+        )
+        sealed_generated_source = (
+            sealed_workspace
+            / ".scala-build"
+            / "scala-workspace_sealed_jmh"
+            / "sources"
+            / "generated"
+            / "Benchmark.java"
+        )
+        sealed_arguments = [
+            (
+                "-Dscala.sources=/sealed/source.scala:"
+                f"{sealed_generated_source}"
+            ),
+            "-Dscala.source.names=source.scala:Benchmark.java",
+            f"-Djava.io.tmpdir={sealed_output}/jmh-tmp",
+        ]
+        assert module.normalized_scala_source_arguments(
+            sealed_arguments,
+            tmp_directory=sealed_output / "jmh-tmp",
+        )[0] == (
+            "-Dscala.sources=/sealed/source.scala:"
+            "SCALA_WORKSPACE/JMH_GENERATED_SOURCES/generated/Benchmark.java"
+        )
+        mismatched_names = list(sealed_arguments)
+        mismatched_names[1] = (
+            "-Dscala.source.names=source.scala:Changed.java"
+        )
+        expect_t3_error(
+            module,
+            lambda: module.normalized_scala_source_arguments(
+                mismatched_names,
+                tmp_directory=sealed_output / "jmh-tmp",
+            ),
+            "generated JMH source/name mismatch passed",
+        )
+    finally:
+        if previous_sealed_environment is None:
+            os.environ.pop(
+                "S1_4X_SCALA_ENVIRONMENT_VALUES_SHA256",
+                None,
+            )
+        else:
+            os.environ["S1_4X_SCALA_ENVIRONMENT_VALUES_SHA256"] = (
+                previous_sealed_environment
+            )
     smoke_output = Path("/sealed/smoke")
     smoke_generated_source = (
         module.isolated_scala_workspace(smoke_output)
