@@ -1274,6 +1274,85 @@ class NativeBenchmarkBlockTests(TestCase):
             ),
             encoding="utf-8",
         )
+        source_tree_sha256 = _canonical_sha256(
+            [
+                {
+                    "path": relative_path,
+                    "sha256": hashlib.sha256(
+                        (haskell_root / relative_path).read_bytes()
+                    ).hexdigest(),
+                }
+                for relative_path in sorted(source_tree_paths, key=str.encode)
+            ]
+        )
+        for correctness_path in (baseline_correctness, optimized_correctness):
+            correctness_document = json.loads(
+                correctness_path.read_text(encoding="utf-8")
+            )
+            correctness_document["sourceTreeSha256"] = source_tree_sha256
+            correctness_path.write_text(
+                json.dumps(correctness_document, sort_keys=True),
+                encoding="utf-8",
+            )
+        baseline_correctness_sha256 = hashlib.sha256(
+            baseline_correctness.read_bytes()
+        ).hexdigest()
+        optimized_correctness_sha256 = hashlib.sha256(
+            optimized_correctness.read_bytes()
+        ).hexdigest()
+        qualification_document = json.loads(
+            qualification_artifact.read_text(encoding="utf-8")
+        )
+        qualification_document["sourceTreeSha256"] = source_tree_sha256
+        qualification_artifact.write_text(
+            json.dumps(qualification_document, sort_keys=True),
+            encoding="utf-8",
+        )
+        qualification_artifact_sha256 = hashlib.sha256(
+            qualification_artifact.read_bytes()
+        ).hexdigest()
+        selected_profile_document = json.loads(
+            selected_profile.read_text(encoding="utf-8")
+        )
+        selected_profile_document["sourceTreeSha256"] = source_tree_sha256
+        selected_profile_document["fullCorrectnessSha256"] = (
+            baseline_correctness_sha256
+        )
+        selected_profile_document["qualificationArtifactSha256"] = (
+            qualification_artifact_sha256
+        )
+        selected_profile.write_text(
+            json.dumps(selected_profile_document, sort_keys=True),
+            encoding="utf-8",
+        )
+        source_manifest_files["selected-profile.v1.json"]["sha256"] = hashlib.sha256(
+            selected_profile.read_bytes()
+        ).hexdigest()
+        source_input_manifest.write_text(
+            json.dumps(
+                {
+                    "schemaVersion": "s1.4x-source-input-manifest-v1",
+                    "language": "haskell",
+                    "files": source_manifest_files,
+                    "inputSets": {
+                        "tracked": "files",
+                        "manifest": "files",
+                        "format": "files",
+                        "compile": "files",
+                        "lint": "files",
+                        "profileRun": "files",
+                    },
+                    "canonicalManifestSha256": hashlib.sha256(
+                        "".join(
+                            f"{source_manifest_files[path]['sha256']}  {path}\n"
+                            for path in sorted(source_manifest_files, key=str.encode)
+                        ).encode()
+                    ).hexdigest(),
+                },
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
         selector = next(
             item
             for item in plan["familySelectors"]
