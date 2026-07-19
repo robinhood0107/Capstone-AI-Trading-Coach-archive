@@ -3942,7 +3942,12 @@ def _criterion_qualification_command(
     raw_report: Path,
     case_order: Sequence[str],
 ) -> list[str]:
-    expression = "^(?:" + "|".join(re.escape(case_id) for case_id in case_order) + ")$"
+    if len(case_order) != 7 or any(
+        re.fullmatch(r"[a-z0-9][a-z0-9_/-]*", case_id) is None
+        for case_id in case_order
+    ):
+        raise WorkflowError("QUALIFICATION_CASE_ORDER_INVALID")
+    case_arguments = " ".join(case_order)
     return build_stack_command(
         ghcup=ghcup,
         stack=stack,
@@ -3957,7 +3962,7 @@ def _criterion_qualification_command(
                 "--benchmark-arguments="
                 f"--time-limit {time_limit_seconds} "
                 f"--json {raw_report} "
-                f"--match pattern {expression} +RTS -N1 -RTS"
+                f"--match glob {case_arguments} +RTS -N1 -RTS"
             ),
         ],
     )
