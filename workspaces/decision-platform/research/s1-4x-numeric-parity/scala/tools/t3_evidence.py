@@ -1908,7 +1908,8 @@ def validate_generated_java_precompile(
             "generatedResourceClosureSha256",
         }
         or generator.get("generatorId") != "reflection"
-        or generator.get("processedClassCount") != 147
+        or generator.get("processedClassCount")
+        != jmh_precompile.EXPECTED_JMH_PROCESSED_CLASS_COUNT
         or SHA256.fullmatch(
             str(generator.get("classInputClosureSha256"))
         )

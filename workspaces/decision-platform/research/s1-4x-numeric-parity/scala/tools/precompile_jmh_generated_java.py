@@ -48,6 +48,9 @@ SCALA_COMPILE_STDOUT = "scala-jmh-precompile.stdout"
 SCALA_COMPILE_STDERR = "scala-jmh-precompile.stderr"
 JAVAC_STDOUT = "scala-javac.stdout"
 JAVAC_STDERR = "scala-javac.stderr"
+# 현재 manifest-고정 configuration/main/benchmark source closure의 Scala 3.8.4
+# serverless class output은 실제 reflection generator 입력 149개와 exact 결속한다.
+EXPECTED_JMH_PROCESSED_CLASS_COUNT = 149
 JDK_MODULES_GATE_SNAPSHOT_VARIABLE = (
     "S1_4X_JDK_MODULES_GATE_SNAPSHOT"
 )
@@ -817,7 +820,7 @@ def generator_output_closure(
     generated_resource_root = Path(generated.group(2))
     expected_build_root = workspace / ".scala-build"
     if (
-        processed_class_count != 147
+        processed_class_count != EXPECTED_JMH_PROCESSED_CLASS_COUNT
         or not generator_class_input.is_absolute()
         or not generated_source_root.is_absolute()
         or not generated_resource_root.is_absolute()
@@ -2052,7 +2055,8 @@ def verify(arguments: argparse.Namespace) -> dict[str, Any]:
             "generatedResourceClosureSha256",
         }
         or generator.get("generatorId") != "reflection"
-        or generator.get("processedClassCount") != 147
+        or generator.get("processedClassCount")
+        != EXPECTED_JMH_PROCESSED_CLASS_COUNT
         or not str(generator.get("generatedSourceRootPathId", "")).startswith(
             "SCALA_WORKSPACE/.scala-build/"
         )
