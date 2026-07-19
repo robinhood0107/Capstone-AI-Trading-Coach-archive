@@ -312,15 +312,13 @@ def main() -> int:
         '--classpath "$precompiled_classes"',
         "generatedJavaPrecompileReceiptSha256",
         "JVM_FORK_FILE_COUNT_MISMATCH:expected=",
-        "S1_4X_FIXTURE_MATERIALIZATION_RECEIPT",
+        "S1_4X_LARGE_FIXTURE_ROOT",
         '--coursier-cache "$COURSIER_CACHE"',
         '--jmh-stdout "$OUTPUT_DIR/jmh.stdout"',
     ):
         assert marker in native_smoke
-    assert (
-        'export S1_4X_FIXTURE_ROOT="$S1_ROOT/contract/fixtures"'
-        not in native_smoke
-    )
+    assert "$S1_ROOT/contract/fixtures" not in native_smoke
+    assert "S1_4X_FIXTURE_MATERIALIZATION_RECEIPT" not in native_smoke
     assert "--server=true" not in native_smoke
     assert native_smoke.index("--server=false") < native_smoke.index(
         '--classpath "$precompiled_classes"'
