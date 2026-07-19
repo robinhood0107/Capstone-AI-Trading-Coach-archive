@@ -39,6 +39,7 @@
       within:
         - Main
         - S14X.BenchmarkMain
+        - S14X.PropertyEvidence
         - S14X.TestMain
     - name:
         - System.IO

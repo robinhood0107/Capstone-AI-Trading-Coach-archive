@@ -57,6 +57,13 @@ MODULE_ALLOWANCES = (
     ),
     (
         "System.Environment",
+        "S14X.PropertyEvidence",
+        "test/S14X/PropertyEvidence.hs",
+        ("getExecutablePath",),
+        "System.Environment(getExecutablePath)",
+    ),
+    (
+        "System.Environment",
         "S14X.TestMain",
         "test/Main.hs",
         ("getArgs",),
@@ -78,7 +85,12 @@ MODULE_ALLOWANCES = (
     ),
 )
 EXPECTED_NONEMPTY_MODULE_WITHIN = {
-    "System.Environment": ("Main", "S14X.BenchmarkMain", "S14X.TestMain"),
+    "System.Environment": (
+        "Main",
+        "S14X.BenchmarkMain",
+        "S14X.PropertyEvidence",
+        "S14X.TestMain",
+    ),
     "System.IO": ("Main", "S14X.AtomicOutputSpec", "S14X.Contract.AtomicOutput"),
 }
 ENTRY_FIELD_ORDER = (

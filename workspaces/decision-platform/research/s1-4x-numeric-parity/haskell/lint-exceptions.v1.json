@@ -93,6 +93,16 @@
     },
     {
       "language": "haskell",
+      "file": "test/S14X/PropertyEvidence.hs",
+      "rule": "Avoid restricted module",
+      "symbol": "System.Environment(getExecutablePath)",
+      "reason": "The property-evidence test shell hashes and records the actual compiled test executable path without reading ambient variables or entering the numeric core.",
+      "focusedTest": "tools/tests/test_hlint_inventory.py: test_exact_module_allowances_bind_every_import",
+      "owner": "S1.4X",
+      "expiresWhen": "The property runner can report its actual executable identity without importing System.Environment."
+    },
+    {
+      "language": "haskell",
       "file": "test/Main.hs",
       "rule": "Avoid restricted module",
       "symbol": "System.Environment(getArgs)",
