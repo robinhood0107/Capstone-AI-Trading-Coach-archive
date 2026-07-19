@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[6]
@@ -19,6 +20,16 @@ AGGREGATE = (
     REPO_ROOT
     / "workspaces/decision-platform/research/s1-4x-numeric-parity/"
     "integration/tools/run-native-oci-regression-gates.sh"
+)
+REGRESSION_GATE = (
+    REPO_ROOT
+    / "workspaces/decision-platform/research/s1-4x-numeric-parity/"
+    "integration/regression_gate.py"
+)
+sys.path.insert(0, str(REGRESSION_GATE.parent))
+
+from regression_gate import (  # noqa: E402
+    DESELECTED_RESEARCH_NODE as PRODUCER_DESELECTED_RESEARCH_NODE,
 )
 
 
@@ -43,8 +54,13 @@ def test_s1_4x_branch_diff_is_confined_to_the_experiment_boundary() -> None:
 
 
 def test_aggregate_deselects_only_the_inapplicable_s1_4r_branch_scope() -> None:
-    source = AGGREGATE.read_text(encoding="utf-8")
-    expected = f'--deselect="{S1_4R_BRANCH_SCOPE_NODE}"'
-    assert source.count(expected) == 1
-    assert "S1_4R_EXECUTION_BOUNDARY=oci" not in source
-    assert "test_s1_4r_regression_boundary.py" in source
+    aggregate_source = AGGREGATE.read_text(encoding="utf-8")
+    producer_source = REGRESSION_GATE.read_text(encoding="utf-8")
+
+    assert aggregate_source.count('python "$INTEGRATION/regression_gate.py"') == 1
+    assert producer_source.count(
+        'f"--deselect={DESELECTED_RESEARCH_NODE}"'
+    ) == 1
+    assert PRODUCER_DESELECTED_RESEARCH_NODE == S1_4R_BRANCH_SCOPE_NODE
+    assert "S1_4R_EXECUTION_BOUNDARY=oci" not in aggregate_source
+    assert "test_s1_4r_regression_boundary.py" in producer_source
