@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import dataclasses
 import hashlib
 import importlib.util
@@ -40,6 +41,20 @@ def write_executable(path: Path, payload: bytes) -> str:
 
 
 class QualificationDockerTrustTests(unittest.TestCase):
+    def test_temporary_directories_defer_to_external_tmpdir(self) -> None:
+        source = Path(__file__).read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        hardcoded = [
+            node.lineno
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "TemporaryDirectory"
+            and any(keyword.arg == "dir" for keyword in node.keywords)
+        ]
+
+        self.assertEqual(hardcoded, [])
+
     def test_validator_style_grandchild_executes_retained_parent_fd(
         self,
     ) -> None:
