@@ -92,8 +92,21 @@ jq -e '
   .referenceSourceCount > 0 and
   .referenceSourceTreeCount == 4
 ' "$RESULT_ROOT/contract-validation.json" >/dev/null
-"$UV_BIN" run --frozen --project "$ORACLE" \
-  python "$ORACLE/generate_large_fixtures.py" --check
+LARGE_FIXTURE_ROOT="$RESULT_ROOT/large-fixtures"
+LARGE_FIXTURE_RECEIPT="$RESULT_ROOT/large-fixture-receipt.json"
+"$UV_BIN" run --frozen --no-config --project "$ORACLE" \
+  python "$INTEGRATION/materialize_large_fixtures.py" materialize \
+  --s1-4x-root "$S1_4X" \
+  --output-root "$LARGE_FIXTURE_ROOT" \
+  --receipt "$LARGE_FIXTURE_RECEIPT" \
+  >/dev/null
+"$UV_BIN" run --frozen --no-config --project "$ORACLE" \
+  python "$INTEGRATION/materialize_large_fixtures.py" check \
+  --s1-4x-root "$S1_4X" \
+  --output-root "$LARGE_FIXTURE_ROOT" \
+  --receipt "$LARGE_FIXTURE_RECEIPT" \
+  >/dev/null
+export S1_4X_LARGE_FIXTURE_ROOT="$LARGE_FIXTURE_ROOT"
 
 "$SCALA/tools/assert-toolchain.sh"
 "$SCALA/tools/test-source-input-manifest.sh"

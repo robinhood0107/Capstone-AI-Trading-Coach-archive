@@ -36,6 +36,10 @@ from executable_identity import (  # noqa: E402
     inspect_executable_identity,
     inspect_regular_file_path,
 )
+from materialize_large_fixtures import (  # noqa: E402
+    MaterializationError,
+    check_materialization,
+)
 from validate_benchmark_report import (  # noqa: E402
     DEFAULT_PLAN,
     validate_block_result,
@@ -131,6 +135,7 @@ FROZEN_GIT_IDENTITY = {
     "path": "/usr/bin/git",
     "sha256": "5516c9f362c29376ab9a499a33082f9f611941d8c75930c880e30ad109e39c9a",
 }
+S1_4X_ROOT = Path(__file__).resolve().parents[1]
 
 
 @dataclass(frozen=True)
@@ -156,6 +161,13 @@ class PinnedExecutable:
     binding: dict[str, str]
     descriptor: int
     required_seals: int
+
+
+@dataclass(frozen=True)
+class ValidatedLargeFixtureInput:
+    """Receipt 검증을 통과해 native language child에 전달 가능한 large root다."""
+
+    root: Path
 
 
 @dataclass(frozen=True, order=True)
@@ -758,11 +770,30 @@ def _verify_source_commit_binding(
         raise ContractError("CURRENT_SOURCE_WORKTREE_DIRTY")
 
 
+def _validate_large_fixture_input(
+    *,
+    large_fixture_root: Path,
+    large_fixture_receipt: Path,
+) -> ValidatedLargeFixtureInput:
+    """Full rotation 전에 root와 receipt를 shared materializer 계약으로 한 번 검증한다."""
+
+    try:
+        check_materialization(
+            s1_4x_root=S1_4X_ROOT,
+            output_root=large_fixture_root,
+            receipt=large_fixture_receipt,
+        )
+    except (MaterializationError, OSError) as exc:
+        raise ContractError(f"LARGE_FIXTURE_INPUT_INVALID:{exc}") from exc
+    return ValidatedLargeFixtureInput(root=large_fixture_root)
+
+
 def _benchmark_environment(
     runtime_dependencies: dict[str, PinnedExecutable],
     runtime_evidence: dict[str, PinnedExecutable],
     *,
     boundary_id: str,
+    large_fixture_input: ValidatedLargeFixtureInput | None = None,
 ) -> dict[str, str]:
     """해당 boundary에 선언된 sealed runtime/evidence만 child에 전달한다."""
 
@@ -781,6 +812,8 @@ def _benchmark_environment(
         raise ContractError("BENCHMARK_RUNTIME_DEPENDENCY_SET_MISMATCH")
     if tuple(runtime_evidence) != expected_evidence:
         raise ContractError("BENCHMARK_RUNTIME_EVIDENCE_SET_MISMATCH")
+    if boundary_id in {"scala", "haskell"} and large_fixture_input is None:
+        raise ContractError("LARGE_FIXTURE_INPUT_NOT_VALIDATED")
     for role, pinned in (*runtime_dependencies.items(), *runtime_evidence.items()):
         if (
             pinned.descriptor < 0
@@ -851,6 +884,11 @@ def _benchmark_environment(
                     "benchmarkPython"
                 ],
             }
+        )
+    if boundary_id in {"scala", "haskell"}:
+        assert large_fixture_input is not None
+        environment["S1_4X_LARGE_FIXTURE_ROOT"] = str(
+            large_fixture_input.root
         )
     if boundary_id == "scala":
         role_environment = {
@@ -1916,11 +1954,17 @@ def execute_schedule(
     output_root: Path,
     run_id: str,
     repo_root: Path,
+    large_fixture_root: Path,
+    large_fixture_receipt: Path,
 ) -> dict[str, Any]:
     """host preflight와 native block 검증을 모든 87개 block에 적용한다."""
 
     if RUN_ID_PATTERN.fullmatch(run_id) is None or run_id in {".", ".."}:
         raise ContractError("INVALID_RUN_ID")
+    large_fixture_input = _validate_large_fixture_input(
+        large_fixture_root=large_fixture_root,
+        large_fixture_receipt=large_fixture_receipt,
+    )
     plan = validate_plan(plan_path)
     schedule = build_schedule(plan)
     manifest = _strict_command_manifest(
@@ -1991,6 +2035,7 @@ def execute_schedule(
                 runtime_executables[boundary_id],
                 runtime_evidence[boundary_id],
                 boundary_id=boundary_id,
+                large_fixture_input=large_fixture_input,
             )
             for boundary_id in RUNTIME_DEPENDENCY_ROLES_BY_BOUNDARY
         }
@@ -2168,6 +2213,8 @@ def _parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--output-root", type=Path, required=True)
     run_parser.add_argument("--run-id", required=True)
     run_parser.add_argument("--repo-root", type=Path, required=True)
+    run_parser.add_argument("--large-fixture-root", type=Path, required=True)
+    run_parser.add_argument("--large-fixture-receipt", type=Path, required=True)
     return parser
 
 
@@ -2204,6 +2251,8 @@ def main(argv: list[str] | None = None) -> int:
                 output_root=args.output_root,
                 run_id=args.run_id,
                 repo_root=args.repo_root,
+                large_fixture_root=args.large_fixture_root,
+                large_fixture_receipt=args.large_fixture_receipt,
             )
             print(json.dumps(summary, sort_keys=True))
     except (ContractError, OSError) as exc:
