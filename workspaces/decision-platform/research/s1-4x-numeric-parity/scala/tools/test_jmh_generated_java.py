@@ -518,15 +518,65 @@ def main() -> int:
             coursier_cache=coursier,
             evidence_dir=generated_classes.parent,
         )
-        post_run_stdout = (
-            "\n".join(generator_stdout.splitlines()[:2])
-            + "\n# JMH version: 1.37\n"
+        runtime_generator_input = (
+            workspace / ".scala-build/runtime/classes/main"
         )
-        runtime_classpath_sha256 = helper.require_jmh_stdout_binding(
+        runtime_generator_output = (
+            workspace / ".scala-build/runtime_jmh"
+        )
+        runtime_generated_sources = runtime_generator_output / "sources"
+        runtime_generated_resources = runtime_generator_output / "resources"
+        runtime_class_output = (
+            workspace
+            / ".scala-build/runtime_jmh_cafebabe00/classes/main"
+        )
+        shutil.copytree(generator_input, runtime_generator_input)
+        shutil.copytree(generated_root, runtime_generated_sources)
+        shutil.copytree(generated_resources, runtime_generated_resources)
+        shutil.copytree(class_output, runtime_class_output)
+        runtime_prefix = (
+            f'Processing 149 classes from {runtime_generator_input} '
+            'with "reflection" generator\n'
+            f"Writing out Java source to {runtime_generated_sources} "
+            f"and resources to {runtime_generated_resources}\n"
+        )
+        post_run_stdout = runtime_prefix + "# JMH version: 1.37\n"
+        runtime_classpath = helper.require_jmh_stdout_binding(
             generator_stdout,
             post_run_stdout,
+            workspace=workspace,
+            coursier_cache=coursier,
+            evidence_dir=generated_classes.parent,
         )
-        assert runtime_classpath_sha256 == classpath.runtime_classpath_sha256
+        expected_runtime_classpath = os.pathsep.join(
+            [
+                str(runtime_class_output),
+                str(runtime_generated_resources),
+                str(generated_classes),
+                str(dependency),
+            ]
+        )
+        runtime_classpath_sha256 = hashlib.sha256(
+            expected_runtime_classpath.encode("utf-8")
+        ).hexdigest()
+        assert (
+            runtime_classpath.runtime_classpath_sha256
+            == runtime_classpath_sha256
+        )
+        assert [item.path for item in runtime_classpath.entries] == [
+            runtime_class_output,
+            runtime_generated_resources,
+            generated_classes,
+            dependency,
+        ]
+        assert (
+            runtime_classpath.generator_class_input_sha256
+            == classpath.generator_class_input_sha256
+        )
+        assert (
+            runtime_classpath.generated_resource_root_sha256
+            == classpath.generated_resource_root_sha256
+        )
         helper.require_runtime_classpath_evidence(
             runtime_classpath_sha256,
             [{"runtimeClasspathSha256": runtime_classpath_sha256}],
@@ -537,8 +587,66 @@ def main() -> int:
             lambda: helper.require_jmh_stdout_binding(
                 generator_stdout,
                 post_run_stdout.replace("Processing 149", "Processing 148"),
+                workspace=workspace,
+                coursier_cache=coursier,
+                evidence_dir=generated_classes.parent,
             ),
         )
+        for forged_stdout in (
+            post_run_stdout.replace('"reflection"', '"asm"'),
+            post_run_stdout.replace("JMH version: 1.37", "JMH version: 1.36"),
+            post_run_stdout.replace("Processing 149", "Processing 149\x00"),
+            post_run_stdout.replace("\n# JMH", "\r\n# JMH"),
+        ):
+            expect_error(
+                helper,
+                "JMH_RUN_STDOUT_BINDING_INVALID",
+                lambda value=forged_stdout: helper.require_jmh_stdout_binding(
+                    generator_stdout,
+                    value,
+                    workspace=workspace,
+                    coursier_cache=coursier,
+                    evidence_dir=generated_classes.parent,
+                ),
+            )
+        runtime_benchmark_list = (
+            runtime_class_output / "META-INF/BenchmarkList"
+        )
+        runtime_benchmark_bytes = runtime_benchmark_list.read_bytes()
+        runtime_benchmark_list.write_bytes(b"runtime-byte-drift\n")
+        try:
+            expect_error(
+                helper,
+                "JMH_RUN_CLASSPATH_DRIFT",
+                lambda: helper.require_jmh_stdout_binding(
+                    generator_stdout,
+                    post_run_stdout,
+                    workspace=workspace,
+                    coursier_cache=coursier,
+                    evidence_dir=generated_classes.parent,
+                ),
+            )
+        finally:
+            runtime_benchmark_list.write_bytes(runtime_benchmark_bytes)
+        extra_runtime_output = (
+            workspace
+            / ".scala-build/runtime_jmh_deadbeef00/classes/main"
+        )
+        shutil.copytree(runtime_class_output, extra_runtime_output)
+        try:
+            expect_error(
+                helper,
+                "JMH_RUN_CLASS_OUTPUT_CARDINALITY_INVALID",
+                lambda: helper.require_jmh_stdout_binding(
+                    generator_stdout,
+                    post_run_stdout,
+                    workspace=workspace,
+                    coursier_cache=coursier,
+                    evidence_dir=generated_classes.parent,
+                ),
+            )
+        finally:
+            shutil.rmtree(extra_runtime_output.parents[1])
         expect_error(
             helper,
             "JMH_GENERATOR_STDOUT_INVALID",
@@ -558,6 +666,25 @@ def main() -> int:
             lambda: helper.require_runtime_classpath_evidence(
                 runtime_classpath_sha256,
                 [{"runtimeClasspathSha256": "0" * 64}],
+            ),
+        )
+        expect_error(
+            helper,
+            "JMH_RUN_CLASSPATH_DRIFT",
+            lambda: helper.require_runtime_classpath_evidence(
+                runtime_classpath_sha256,
+                [],
+            ),
+        )
+        expect_error(
+            helper,
+            "JMH_RUN_CLASSPATH_DRIFT",
+            lambda: helper.require_runtime_classpath_evidence(
+                runtime_classpath_sha256,
+                [
+                    {"runtimeClasspathSha256": runtime_classpath_sha256},
+                    {"runtimeClasspathSha256": "0" * 64},
+                ],
             ),
         )
         alternate_dependency = dependency.with_name("jmh-core-copy.jar")
@@ -653,6 +780,148 @@ def main() -> int:
                 classpath_entries=entry_values,
                 scala_class_output_path_id=class_output_id,
                 generated_resource_path_id=generated_resource_id,
+            )
+            runtime_classpath = helper.require_jmh_stdout_binding(
+                generator_stdout,
+                post_run_stdout,
+                workspace=workspace,
+                coursier_cache=coursier,
+                evidence_dir=generated_classes.parent,
+            )
+            generated_sources_sha256 = helper.canonical_sha256(
+                helper._file_digest_values(sources.files)
+            )
+            precompile_generator = {
+                "generatorId": "reflection",
+                "processedClassCount": classpath.processed_class_count,
+                "classInputPathId": helper._portable_path_id(
+                    classpath.generator_class_input,
+                    workspace=workspace,
+                    coursier_cache=coursier,
+                    evidence_dir=generated_classes.parent,
+                ),
+                "generatedSourceRootPathId": helper._portable_path_id(
+                    classpath.generated_source_root,
+                    workspace=workspace,
+                    coursier_cache=coursier,
+                    evidence_dir=generated_classes.parent,
+                ),
+                "generatedResourceRootPathId": generated_resource_id,
+                "classInputClosureSha256": (
+                    classpath.generator_class_input_sha256
+                ),
+                "generatedResourceClosureSha256": (
+                    classpath.generated_resource_root_sha256
+                ),
+            }
+            runtime_evidence = helper.create_jmh_runtime_closure_evidence(
+                precompile_classpath=classpath,
+                runtime_classpath=runtime_classpath,
+                generated_sources_sha256=generated_sources_sha256,
+                workspace=workspace,
+                coursier_cache=coursier,
+                evidence_dir=generated_classes.parent,
+            )
+            helper.validate_jmh_runtime_closure_evidence(
+                runtime_evidence,
+                classpath_entries=entry_values,
+                classpath_post_run=post_run,
+                scala_class_output_path_id=class_output_id,
+                jmh_generator=precompile_generator,
+                generated_sources_sha256=generated_sources_sha256,
+            )
+            swapped_runtime_roles = json.loads(
+                json.dumps(runtime_evidence)
+            )
+            swapped_runtime_roles["roleMappings"][0][
+                "runtimePathId"
+            ] = runtime_evidence["roleMappings"][1]["runtimePathId"]
+            expect_error(
+                helper,
+                "JMH_RUNTIME_CLOSURE_EVIDENCE_INVALID",
+                lambda: helper.validate_jmh_runtime_closure_evidence(
+                    swapped_runtime_roles,
+                    classpath_entries=entry_values,
+                    classpath_post_run=post_run,
+                    scala_class_output_path_id=class_output_id,
+                    jmh_generator=precompile_generator,
+                    generated_sources_sha256=generated_sources_sha256,
+                ),
+            )
+            extra_runtime_role = json.loads(json.dumps(runtime_evidence))
+            extra_runtime_role["roleMappings"].append(
+                {
+                    "role": "FORGED_EXTRA_ROLE",
+                    "precompilePathId": classpath.entries[2].path_id,
+                    "runtimePathId": runtime_classpath.entries[2].path_id,
+                    "sha256": runtime_classpath.entries[2].sha256,
+                }
+            )
+            expect_error(
+                helper,
+                "JMH_RUNTIME_CLOSURE_EVIDENCE_INVALID",
+                lambda: helper.validate_jmh_runtime_closure_evidence(
+                    extra_runtime_role,
+                    classpath_entries=entry_values,
+                    classpath_post_run=post_run,
+                    scala_class_output_path_id=class_output_id,
+                    jmh_generator=precompile_generator,
+                    generated_sources_sha256=generated_sources_sha256,
+                ),
+            )
+            reordered_runtime_dependencies = json.loads(
+                json.dumps(runtime_evidence)
+            )
+            reordered_runtime_dependencies["runtimeClasspathEntries"][
+                2:4
+            ] = list(
+                reversed(
+                    reordered_runtime_dependencies[
+                        "runtimeClasspathEntries"
+                    ][2:4]
+                )
+            )
+            reordered_runtime_dependencies[
+                "runtimeClasspathEntriesSha256"
+            ] = helper.canonical_sha256(
+                reordered_runtime_dependencies[
+                    "runtimeClasspathEntries"
+                ]
+            )
+            expect_error(
+                helper,
+                "JMH_RUNTIME_CLOSURE_EVIDENCE_INVALID",
+                lambda: helper.validate_jmh_runtime_closure_evidence(
+                    reordered_runtime_dependencies,
+                    classpath_entries=entry_values,
+                    classpath_post_run=post_run,
+                    scala_class_output_path_id=class_output_id,
+                    jmh_generator=precompile_generator,
+                    generated_sources_sha256=generated_sources_sha256,
+                ),
+            )
+            forged_runtime_identity = json.loads(
+                json.dumps(runtime_evidence)
+            )
+            forged_runtime_identity["runtimeClasspathEntries"][2][
+                "identitySha256"
+            ] = "0" * 64
+            forged_runtime_identity[
+                "runtimeClasspathEntriesSha256"
+            ] = helper.canonical_sha256(
+                forged_runtime_identity["runtimeClasspathEntries"]
+            )
+            expect_error(
+                helper,
+                "JMH_RUNTIME_CLOSURE_EVIDENCE_INVALID",
+                lambda: helper.validate_jmh_runtime_closure_evidence(
+                    forged_runtime_identity,
+                    classpath_entries=entry_values,
+                    classpath_post_run=post_run,
+                    scala_class_output_path_id=class_output_id,
+                    jmh_generator=precompile_generator,
+                    generated_sources_sha256=generated_sources_sha256,
+                ),
             )
             swapped_roles = json.loads(json.dumps(post_run))
             swapped_roles["allowedIdentityRotations"][0]["pathId"] = (

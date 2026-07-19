@@ -771,6 +771,83 @@ def selector_fixture(
             }
             physical_workspace = Path("/sealed/scala-workspace")
             physical_coursier = Path("/sealed/coursier")
+            runtime_class_output_id = (
+                "SCALA_WORKSPACE/.scala-build/"
+                "selector_runtime_jmh_feedface00/classes/main"
+            )
+            runtime_generator_input_id = (
+                "SCALA_WORKSPACE/.scala-build/"
+                "selector_runtime/classes/main"
+            )
+            runtime_generated_source_id = (
+                "SCALA_WORKSPACE/.scala-build/"
+                "selector_runtime_jmh/sources"
+            )
+            runtime_generated_resource_id = (
+                "SCALA_WORKSPACE/.scala-build/"
+                "selector_runtime_jmh/resources"
+            )
+            runtime_classpath_entries = [
+                {
+                    "pathId": runtime_class_output_id,
+                    "kind": "directory",
+                    "sha256": classpath_entries[0]["sha256"],
+                    "identitySha256": "6" * 64,
+                },
+                {
+                    "pathId": runtime_generated_resource_id,
+                    "kind": "directory",
+                    "sha256": classpath_entries[1]["sha256"],
+                    "identitySha256": "7" * 64,
+                },
+                *classpath_entries[2:],
+            ]
+            runtime_generator = {
+                "generatorId": "reflection",
+                "processedClassCount": 149,
+                "classInputPathId": runtime_generator_input_id,
+                "generatedSourceRootPathId": runtime_generated_source_id,
+                "generatedResourceRootPathId": (
+                    runtime_generated_resource_id
+                ),
+                "classInputClosureSha256": "f" * 64,
+                "generatedResourceClosureSha256": "e" * 64,
+            }
+            runtime_closure = {
+                "schemaVersion": "s1.4x-jmh-runtime-closure-v1",
+                "generator": runtime_generator,
+                "roleMappings": [
+                    {
+                        "role": "SCALA_CLASS_OUTPUT",
+                        "precompilePathId": class_output_id,
+                        "runtimePathId": runtime_class_output_id,
+                        "sha256": classpath_entries[0]["sha256"],
+                    },
+                    {
+                        "role": "JMH_GENERATED_SOURCES",
+                        "precompilePathId": (
+                            "SCALA_WORKSPACE/.scala-build/"
+                            "selector_jmh/sources"
+                        ),
+                        "runtimePathId": runtime_generated_source_id,
+                        "sha256": canonical_sha256(
+                            generated_sources
+                        ),
+                    },
+                    {
+                        "role": "JMH_GENERATED_RESOURCES",
+                        "precompilePathId": generated_resource_id,
+                        "runtimePathId": runtime_generated_resource_id,
+                        "sha256": classpath_entries[1]["sha256"],
+                    },
+                ],
+                "runtimeClasspathEntries": runtime_classpath_entries,
+                "runtimeClasspathEntriesSha256": canonical_sha256(
+                    runtime_classpath_entries
+                ),
+                "runtimeClasspathSha256": "",
+                "status": "PASS",
+            }
             generator_input_path = (
                 physical_workspace / ".scala-build/selector/classes/main"
             )
@@ -784,6 +861,23 @@ def selector_fixture(
                 physical_workspace
                 / ".scala-build/selector_jmh_deadbeef00/classes/main"
             )
+            runtime_generator_input_path = (
+                physical_workspace
+                / ".scala-build/selector_runtime/classes/main"
+            )
+            runtime_generated_source_path = (
+                physical_workspace
+                / ".scala-build/selector_runtime_jmh/sources"
+            )
+            runtime_generated_resource_path = (
+                physical_workspace
+                / ".scala-build/selector_runtime_jmh/resources"
+            )
+            runtime_class_output_path = (
+                physical_workspace
+                / ".scala-build/"
+                "selector_runtime_jmh_feedface00/classes/main"
+            )
             dependency_path = (
                 physical_coursier
                 / "https/repo.example/org/openjdk/jmh/"
@@ -795,16 +889,37 @@ def selector_fixture(
                 f"Writing out Java source to {generated_source_path} "
                 f"and resources to {generated_resource_path}\n"
             )
-            runtime_classpath = (
+            precompile_runtime_classpath = (
                 f"{class_output_path}:{generated_resource_path}:"
                 f"{dependency_path}:{generated_class_root}"
             )
             generator_classpath_prefix = (
-                generator_stdout_prefix + runtime_classpath + "\n"
+                generator_stdout_prefix
+                + precompile_runtime_classpath
+                + "\n"
             )
+            runtime_generator_stdout_prefix = (
+                f"Processing 149 classes from "
+                f"{runtime_generator_input_path} "
+                'with "reflection" generator\n'
+                f"Writing out Java source to "
+                f"{runtime_generated_source_path} "
+                f"and resources to {runtime_generated_resource_path}\n"
+            )
+            runtime_classpath = (
+                f"{runtime_class_output_path}:"
+                f"{runtime_generated_resource_path}:"
+                f"{dependency_path}:{generated_class_root}"
+            )
+            precompile_runtime_classpath_sha = hashlib.sha256(
+                precompile_runtime_classpath.encode("utf-8")
+            ).hexdigest()
             runtime_classpath_sha = hashlib.sha256(
                 runtime_classpath.encode("utf-8")
             ).hexdigest()
+            runtime_closure["runtimeClasspathSha256"] = (
+                runtime_classpath_sha
+            )
             for fork_value in forks:
                 fork_value["runtimeClasspathSha256"] = runtime_classpath_sha
             write_json(fork_path, forks)
@@ -814,7 +929,8 @@ def selector_fixture(
                 newline="\n",
             )
             stdout_path.write_text(
-                generator_stdout_prefix + "# JMH version: 1.37\n",
+                runtime_generator_stdout_prefix
+                + "# JMH version: 1.37\n",
                 encoding="utf-8",
                 newline="\n",
             )
@@ -900,6 +1016,13 @@ def selector_fixture(
                 "classpathPostRun": classpath_post_run,
                 "classpathPostRunSha256": canonical_sha256(
                     classpath_post_run
+                ),
+                "jmhRuntimeClosure": runtime_closure,
+                "jmhRuntimeClosureSha256": canonical_sha256(
+                    runtime_closure
+                ),
+                "precompileRuntimeClasspathSha256": (
+                    precompile_runtime_classpath_sha
                 ),
                 "runtimeClasspathSha256": runtime_classpath_sha,
                 "scalaClassOutputPathId": class_output_id,
@@ -1929,6 +2052,212 @@ def main() -> int:
         )
 
     selected_inputs = selector_inputs({"A": 100.0, "B": 95.0, "C": 96.0})
+    binding_case_root = Path("r1/A/case-01")
+    binding_artifact_root = selected_inputs[
+        "qualification_artifact_root"
+    ]
+    binding_receipt_path = (
+        binding_artifact_root
+        / binding_case_root
+        / module.jmh_precompile.RECEIPT_NAME
+    )
+    binding_compile_stdout = (
+        binding_artifact_root
+        / binding_case_root
+        / module.jmh_precompile.SCALA_COMPILE_STDOUT
+    )
+    binding_jmh_stdout = (
+        binding_artifact_root / binding_case_root / "jmh.stdout"
+    )
+    binding_fork_path = (
+        binding_artifact_root
+        / binding_case_root
+        / "fork-evidence.normalized.json"
+    )
+    binding_receipt = json.loads(
+        binding_receipt_path.read_text(encoding="utf-8")
+    )
+    binding_forks = json.loads(
+        binding_fork_path.read_text(encoding="utf-8")
+    )
+
+    def validate_binding(
+        *,
+        receipt_value: dict = binding_receipt,
+        forks_value: list = binding_forks,
+    ) -> None:
+        module.validate_jmh_stdout_precompile_binding(
+            compile_stdout=binding_compile_stdout,
+            jmh_stdout=binding_jmh_stdout,
+            receipt=receipt_value,
+            fork_evidence=forks_value,
+            artifact_root=binding_artifact_root,
+            case_root=binding_case_root,
+            snapshot=module.SealedEvidenceSnapshot(),
+        )
+
+    validate_binding()
+    expect_t3_error(
+        module,
+        lambda: validate_binding(forks_value=[]),
+        "empty JMH fork classpath evidence passed",
+        expected_prefix="JMH_RUN_STDOUT_BINDING_INVALID",
+    )
+    mixed_forks = json.loads(json.dumps(binding_forks))
+    mixed_forks.append(json.loads(json.dumps(binding_forks[0])))
+    mixed_forks[-1]["runtimeClasspathSha256"] = "0" * 64
+    expect_t3_error(
+        module,
+        lambda: validate_binding(forks_value=mixed_forks),
+        "mixed JMH fork classpath evidence passed",
+        expected_prefix="JMH_RUN_STDOUT_BINDING_INVALID",
+    )
+
+    binding_stdout_bytes = binding_jmh_stdout.read_bytes()
+    binding_stdout_text = binding_stdout_bytes.decode("utf-8")
+    for label, forged_stdout in (
+        (
+            "JMH generator count tamper",
+            binding_stdout_text.replace(
+                "Processing 149",
+                "Processing 148",
+                1,
+            ).encode("utf-8"),
+        ),
+        (
+            "JMH version tamper",
+            binding_stdout_text.replace(
+                "# JMH version: 1.37",
+                "# JMH version: 1.36",
+                1,
+            ).encode("utf-8"),
+        ),
+        (
+            "JMH NUL tamper",
+            binding_stdout_bytes.replace(b"Processing ", b"Processing \x00", 1),
+        ),
+        (
+            "JMH CR tamper",
+            binding_stdout_bytes.replace(b"\n", b"\r\n", 1),
+        ),
+    ):
+        binding_jmh_stdout.write_bytes(forged_stdout)
+        try:
+            expect_t3_error(
+                module,
+                validate_binding,
+                f"{label} passed",
+                expected_prefix="JMH_RUN_STDOUT_BINDING_INVALID",
+            )
+        finally:
+            binding_jmh_stdout.write_bytes(binding_stdout_bytes)
+
+    def runtime_receipt_tamper() -> dict:
+        return json.loads(json.dumps(binding_receipt))
+
+    def close_runtime_tamper(value: dict) -> dict:
+        closure = value["jmhRuntimeClosure"]
+        closure["runtimeClasspathEntriesSha256"] = canonical_sha256(
+            closure["runtimeClasspathEntries"]
+        )
+        value["jmhRuntimeClosureSha256"] = canonical_sha256(closure)
+        return value
+
+    binding_receipt_tampers: list[tuple[dict, str]] = []
+    swapped_runtime_mapping = runtime_receipt_tamper()
+    swapped_runtime_mapping["jmhRuntimeClosure"]["roleMappings"][0][
+        "runtimePathId"
+    ] = swapped_runtime_mapping["jmhRuntimeClosure"]["roleMappings"][2][
+        "runtimePathId"
+    ]
+    binding_receipt_tampers.append(
+        (
+            close_runtime_tamper(swapped_runtime_mapping),
+            "self-consistent runtime role mapping swap passed",
+        )
+    )
+    extra_runtime_mapping = runtime_receipt_tamper()
+    extra_runtime_mapping["jmhRuntimeClosure"]["roleMappings"].append(
+        {
+            "role": "FORGED_EXTRA_ROLE",
+            "precompilePathId": "COURSIER_CACHE/forged.jar",
+            "runtimePathId": "COURSIER_CACHE/forged.jar",
+            "sha256": "1" * 64,
+        }
+    )
+    binding_receipt_tampers.append(
+        (
+            close_runtime_tamper(extra_runtime_mapping),
+            "extra finalized runtime role mapping passed",
+        )
+    )
+    extra_runtime_class_output = runtime_receipt_tamper()
+    extra_runtime_class_output["jmhRuntimeClosure"][
+        "runtimeClasspathEntries"
+    ].append(
+        json.loads(
+            json.dumps(
+                extra_runtime_class_output["jmhRuntimeClosure"][
+                    "runtimeClasspathEntries"
+                ][0]
+            )
+        )
+    )
+    binding_receipt_tampers.append(
+        (
+            close_runtime_tamper(extra_runtime_class_output),
+            "extra runtime class-output entry passed",
+        )
+    )
+    reordered_runtime_tail = runtime_receipt_tamper()
+    reordered_runtime_tail["jmhRuntimeClosure"][
+        "runtimeClasspathEntries"
+    ][2:4] = list(
+        reversed(
+            reordered_runtime_tail["jmhRuntimeClosure"][
+                "runtimeClasspathEntries"
+            ][2:4]
+        )
+    )
+    binding_receipt_tampers.append(
+        (
+            close_runtime_tamper(reordered_runtime_tail),
+            "runtime dependency order tamper passed",
+        )
+    )
+    forged_runtime_tail_identity = runtime_receipt_tamper()
+    forged_runtime_tail_identity["jmhRuntimeClosure"][
+        "runtimeClasspathEntries"
+    ][2]["identitySha256"] = "0" * 64
+    binding_receipt_tampers.append(
+        (
+            close_runtime_tamper(forged_runtime_tail_identity),
+            "runtime dependency identity tamper passed",
+        )
+    )
+    forged_runtime_suffix = runtime_receipt_tamper()
+    forged_runtime_suffix["jmhRuntimeClosure"]["generator"][
+        "generatedResourceRootPathId"
+    ] = (
+        "SCALA_WORKSPACE/.scala-build/"
+        "selector_runtime_jmh/not-resources"
+    )
+    binding_receipt_tampers.append(
+        (
+            close_runtime_tamper(forged_runtime_suffix),
+            "runtime generated-resource suffix tamper passed",
+        )
+    )
+    for tampered_receipt, message in binding_receipt_tampers:
+        expect_t3_error(
+            module,
+            lambda value=tampered_receipt: validate_binding(
+                receipt_value=value
+            ),
+            message,
+            expected_prefix="JMH_RUN_STDOUT_BINDING_INVALID",
+        )
+
     exact_qualification_owner_gate_contract(
         module,
         root=selector_root / "exact-owner-gate",

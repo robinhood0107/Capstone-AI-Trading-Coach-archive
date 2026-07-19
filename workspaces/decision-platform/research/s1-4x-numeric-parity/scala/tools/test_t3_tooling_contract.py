@@ -319,10 +319,14 @@ def main() -> int:
     for marker in (
         "capture_classpath_post_run",
         "validate_classpath_post_run_evidence",
+        "create_jmh_runtime_closure_evidence",
+        "validate_jmh_runtime_closure_evidence",
         "SCALA_CLASS_OUTPUT",
         "JMH_GENERATED_RESOURCES",
         "ROTATED_SAME_BYTES",
         "classpathPostRunSha256",
+        "jmhRuntimeClosureSha256",
+        "precompileRuntimeClasspathSha256",
     ):
         assert marker in precompile_helper
     for marker in (
