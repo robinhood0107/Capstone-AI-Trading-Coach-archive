@@ -318,6 +318,66 @@ class BenchmarkBlockHelperTests(unittest.TestCase):
             finally:
                 os.close(pinned.descriptor)
 
+    def test_shared_python_executes_the_sealed_script_fd_after_path_swap(
+        self,
+    ) -> None:
+        helper = load_helper()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            python_source = Path(sys.executable).resolve(strict=True)
+            python_descriptor = os.open(python_source, os.O_RDONLY)
+            script = root / "shared.py"
+            script.write_text(
+                "import json\n"
+                'print(json.dumps({"status": "PASS"}, sort_keys=True))\n',
+                encoding="utf-8",
+            )
+            pinned_script = helper.pin_regular_file(
+                script,
+                label="SHARED_SCRIPT",
+                max_bytes=4096,
+            )
+            try:
+                prefix = "S1_4X_BENCHMARK_PYTHON"
+                environment = {
+                    "PATH": "/usr/bin:/bin",
+                    "LC_ALL": "C",
+                    "TZ": "UTC",
+                    f"{prefix}_BIN": str(python_source),
+                    f"{prefix}_SHA256": hashlib.sha256(
+                        python_source.read_bytes()
+                    ).hexdigest(),
+                    f"{prefix}_PINNED_FD_PATH": (
+                        f"/proc/self/fd/{python_descriptor}"
+                    ),
+                }
+                with mock.patch.dict(os.environ, environment, clear=False):
+                    pinned_python = helper.pinned_executable_environment(
+                        prefix,
+                        label="MARKER_PYTHON",
+                    )
+                replacement = root / "replacement.py"
+                replacement.write_text(
+                    'print(\'{"status": "FAIL"}\')\n',
+                    encoding="utf-8",
+                )
+                os.replace(replacement, script)
+                result = helper._run_shared_json_command(
+                    [
+                        str(pinned_python.fd_path),
+                        str(pinned_script.fd_path),
+                    ],
+                    label="SHARED_SCRIPT_PROBE",
+                    cwd=root,
+                    environment=environment,
+                    pinned_executables=(pinned_python,),
+                    pinned_files=(pinned_script,),
+                )
+                self.assertEqual(result, {"status": "PASS"})
+            finally:
+                os.close(pinned_script.descriptor)
+                os.close(python_descriptor)
+
     def test_pinned_tool_fd_inheritance_reaches_nested_stack_and_ghc(
         self,
     ) -> None:
