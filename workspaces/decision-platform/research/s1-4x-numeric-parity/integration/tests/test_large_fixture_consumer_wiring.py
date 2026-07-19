@@ -17,6 +17,7 @@ REPO_ROOT = S1_4X_ROOT.parents[3]
 SOURCE_LARGE = S1_4X_ROOT / "contract" / "fixtures" / "large"
 AGGREGATE = INTEGRATION / "tools" / "run-native-oci-regression-gates.sh"
 CORRECTNESS_WRAPPER = INTEGRATION / "tools" / "run-integration-correctness.sh"
+PYTHON_BENCHMARK_WRAPPER = INTEGRATION / "tools" / "run-python-benchmark-block.sh"
 sys.path.insert(0, str(INTEGRATION))
 
 import materialize_large_fixtures as materializer  # noqa: E402
@@ -62,20 +63,14 @@ def test_native_aggregate_materializes_and_checks_once_under_result_root() -> No
 
     assert source.count("materialize_large_fixtures.py") == 2
     assert (
-        source.count(
-            'python "$INTEGRATION/materialize_large_fixtures.py" materialize'
-        )
+        source.count('python "$INTEGRATION/materialize_large_fixtures.py" materialize')
         == 1
     )
     assert (
-        source.count('python "$INTEGRATION/materialize_large_fixtures.py" check')
-        == 1
+        source.count('python "$INTEGRATION/materialize_large_fixtures.py" check') == 1
     )
     assert 'LARGE_FIXTURE_ROOT="$RESULT_ROOT/large-fixtures"' in source
-    assert (
-        'LARGE_FIXTURE_RECEIPT="$RESULT_ROOT/large-fixture-receipt.json"'
-        in source
-    )
+    assert 'LARGE_FIXTURE_RECEIPT="$RESULT_ROOT/large-fixture-receipt.json"' in source
     assert 'export S1_4X_LARGE_FIXTURE_ROOT="$LARGE_FIXTURE_ROOT"' in source
     assert "contract/fixtures/large/generated" not in source
     assert 'generate_large_fixtures.py" --check' not in source
@@ -244,8 +239,8 @@ def _lane_inputs(
     return dependencies, evidence
 
 
-@pytest.mark.parametrize("boundary_id", ["scala", "haskell"])
-def test_only_native_language_lane_children_receive_the_validated_root(
+@pytest.mark.parametrize("boundary_id", runner.BOUNDARY_IDS)
+def test_every_benchmark_boundary_receives_the_validated_root(
     boundary_id: str,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -267,17 +262,29 @@ def test_only_native_language_lane_children_receive_the_validated_root(
     assert all("RECEIPT" not in key for key in environment)
 
 
-def test_language_lane_environment_requires_the_validated_marker(
+@pytest.mark.parametrize("boundary_id", runner.BOUNDARY_IDS)
+def test_benchmark_boundary_environment_requires_the_validated_marker(
+    boundary_id: str,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
-    dependencies, evidence = _lane_inputs("haskell", tmp_path)
+    dependencies, evidence = _lane_inputs(boundary_id, tmp_path)
 
     with pytest.raises(ContractError, match="LARGE_FIXTURE_INPUT_NOT_VALIDATED"):
         runner._benchmark_environment(
             dependencies,
             evidence,
-            boundary_id="haskell",
+            boundary_id=boundary_id,
             large_fixture_input=None,
         )
+
+
+def test_python_benchmark_wrapper_passes_explicit_materialized_root() -> None:
+    source = PYTHON_BENCHMARK_WRAPPER.read_text(encoding="utf-8")
+
+    assert (
+        'readonly LARGE_FIXTURE_ROOT="${S1_4X_LARGE_FIXTURE_ROOT:'
+        '?S1_4X_LARGE_FIXTURE_ROOT is required}"' in source
+    )
+    assert '--large-fixture-root "$LARGE_FIXTURE_ROOT"' in source

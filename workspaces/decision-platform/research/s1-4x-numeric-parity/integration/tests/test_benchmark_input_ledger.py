@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import shutil
 import sys
 import tempfile
@@ -22,18 +23,36 @@ from benchmark_input_ledger import (  # noqa: E402
     validate_input_ledger,
 )
 from gate import GateError, strict_json_load  # noqa: E402
+from materialize_large_fixtures import materialize  # noqa: E402
 from python_benchmark_block import _generated_array  # noqa: E402
 
 PLAN = BENCHMARKS / "benchmark-plan.v1.json"
 
 
 class BenchmarkInputLedgerTests(TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls._materialized_temporary = tempfile.TemporaryDirectory()
+        parent = Path(cls._materialized_temporary.name).resolve(strict=True)
+        cls.materialized_root = parent / "large-fixture-root"
+        cls.materialized_receipt = parent / "large-fixture-receipt.json"
+        materialize(
+            s1_4x_root=S1_4X,
+            output_root=cls.materialized_root,
+            receipt=cls.materialized_receipt,
+        )
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls._materialized_temporary.cleanup()
+
     def test_dsr_case_binds_extreme_mix_and_exact_trial_provenance(self) -> None:
         plan = strict_json_load(PLAN)
         ledger = build_input_ledger(
             plan=plan,
             plan_path=PLAN,
             repo_root=REPO,
+            large_fixture_root=self.materialized_root,
             boundary_id="scala",
             selector_id="scala/probabilistic-scalar",
         )
@@ -78,6 +97,7 @@ class BenchmarkInputLedgerTests(TestCase):
             plan=plan,
             plan_path=PLAN,
             repo_root=REPO,
+            large_fixture_root=self.materialized_root,
             boundary_id="scala",
             selector_id="scala/probabilistic-scalar",
         )
@@ -89,9 +109,80 @@ class BenchmarkInputLedgerTests(TestCase):
                 plan=plan,
                 plan_path=PLAN,
                 repo_root=REPO,
+                large_fixture_root=self.materialized_root,
                 boundary_id="scala",
                 selector_id="scala/probabilistic-scalar",
             )
+
+    def test_ledger_uses_only_portable_materialized_root_identity(self) -> None:
+        plan = strict_json_load(PLAN)
+        ledger = build_input_ledger(
+            plan=plan,
+            plan_path=PLAN,
+            repo_root=REPO,
+            large_fixture_root=self.materialized_root,
+            boundary_id="haskell",
+            selector_id="haskell/coverage-batch",
+        )
+
+        serialized = json.dumps(ledger, allow_nan=False, sort_keys=True)
+        self.assertEqual(
+            ledger["materializedRootPathId"],
+            "S1_4X_LARGE_FIXTURE_ROOT",
+        )
+        self.assertNotIn(str(self.materialized_root), serialized)
+        self.assertTrue(
+            all(
+                fixture["manifestPath"].startswith("S1_4X_LARGE_FIXTURE_ROOT/large/")
+                and fixture["payloadPath"].startswith(
+                    "S1_4X_LARGE_FIXTURE_ROOT/large/generated/"
+                )
+                for fixture in ledger["fixtures"]
+            )
+        )
+
+    def test_ledger_rejects_tracked_generated_fallback_and_wrong_large_root(
+        self,
+    ) -> None:
+        plan = strict_json_load(PLAN)
+        arguments = {
+            "plan": plan,
+            "plan_path": PLAN,
+            "repo_root": REPO,
+            "boundary_id": "scala",
+            "selector_id": "scala/path-transform",
+        }
+        with self.assertRaisesRegex(
+            GateError,
+            "BENCHMARK_LARGE_FIXTURE_ROOT_INVALID",
+        ):
+            build_input_ledger(
+                **arguments,
+                large_fixture_root=S1_4X / "contract/fixtures",
+            )
+        with self.assertRaisesRegex(
+            GateError,
+            "BENCHMARK_LARGE_FIXTURE_ROOT_INVALID",
+        ):
+            build_input_ledger(
+                **arguments,
+                large_fixture_root=LARGE,
+            )
+
+        payload = self.materialized_root / "large/generated/large-prices-n100000.f64le"
+        original = payload.read_bytes()
+        try:
+            payload.write_bytes(bytes([original[0] ^ 1]) + original[1:])
+            with self.assertRaisesRegex(
+                GateError,
+                "GENERATED_FIXTURE_DIGEST_MISMATCH",
+            ):
+                build_input_ledger(
+                    **arguments,
+                    large_fixture_root=self.materialized_root,
+                )
+        finally:
+            payload.write_bytes(original)
 
     def test_generated_array_rejects_payload_digest_drift_and_symlink(self) -> None:
         temporary = Path(self.enterContext(tempfile.TemporaryDirectory()))
@@ -111,7 +202,11 @@ class BenchmarkInputLedgerTests(TestCase):
         manifest_name = "large-prices-n100000.manifest.json"
         binary_name = "large-prices-n100000.f64le"
         shutil.copyfile(LARGE / manifest_name, copied_large / manifest_name)
-        shutil.copyfile(LARGE / "generated" / binary_name, generated / binary_name)
+        materialized_large = self.materialized_root / "large"
+        shutil.copyfile(
+            materialized_large / "generated" / binary_name,
+            generated / binary_name,
+        )
 
         values = _generated_array(copied_large, binary_name, 100000)
         self.assertEqual(values.shape, (100000,))
@@ -123,6 +218,6 @@ class BenchmarkInputLedgerTests(TestCase):
             _generated_array(copied_large, binary_name, 100000)
 
         binary.unlink()
-        binary.symlink_to(LARGE / "generated" / binary_name)
+        binary.symlink_to(materialized_large / "generated" / binary_name)
         with self.assertRaisesRegex(GateError, "GENERATED_FIXTURE_UNSAFE"):
             _generated_array(copied_large, binary_name, 100000)
