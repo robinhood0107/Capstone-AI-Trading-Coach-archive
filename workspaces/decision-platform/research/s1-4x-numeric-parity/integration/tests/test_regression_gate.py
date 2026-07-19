@@ -63,9 +63,10 @@ def _fake_uv(tmp_path: Path) -> tuple[Path, str]:
 def _junit_payload(test_count: int) -> bytes:
     return (
         '<?xml version="1.0" encoding="utf-8"?>'
-        f'<testsuites tests="{test_count}" failures="0" errors="0" '
-        f'skipped="0"><testsuite tests="{test_count}" failures="0" '
-        'errors="0" skipped="0"/></testsuites>'
+        '<testsuites name="pytest tests">'
+        f'<testsuite name="pytest" tests="{test_count}" failures="0" '
+        'errors="0" skipped="0"/>'
+        "</testsuites>"
     ).encode("utf-8")
 
 
