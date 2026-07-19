@@ -1315,12 +1315,10 @@ class NativeBenchmarkBlockTests(TestCase):
             selected_profile.read_text(encoding="utf-8")
         )
         selected_profile_document["sourceTreeSha256"] = source_tree_sha256
-        selected_profile_document["fullCorrectnessSha256"] = (
-            baseline_correctness_sha256
-        )
-        selected_profile_document["qualificationArtifactSha256"] = (
-            qualification_artifact_sha256
-        )
+        # Tracked profile은 materialization 당시 증거를, receipt는 fresh
+        # benchmark-subject requalification 증거를 각각 보존한다.
+        selected_profile_document["fullCorrectnessSha256"] = "e" * 64
+        selected_profile_document["qualificationArtifactSha256"] = "f" * 64
         selected_profile.write_text(
             json.dumps(selected_profile_document, sort_keys=True),
             encoding="utf-8",

@@ -773,6 +773,47 @@ class ProfileSelectionContractTests(unittest.TestCase):
         self.assertEqual(document["qualificationArtifactSha256"], "4" * 64)
         self.assertNotIn("manualOverride", document)
 
+    def test_final_profile_accepts_fresh_requalification_evidence(self) -> None:
+        helper = load_helper()
+        selection = {
+            "profileId": "baseline-o0-fasm",
+            "selectedBy": "proven-fallback",
+        }
+        materialized = helper.build_final_profile_document(
+            selection=selection,
+            source_tree_sha256="1" * 64,
+            full_correctness_sha256="2" * 64,
+            qualification_plan_sha256="3" * 64,
+            qualification_artifact_sha256="4" * 64,
+            selector_config_sha256="5" * 64,
+            compiler_sha256="6" * 64,
+        )
+        refreshed = helper.build_final_profile_document(
+            selection=selection,
+            source_tree_sha256="1" * 64,
+            full_correctness_sha256="7" * 64,
+            qualification_plan_sha256="3" * 64,
+            qualification_artifact_sha256="8" * 64,
+            selector_config_sha256="5" * 64,
+            compiler_sha256="6" * 64,
+        )
+
+        helper.validate_materialized_profile_selection(
+            materialized,
+            refreshed,
+        )
+
+        drifted = dict(refreshed)
+        drifted["profileId"] = "optimized-o2-fasm"
+        with self.assertRaisesRegex(
+            helper.WorkflowError,
+            "SELECTED_PROFILE_REQUALIFICATION_DRIFT",
+        ):
+            helper.validate_materialized_profile_selection(
+                materialized,
+                drifted,
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

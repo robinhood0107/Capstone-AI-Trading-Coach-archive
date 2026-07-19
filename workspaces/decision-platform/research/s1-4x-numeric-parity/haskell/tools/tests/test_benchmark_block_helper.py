@@ -876,10 +876,8 @@ class BenchmarkBlockHelperTests(unittest.TestCase):
                     "sourceTreeSha256": source_tree,
                     "compilerSha256": compiler,
                     "qualificationPlanSha256": plan,
-                    "qualificationArtifactSha256": evidence[
-                        "qualification"
-                    ].sha256,
-                    "fullCorrectnessSha256": evidence["baseline"].sha256,
+                    "qualificationArtifactSha256": "e" * 64,
+                    "fullCorrectnessSha256": "f" * 64,
                 }
                 closure = helper.validate_profile_evidence_closure(
                     profile=profile,
@@ -891,10 +889,10 @@ class BenchmarkBlockHelperTests(unittest.TestCase):
                     evidence["baseline"].sha256,
                 )
                 altered = dict(profile)
-                altered["fullCorrectnessSha256"] = evidence["optimized"].sha256
+                altered["selectedBy"] = "frozen-criterion-selector"
                 with self.assertRaisesRegex(
                     helper.BlockError,
-                    "SELECTED_CORRECTNESS",
+                    "PROFILE_QUALIFICATION",
                 ):
                     helper.validate_profile_evidence_closure(
                         profile=altered,
