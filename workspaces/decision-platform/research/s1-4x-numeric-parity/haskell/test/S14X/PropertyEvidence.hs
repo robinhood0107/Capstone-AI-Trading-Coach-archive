@@ -651,18 +651,65 @@ sourceClosureSha256 root = do
   entries <- traverse (closureEntry root) files
   pure (sha256Text (BS.concat entries))
 
+propertyClosureConfigurationPaths :: [FilePath]
+propertyClosureConfigurationPaths =
+  [ "package.yaml",
+    "s1-4x-haskell.cabal",
+    "stack.yaml",
+    "stack.yaml.lock",
+    "selected-profile.v1.json",
+    "source-inputs.v1.json",
+    ".hlint.yaml",
+    "Containerfile",
+    "ghc-compatibility-solve-failure.v1.json",
+    "lint-exceptions.v1.json",
+    "stack-ghc-9.14.1.yaml",
+    "stack-ghc-9.14.1.yaml.lock",
+    "stylish-ghc2024-fallback.v1.json",
+    "toolchain-lock.v1.json",
+    "tools/assert-toolchain.sh",
+    "tools/check-format.sh",
+    "tools/check-hlint.sh",
+    "tools/compatibility_evidence.py",
+    "tools/fixtures/hlint-negative.v1.json",
+    "tools/fixtures/hlint/aliased-from-left.hs",
+    "tools/fixtures/hlint/aliased-from-right.hs",
+    "tools/fixtures/hlint/core-system-io.hs",
+    "tools/fixtures/hlint/debug-trace.hs",
+    "tools/fixtures/hlint/forbidden-deriving.hs",
+    "tools/fixtures/hlint/forbidden-extension.hs",
+    "tools/fixtures/hlint/foreign-interface.hs",
+    "tools/fixtures/hlint/partial-and-unsafe.hs",
+    "tools/fixtures/hlint/qualified-from-just.hs",
+    "tools/fixtures/hlint/qualified-throw-io.hs",
+    "tools/fixtures/hlint/qualified-throw.hs",
+    "tools/fixtures/hlint/unchecked-folds.hs",
+    "tools/fixtures/hlint/unsafe-module.hs",
+    "tools/fixtures/hlint/unsafe-modules.hs",
+    "tools/fixtures/process/large/unicode-digit-path.manifest.json",
+    "tools/fixtures/process/large/unicode-digit-sha.manifest.json",
+    "tools/fixtures/stylish/misformatted.hs",
+    "tools/haskell_benchmark_block.py",
+    "tools/haskell_evidence.py",
+    "tools/hlint_inventory.py",
+    "tools/profile_workflow.py",
+    "tools/python-runtime.sh",
+    "tools/run-benchmark-block.sh",
+    "tools/run-candidate.sh",
+    "tools/run-correctness-profile.sh",
+    "tools/run-ghc-9.14.1-compatibility.sh",
+    "tools/run-oci-correctness.sh",
+    "tools/run-profile-qualification.sh",
+    "tools/run-property-evidence.sh",
+    "tools/select-proven-profile.sh",
+    "tools/stylish_fallback.py",
+    "tools/validate-ghc-9.14.1-compatibility.sh"
+  ]
+
 candidateClosureFiles :: FilePath -> IO [FilePath]
 candidateClosureFiles root = do
   sourceFiles <- fmap concat (traverse (sourceFilesBelow root) ["src", "app", "test", "benchmark"])
-  let configurationFiles =
-        [ root </> "package.yaml",
-          root </> "s1-4x-haskell.cabal",
-          root </> "stack.yaml",
-          root </> "stack-ghc-9.14.1.yaml",
-          root </> "stack.yaml.lock",
-          root </> "selected-profile.v1.json",
-          root </> "source-inputs.v1.json"
-        ]
+  let configurationFiles = fmap (root </>) propertyClosureConfigurationPaths
   pure (sort (configurationFiles <> sourceFiles))
 
 sourceFilesBelow :: FilePath -> FilePath -> IO [FilePath]
