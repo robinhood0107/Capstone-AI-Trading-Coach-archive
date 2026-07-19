@@ -604,6 +604,21 @@ def main() -> int:
             ),
         )
         dependency.write_bytes(b"jar-bytes\n")
+        classpath = helper.classpath_closure(
+            generator_stdout,
+            workspace=workspace,
+            coursier_cache=coursier,
+            evidence_dir=generated_classes.parent,
+        )
+        entry_values = [
+            {
+                "pathId": item.path_id,
+                "kind": item.kind,
+                "sha256": item.sha256,
+                "identitySha256": item.identity_sha256,
+            }
+            for item in classpath.entries
+        ]
 
         class_output_id = classpath.entries[0].path_id
         generated_resource_id = classpath.entries[1].path_id
