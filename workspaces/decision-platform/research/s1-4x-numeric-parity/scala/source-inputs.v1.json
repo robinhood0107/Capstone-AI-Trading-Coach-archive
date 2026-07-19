@@ -12,7 +12,7 @@
     },
     "benchmarks/scala/ai/trading/coach/s14x/benchmark/JvmForkEvidence.scala": {
       "role": "benchmark",
-      "sha256": "9c6047ec2bb2bd696d03134e10804610c29f62d42f2c1387b2f56056743ef84a"
+      "sha256": "7e8db6d085ff78493283ea97c0f1525f11459e905108c621507ea79f5479d334"
     },
     "benchmarks/scala/s1_4x/benchmarks/classical_path_risk/ClassicalPathRiskBenchmark.scala": {
       "role": "benchmark",
@@ -127,5 +127,5 @@
     "lint": "files",
     "profileRun": "files"
   },
-  "canonicalManifestSha256": "05a4cfb48a5e80495974998746a444347edad2c73bab44ac5b60365a650cd1f3"
+  "canonicalManifestSha256": "2322e2b6590b2699f5ecc951ab1725ded87e4cb9fb34d7c1929190ee83696f0d"
 }
