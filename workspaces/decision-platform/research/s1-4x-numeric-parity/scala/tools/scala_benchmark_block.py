@@ -1018,12 +1018,31 @@ def run_block(arguments: argparse.Namespace) -> dict[str, Any]:
         "S1_4X_SCALA_JAVA_SHA256",
         label="JAVA_EXECUTABLE",
     )
+    javac_executable, javac_sha256 = _verified_environment_executable(
+        "S1_4X_SCALA_JAVAC_BIN",
+        "S1_4X_SCALA_JAVAC_SHA256",
+        label="JAVAC_EXECUTABLE",
+    )
     java_home = _require_absolute_directory(
         Path(_required_environment("JAVA_HOME")),
         label="JAVA_HOME",
     )
     if java_executable != java_home / "bin/java":
         raise BlockError("JAVA_HOME_EXECUTABLE_MISMATCH")
+    if javac_executable != java_home / "bin/javac":
+        raise BlockError("JAVA_HOME_JAVAC_EXECUTABLE_MISMATCH")
+    toolchain_lock_path = _require_absolute_regular(
+        scala_root / "toolchain-lock.v1.json",
+        label="TOOLCHAIN_LOCK",
+    )
+    toolchain_lock = strict_json_load(toolchain_lock_path)
+    if (
+        not isinstance(toolchain_lock, dict)
+        or not isinstance(toolchain_lock.get("jdk"), dict)
+        or toolchain_lock["jdk"].get("javacExecutableSha256")
+        != javac_sha256
+    ):
+        raise BlockError("JAVAC_TOOLCHAIN_LOCK_MISMATCH")
     if any(name in os.environ for name in FORBIDDEN_AMBIENT_JVM_VARIABLES):
         raise BlockError("AMBIENT_JVM_OVERRIDE_FORBIDDEN")
     benchmark_python_pin = PinnedExecutable(
@@ -1043,11 +1062,17 @@ def run_block(arguments: argparse.Namespace) -> dict[str, Any]:
         expected_sha256=_required_environment("S1_4X_SCALA_JAVA_SHA256"),
         label="JAVA_EXECUTABLE",
     ).__enter__()
+    javac_pin = PinnedExecutable(
+        javac_executable,
+        expected_sha256=javac_sha256,
+        label="JAVAC_EXECUTABLE",
+    ).__enter__()
     benchmark_python_exec = benchmark_python_pin.proc_path
     pinned_fds = (
         *benchmark_python_pin.pass_fds,
         *scala_cli_pin.pass_fds,
         *java_pin.pass_fds,
+        *javac_pin.pass_fds,
     )
 
     selected_result_path = _require_absolute_regular(
@@ -1069,10 +1094,6 @@ def run_block(arguments: argparse.Namespace) -> dict[str, Any]:
     compiler_profiles_path = _require_absolute_regular(
         scala_root / "compiler-profiles.v1.json",
         label="COMPILER_PROFILES",
-    )
-    toolchain_lock_path = _require_absolute_regular(
-        scala_root / "toolchain-lock.v1.json",
-        label="TOOLCHAIN_LOCK",
     )
     merged_provenance_path = _require_absolute_regular(
         numeric_root / "contract/toolchain-provenance.v1.json",
@@ -1162,6 +1183,9 @@ def run_block(arguments: argparse.Namespace) -> dict[str, Any]:
     environment["S1_4X_SCALA_JAVA_PINNED_FD_PATH"] = str(
         java_pin.proc_path
     )
+    environment["S1_4X_SCALA_JAVAC_PINNED_FD_PATH"] = str(
+        javac_pin.proc_path
+    )
     environment["S1_4X_SCALA_ENVIRONMENT_VALUES_SHA256"] = (
         canonical_sha256(environment_closure)
     )
@@ -1177,7 +1201,12 @@ def run_block(arguments: argparse.Namespace) -> dict[str, Any]:
         environment=environment,
         pass_fds=pinned_fds,
     )
-    for pinned in (benchmark_python_pin, scala_cli_pin, java_pin):
+    for pinned in (
+        benchmark_python_pin,
+        scala_cli_pin,
+        java_pin,
+        javac_pin,
+    ):
         pinned.verify_path_identity()
 
     ledger_script = _require_absolute_regular(
@@ -1339,7 +1368,12 @@ def run_block(arguments: argparse.Namespace) -> dict[str, Any]:
     )
     if sha256_file(result_path) != block_result["blockResultSha256"]:
         raise BlockError("BLOCK_RESULT_SHA256_MISMATCH")
-    for pinned in (benchmark_python_pin, scala_cli_pin, java_pin):
+    for pinned in (
+        benchmark_python_pin,
+        scala_cli_pin,
+        java_pin,
+        javac_pin,
+    ):
         pinned.verify_path_identity()
     return {
         "status": "PASS",
