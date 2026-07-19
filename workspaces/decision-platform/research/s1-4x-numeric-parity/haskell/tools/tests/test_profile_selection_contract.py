@@ -502,6 +502,33 @@ class ProfileSelectionContractTests(unittest.TestCase):
                         expected_case_order=CASE_ORDER,
                     )
 
+    def test_qualification_command_uses_exact_criterion_glob_names(
+        self,
+    ) -> None:
+        helper = load_helper()
+        stack_root = Path("/cache/stack-root-qualification-contract")
+        command = helper._criterion_qualification_command(
+            ghcup=Path("/tools/ghcup"),
+            stack=Path("/tools/stack"),
+            stack_yaml=Path("/repo/haskell/stack.yaml"),
+            stack_root=stack_root,
+            work_dir=helper.isolated_stack_work_dir(stack_root),
+            profile_id="baseline-o0-fasm",
+            time_limit_seconds=3,
+            raw_report=Path("/evidence/criterion.json"),
+            case_order=CASE_ORDER,
+        )
+
+        self.assertEqual(
+            command[-1],
+            (
+                "--benchmark-arguments=--time-limit 3 "
+                "--json /evidence/criterion.json --match glob "
+                f"{' '.join(CASE_ORDER)} +RTS -N1 -RTS"
+            ),
+        )
+        self.assertNotIn("^(?:", command[-1])
+
     def test_qualification_and_selector_wrappers_are_closed_interfaces(self) -> None:
         for path in (QUALIFICATION_WRAPPER, SELECTOR_WRAPPER):
             self.assertTrue(path.is_file(), f"missing wrapper: {path.name}")
