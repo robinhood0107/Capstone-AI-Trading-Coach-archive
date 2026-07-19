@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+
+from tools import haskell_benchmark_block as benchmark_helper
 
 
 TOOLS_ROOT = Path(__file__).resolve().parents[1]
@@ -253,6 +256,82 @@ class ProfileSelectionContractTests(unittest.TestCase):
                 "PROFILE_MARKER_NOT_PRE_RUN",
             ):
                 helper.mark_profile_measurement_entered(marker_path)
+
+    def test_sealed_profile_marker_script_survives_source_path_swap(self) -> None:
+        helper = load_helper()
+        with tempfile.TemporaryDirectory() as temporary:
+            temporary_root = Path(temporary)
+            script_source = temporary_root / "profile_workflow.py"
+            script_source.write_bytes(HELPER_PATH.read_bytes())
+            pinned_script = benchmark_helper.pin_regular_file(
+                script_source,
+                label="PROFILE_MARKER_TEST_SCRIPT",
+                max_bytes=16 * 1024 * 1024,
+            )
+            python_source = Path(sys.executable).resolve(strict=True)
+            python_descriptor = os.open(
+                python_source,
+                os.O_RDONLY | getattr(os, "O_CLOEXEC", 0),
+            )
+            python_fd_path = Path(f"/proc/self/fd/{python_descriptor}")
+            marker_path = temporary_root / "measurement-state.json"
+            marker_argv = [
+                str(python_fd_path),
+                str(pinned_script.fd_path),
+                "mark-measurement-entered",
+                "--qualification",
+                str(marker_path),
+            ]
+            marker = helper.build_profile_marker(
+                plan_sha256="1" * 64,
+                selector_config_sha256="2" * 64,
+                source_tree_sha256="3" * 64,
+                order_block=0,
+                profile_id="baseline-o0-fasm",
+                case_order=CASE_ORDER,
+                host_validity_sha256="4" * 64,
+                marker_python_path=str(python_source),
+                marker_python_pinned_fd_path=str(python_fd_path),
+                marker_python_sha256=helper.sha256_file(python_source),
+                marker_script_path=str(script_source),
+                marker_script_pinned_fd_path=str(pinned_script.fd_path),
+                marker_script_sha256=pinned_script.sha256,
+                marker_argv=marker_argv,
+                started_at="2026-07-19T00:00:00.000000Z",
+            )
+            marker_path.write_bytes(
+                helper.canonical_json_bytes(marker, trailing_newline=True)
+            )
+            script_source.write_text(
+                "raise SystemExit(97)\n",
+                encoding="utf-8",
+            )
+            try:
+                completed = subprocess.run(
+                    marker_argv,
+                    cwd=temporary_root,
+                    env={
+                        "LC_ALL": "C",
+                        "PATH": "/usr/bin:/bin",
+                        "TZ": "UTC",
+                    },
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    pass_fds=(
+                        python_descriptor,
+                        pinned_script.descriptor,
+                    ),
+                )
+            finally:
+                os.close(python_descriptor)
+                os.close(pinned_script.descriptor)
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertEqual(
+                helper.strict_json_load(marker_path)["state"],
+                "MEASUREMENT",
+            )
 
     def test_selector_uses_four_paired_blocks_and_all_twenty_eight_ratios(
         self,
