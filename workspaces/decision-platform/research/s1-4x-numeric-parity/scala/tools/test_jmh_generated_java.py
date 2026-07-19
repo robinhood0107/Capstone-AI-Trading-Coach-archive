@@ -74,12 +74,32 @@ def main() -> int:
         assert tuple(item.relative_path for item in sources.files) == expected
         assert len({item.sha256 for item in sources.files}) == len(expected)
 
+        generator_input = (
+            workspace
+            / ".scala-build/project/classes/main"
+        )
+        generator_input.mkdir(parents=True)
+        generator_output = (
+            workspace
+            / ".scala-build/project_jmh"
+        )
+        generator_stdout = (
+            f'Processing 147 classes from {generator_input} '
+            'with "reflection" generator\n'
+            f"Writing out Java source to {generator_output / 'sources'} "
+            f"and resources to {generator_output / 'resources'}\n"
+            f"{class_output}:{dependency}\n"
+        )
         classpath = helper.classpath_closure(
-            f"{class_output}:{dependency}\n",
+            generator_stdout,
             workspace=workspace,
             coursier_cache=coursier,
         )
         assert classpath.class_output == class_output
+        assert classpath.processed_class_count == 147
+        assert classpath.generator_class_input == generator_input
+        assert classpath.generated_source_root == generated_root
+        assert classpath.generated_resource_root == generator_output / "resources"
         assert [item.path_id for item in classpath.entries] == [
             (
                 "SCALA_WORKSPACE/"
@@ -119,7 +139,19 @@ def main() -> int:
             helper,
             "JMH_CLASS_OUTPUT_CLOSURE_MISMATCH",
             lambda: helper.classpath_closure(
-                f"{class_output}:{second_output.parent.parent}\n",
+                generator_stdout.replace(
+                    f"{class_output}:{dependency}",
+                    f"{class_output}:{second_output.parent.parent}",
+                ),
+                workspace=workspace,
+                coursier_cache=coursier,
+            ),
+        )
+        expect_error(
+            helper,
+            "JMH_GENERATOR_STDOUT_INVALID",
+            lambda: helper.classpath_closure(
+                generator_stdout.split("\n", maxsplit=1)[1],
                 workspace=workspace,
                 coursier_cache=coursier,
             ),
