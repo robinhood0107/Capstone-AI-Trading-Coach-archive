@@ -96,6 +96,19 @@ def test_gate2_baseline_report_has_local_non_contract_format() -> None:
         assert SHA256.fullmatch(digest)
 
 
+def test_contract_manifest_hash_consumers_match_current_bytes() -> None:
+    # Manifest closure 갱신 뒤 baseline과 최종 audit pin을 함께 바꾸지 않으면
+    # 비싼 aggregate가 마지막 조립 단계에서 실패하므로 시작 전에 고정한다.
+    sys.path.insert(0, str(INTEGRATION))
+    import final_candidate_audit as audit_module
+
+    report = json.loads(BASELINE_REPORT.read_text(encoding="utf-8"))
+    current_sha256 = _sha256(CONTRACT_MANIFEST)
+
+    assert report["immutableInputs"]["contractManifestSha256"] == current_sha256
+    assert audit_module.FROZEN_CONTRACT_MANIFEST_SHA256 == current_sha256
+
+
 def test_official_full_rotation_uses_integration_runtime_only() -> None:
     documentation = INTEGRATION_README.read_text(encoding="utf-8")
     assert 'python "$S1_4X/integration/run_rotated_blocks.py" run \\' in documentation
