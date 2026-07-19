@@ -265,6 +265,27 @@ jobs:
           name: s1-4x-benchmark-correctness-${{ github.run_id }}
           path: ${{ runner.temp }}/s1-4x-correctness
 
+      - name: Materialize and validate job-local large fixtures
+        shell: bash
+        run: |
+          set -euo pipefail
+          S1_4X="$GITHUB_WORKSPACE/workspaces/decision-platform/research/s1-4x-numeric-parity"
+          LARGE_FIXTURE_ROOT="$RUNNER_TEMP/s1-4x-large-fixtures"
+          LARGE_FIXTURE_RECEIPT="$RUNNER_TEMP/s1-4x-large-fixture-receipt.json"
+          "$S1_4X_UV_BIN" run --frozen --no-config --project "$S1_4X/oracle" \
+            python "$S1_4X/integration/materialize_large_fixtures.py" materialize \
+            --s1-4x-root "$S1_4X" \
+            --output-root "$LARGE_FIXTURE_ROOT" \
+            --receipt "$LARGE_FIXTURE_RECEIPT" \
+            >/dev/null
+          "$S1_4X_UV_BIN" run --frozen --no-config --project "$S1_4X/oracle" \
+            python "$S1_4X/integration/materialize_large_fixtures.py" check \
+            --s1-4x-root "$S1_4X" \
+            --output-root "$LARGE_FIXTURE_ROOT" \
+            --receipt "$LARGE_FIXTURE_RECEIPT" \
+            >/dev/null
+          echo "S1_4X_LARGE_FIXTURE_ROOT=$LARGE_FIXTURE_ROOT" >> "$GITHUB_ENV"
+
       - name: Bind benchmark executable and selection closure
         shell: bash
         run: |
@@ -302,6 +323,7 @@ jobs:
           ORACLE="$S1_4X/oracle"
           PLAN="$S1_4X/benchmarks/benchmark-plan.v1.json"
           BENCH_ROOT="$RUNNER_TEMP/s1-4x-benchmark"
+          LARGE_FIXTURE_RECEIPT="$RUNNER_TEMP/s1-4x-large-fixture-receipt.json"
           mkdir -p "$BENCH_ROOT"
           SUBJECT="$(git rev-parse HEAD)"
           test "$SUBJECT" = "$GITHUB_SHA"
@@ -373,7 +395,9 @@ jobs:
                 --output-root "$BENCH_ROOT/run" \
                 --run-id \
                   "s1-4x-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
-                --repo-root "$ROOT"
+                --repo-root "$ROOT" \
+                --large-fixture-root "$S1_4X_LARGE_FIXTURE_ROOT" \
+                --large-fixture-receipt "$LARGE_FIXTURE_RECEIPT"
               ;;
             *)
               echo "unsupported matrix: ${{ inputs.matrix }}" >&2

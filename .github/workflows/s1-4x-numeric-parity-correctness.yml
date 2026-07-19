@@ -98,8 +98,20 @@ jobs:
           ORACLE="$S1_4X/oracle"
           uv lock --project "$ORACLE" --check
           uv sync --frozen --all-groups --project "$ORACLE"
-          uv run --frozen --project "$ORACLE" \
-            python "$ORACLE/generate_large_fixtures.py" --check
+          LARGE_FIXTURE_ROOT="$RUNNER_TEMP/s1-4x-large-fixtures"
+          LARGE_FIXTURE_RECEIPT="$RUNNER_TEMP/s1-4x-large-fixture-receipt.json"
+          "$S1_4X_UV_BIN" run --frozen --no-config --project "$ORACLE" \
+            python "$S1_4X/integration/materialize_large_fixtures.py" materialize \
+            --s1-4x-root "$S1_4X" \
+            --output-root "$LARGE_FIXTURE_ROOT" \
+            --receipt "$LARGE_FIXTURE_RECEIPT" \
+            >/dev/null
+          "$S1_4X_UV_BIN" run --frozen --no-config --project "$ORACLE" \
+            python "$S1_4X/integration/materialize_large_fixtures.py" check \
+            --s1-4x-root "$S1_4X" \
+            --output-root "$LARGE_FIXTURE_ROOT" \
+            --receipt "$LARGE_FIXTURE_RECEIPT" \
+            >/dev/null
           uv run --frozen --project "$ORACLE" \
             python "$ORACLE/validate_contract.py" --check-all \
             --output "$RUNNER_TEMP/contract-validation.json"
@@ -266,6 +278,27 @@ jobs:
           name: s1-4x-scala-baseline-${{ github.run_id }}
           path: ${{ runner.temp }}/s1-4x-results
 
+      - name: Materialize and validate job-local large fixtures
+        shell: bash
+        run: |
+          set -euo pipefail
+          S1_4X="$GITHUB_WORKSPACE/workspaces/decision-platform/research/s1-4x-numeric-parity"
+          LARGE_FIXTURE_ROOT="$RUNNER_TEMP/s1-4x-large-fixtures"
+          LARGE_FIXTURE_RECEIPT="$RUNNER_TEMP/s1-4x-large-fixture-receipt.json"
+          "$S1_4X_UV_BIN" run --frozen --no-config --project "$S1_4X/oracle" \
+            python "$S1_4X/integration/materialize_large_fixtures.py" materialize \
+            --s1-4x-root "$S1_4X" \
+            --output-root "$LARGE_FIXTURE_ROOT" \
+            --receipt "$LARGE_FIXTURE_RECEIPT" \
+            >/dev/null
+          "$S1_4X_UV_BIN" run --frozen --no-config --project "$S1_4X/oracle" \
+            python "$S1_4X/integration/materialize_large_fixtures.py" check \
+            --s1-4x-root "$S1_4X" \
+            --output-root "$LARGE_FIXTURE_ROOT" \
+            --receipt "$LARGE_FIXTURE_RECEIPT" \
+            >/dev/null
+          echo "S1_4X_LARGE_FIXTURE_ROOT=$LARGE_FIXTURE_ROOT" >> "$GITHUB_ENV"
+
       - name: Run B/C correctness and freeze the selected profile
         shell: bash
         run: |
@@ -404,6 +437,27 @@ jobs:
             echo "S1_4X_HLINT_BIN=$TOOLS/bin/hlint"
             echo "S1_4X_STYLISH_BIN=$TOOLS/bin/stylish-haskell"
           } >> "$GITHUB_ENV"
+
+      - name: Materialize and validate job-local large fixtures
+        shell: bash
+        run: |
+          set -euo pipefail
+          S1_4X="$GITHUB_WORKSPACE/workspaces/decision-platform/research/s1-4x-numeric-parity"
+          LARGE_FIXTURE_ROOT="$RUNNER_TEMP/s1-4x-large-fixtures"
+          LARGE_FIXTURE_RECEIPT="$RUNNER_TEMP/s1-4x-large-fixture-receipt.json"
+          "$S1_4X_UV_BIN" run --frozen --no-config --project "$S1_4X/oracle" \
+            python "$S1_4X/integration/materialize_large_fixtures.py" materialize \
+            --s1-4x-root "$S1_4X" \
+            --output-root "$LARGE_FIXTURE_ROOT" \
+            --receipt "$LARGE_FIXTURE_RECEIPT" \
+            >/dev/null
+          "$S1_4X_UV_BIN" run --frozen --no-config --project "$S1_4X/oracle" \
+            python "$S1_4X/integration/materialize_large_fixtures.py" check \
+            --s1-4x-root "$S1_4X" \
+            --output-root "$LARGE_FIXTURE_ROOT" \
+            --receipt "$LARGE_FIXTURE_RECEIPT" \
+            >/dev/null
+          echo "S1_4X_LARGE_FIXTURE_ROOT=$LARGE_FIXTURE_ROOT" >> "$GITHUB_ENV"
 
       - name: Run authoritative Haskell gates and selected-profile check
         shell: bash
