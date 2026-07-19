@@ -386,7 +386,13 @@ class AssembleFinalCandidateEvidenceTests(TestCase):
                     "s1.4x-scala-scalafmt-idempotence-result-v1"
                 ),
                 "checkedFiles": ["src/main/scala/Core.scala"],
-                "copiedNonMutatingCheck": True,
+                "copiedNonMutatingCheck": {
+                    "exitCode": 0,
+                    "downloadLineCount": 0,
+                    "portableArgv": ["SCALA_CLI_1_15_0", "--offline", "--check"],
+                    "portableArgvSha256": "8" * 64,
+                    "evidenceSha256": "9" * 64,
+                },
                 "status": "PASS",
             },
         )
@@ -472,7 +478,12 @@ class AssembleFinalCandidateEvidenceTests(TestCase):
             self.raw / "haskell/format/receipt.json",
             {
                 "schemaVersion": "s1.4x-haskell-format-evidence-v1",
-                "checkedFiles": ["src/S14X/Core.hs"],
+                "sourceInputFileCount": 1,
+                "positiveExitCode": 0,
+                "misformattedExitCode": 1,
+                "parserCapabilityStatus": (
+                    "PINNED_PARSER_COMPATIBILITY_FALLBACK"
+                ),
                 "status": "PASS",
             },
         )
@@ -671,3 +682,64 @@ class AssembleFinalCandidateEvidenceTests(TestCase):
         self._write_run_manifest()
         with self.assertRaises(EvidenceAssemblyError):
             self._assemble()
+
+    def test_rejects_formatter_execution_contract_drift(self) -> None:
+        scala_receipt = (
+            self.raw
+            / "scala/scalafmt/scala-scalafmt-idempotence-result.v1.json"
+        )
+        haskell_receipt = self.raw / "haskell/format/receipt.json"
+        scala_baseline = json.loads(scala_receipt.read_text(encoding="utf-8"))
+        haskell_baseline = json.loads(haskell_receipt.read_text(encoding="utf-8"))
+        mutations = (
+            (
+                "scala-exit",
+                scala_receipt,
+                {
+                    **scala_baseline,
+                    "copiedNonMutatingCheck": {
+                        **scala_baseline["copiedNonMutatingCheck"],
+                        "exitCode": 1,
+                    },
+                },
+            ),
+            (
+                "scala-download",
+                scala_receipt,
+                {
+                    **scala_baseline,
+                    "copiedNonMutatingCheck": {
+                        **scala_baseline["copiedNonMutatingCheck"],
+                        "downloadLineCount": 1,
+                    },
+                },
+            ),
+            (
+                "haskell-positive",
+                haskell_receipt,
+                {**haskell_baseline, "positiveExitCode": 1},
+            ),
+            (
+                "haskell-negative",
+                haskell_receipt,
+                {**haskell_baseline, "misformattedExitCode": 0},
+            ),
+            (
+                "haskell-parser",
+                haskell_receipt,
+                {**haskell_baseline, "parserCapabilityStatus": "UNVERIFIED"},
+            ),
+        )
+        for label, receipt, changed in mutations:
+            with self.subTest(label=label):
+                _write_json(receipt, changed)
+                self._write_run_manifest()
+                with self.assertRaises(EvidenceAssemblyError):
+                    self._assemble(self.temporary / f"formatter-{label}")
+                _write_json(
+                    receipt,
+                    scala_baseline
+                    if receipt == scala_receipt
+                    else haskell_baseline,
+                )
+        self._write_run_manifest()
