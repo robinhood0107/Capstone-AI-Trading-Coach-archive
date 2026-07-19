@@ -3536,10 +3536,19 @@ def main() -> int:
         "java.vm.name": "OpenJDK 64-Bit Server VM",
     }
     benchmark_environment = dict(module.EXPECTED_BENCHMARK_ENVIRONMENT)
+    smoke_output = Path("/sealed/smoke")
+    smoke_generated_source = (
+        module.isolated_scala_workspace(smoke_output)
+        / ".scala-build"
+        / "scala-workspace_smoke_jmh"
+        / "sources"
+        / "generated"
+        / "Benchmark.java"
+    )
     reported_jmh_arguments = [
-        "-Dscala.sources=/sealed/source.scala",
-        "-Dscala.source.names=source.scala",
-        "-Djava.io.tmpdir=/sealed/smoke/jmh-tmp",
+        f"-Dscala.sources=/sealed/source.scala:{smoke_generated_source}",
+        "-Dscala.source.names=source.scala:Benchmark.java",
+        f"-Djava.io.tmpdir={smoke_output}/jmh-tmp",
     ]
     compile_command_sha256 = "8" * 64
     observed_jmh_arguments = [
@@ -3598,7 +3607,11 @@ def main() -> int:
     )
     assert jvm_allowlist["plannedCliJvmArguments"] == []
     assert jvm_allowlist["effectiveJvmArguments"] == [
-        *reported_jmh_arguments[:-1],
+        (
+            "-Dscala.sources=/sealed/source.scala:"
+            "SCALA_WORKSPACE/JMH_GENERATED_SOURCES/generated/Benchmark.java"
+        ),
+        reported_jmh_arguments[1],
         module.JMH_TMPDIR_PORTABLE_ARGUMENT,
         *observed_jmh_arguments[len(reported_jmh_arguments) : -1],
         (
@@ -3607,7 +3620,20 @@ def main() -> int:
         ),
     ]
     for index, fork_value in enumerate(fork_evidence, start=1):
-        fork_tmp = f"/sealed/qualification-{index}/jmh-tmp"
+        qualification_output = Path(f"/sealed/qualification-{index}")
+        qualification_generated_source = (
+            module.isolated_scala_workspace(qualification_output)
+            / ".scala-build"
+            / f"scala-workspace_qualification_{index}_jmh"
+            / "sources"
+            / "generated"
+            / "Benchmark.java"
+        )
+        fork_value["inputArguments"][0] = (
+            "-Dscala.sources=/sealed/source.scala:"
+            f"{qualification_generated_source}"
+        )
+        fork_tmp = f"{qualification_output}/jmh-tmp"
         fork_value["inputArguments"][len(reported_jmh_arguments) - 1] = (
             f"-Djava.io.tmpdir={fork_tmp}"
         )
@@ -3710,7 +3736,9 @@ def main() -> int:
                 "scoreUnit": "ns/op",
                 "rawData": [[12.5]],
             },
-            "jvmArgs": reported_jmh_arguments,
+            "jvmArgs": fork_evidence[0]["inputArguments"][
+                : len(reported_jmh_arguments)
+            ],
         }
     ]
     validated = module.validate_jmh_native_json(
@@ -3726,7 +3754,11 @@ def main() -> int:
     )
     assert validated["nativeValue"] == 12.5
     assert validated["reportedJvmArguments"] == [
-        *reported_jmh_arguments[:-1],
+        (
+            "-Dscala.sources=/sealed/source.scala:"
+            "SCALA_WORKSPACE/JMH_GENERATED_SOURCES/generated/Benchmark.java"
+        ),
+        reported_jmh_arguments[1],
         module.JMH_TMPDIR_PORTABLE_ARGUMENT,
     ]
     assert validated["effectiveJvmArguments"] == (
