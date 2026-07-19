@@ -23,6 +23,8 @@ from benchmark_contract import (  # type: ignore[import-not-found]  # noqa: E402
 )
 from materialize_large_fixtures import (  # noqa: E402
     FIXTURES as MATERIALIZED_FIXTURES,
+)
+from materialize_large_fixtures import (  # noqa: E402
     ROOT_PATH_ID,
 )
 from validate_benchmark_report import validate_plan  # type: ignore[import-not-found]  # noqa: E402

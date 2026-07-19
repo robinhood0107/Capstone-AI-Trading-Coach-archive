@@ -295,7 +295,7 @@ def test_materialized_manifest_is_validated_against_static_bytes_and_contract(
     manifest_path.write_bytes(valid_bytes + b" ")
     with pytest.raises(
         materializer.MaterializationError,
-        match="^MANIFEST_BYTES_MISMATCH$",
+        match=r"^MANIFEST_BYTES_MISMATCH$",
     ):
         materializer._validate_materialized_manifest(manifest_path, fixture)
 
@@ -313,7 +313,7 @@ def test_materialized_manifest_is_validated_against_static_bytes_and_contract(
     manifest_path.write_bytes(invalid_bytes)
     with pytest.raises(
         materializer.MaterializationError,
-        match="^MANIFEST_CONTRACT_MISMATCH$",
+        match=r"^MANIFEST_CONTRACT_MISMATCH$",
     ):
         materializer._validate_materialized_manifest(manifest_path, contract_fixture)
 

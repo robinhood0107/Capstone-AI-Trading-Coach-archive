@@ -28,9 +28,9 @@ from executable_identity import (  # noqa: E402
 
 __all__ = [
     "BOUNDARY_IDS",
-    "CommandManifestError",
     "RUNTIME_DEPENDENCY_ROLES_BY_BOUNDARY",
     "RUNTIME_EVIDENCE_ROLES_BY_BOUNDARY",
+    "CommandManifestError",
     "boundary_command_template",
     "build_manifest",
     "host_command_template",

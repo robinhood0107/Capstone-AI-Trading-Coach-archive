@@ -18,9 +18,9 @@ sys.path.insert(0, str(INTEGRATION))
 
 from benchmark_commands import (  # noqa: E402
     BOUNDARY_IDS,
-    CommandManifestError,
     RUNTIME_DEPENDENCY_ROLES_BY_BOUNDARY,
     RUNTIME_EVIDENCE_ROLES_BY_BOUNDARY,
+    CommandManifestError,
     boundary_command_template,
     build_manifest,
     host_command_template,

@@ -5,8 +5,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import signal
 import shutil
+import signal
 import subprocess
 import sys
 from contextlib import contextmanager
