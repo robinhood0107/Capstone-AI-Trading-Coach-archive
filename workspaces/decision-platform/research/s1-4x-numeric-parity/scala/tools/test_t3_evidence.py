@@ -1313,7 +1313,10 @@ raise SystemExit(module.main())
         environment.pop(name, None)
     environment.update(
         {
-            "PATH": f"{shim_root}:{java_home}/bin:/usr/bin:/bin",
+            "PATH": (
+                f"{shim_root}:{Path.home()}/.local/bin:"
+                f"{java_home}/bin:/usr/bin:/bin"
+            ),
             "JAVA_HOME": str(java_home),
             "RESULT_DIR": str(result_dir),
             "S1_4X_CACHE_ROOT": str(root / "cache"),
