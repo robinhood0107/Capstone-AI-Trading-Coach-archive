@@ -399,6 +399,7 @@ class NumericParityBenchmarkWorkflowTests(unittest.TestCase):
             "build-oci-image.sh",
             "run-oci-correctness.sh",
             "regression_gate.py",
+            "candidate_rubric_audit.py",
             "assemble_final_candidate_evidence.py",
             "final_candidate_audit.py",
             "seal_correctness_run.py",
@@ -406,6 +407,14 @@ class NumericParityBenchmarkWorkflowTests(unittest.TestCase):
             "materialize_large_fixtures.py",
         ):
             self.assertIn(token, source)
+        self.assertLess(
+            source.index("candidate_rubric_audit.py"),
+            source.index("seal_correctness_run.py"),
+        )
+        self.assertLess(
+            source.index("seal_correctness_run.py"),
+            source.index("assemble_final_candidate_evidence.py"),
+        )
         self.assertIn("S1_4X_VECTOR_SOURCE_ARCHIVE", source)
         self.assertIn("--output-dir", source)
         self.assertIn("ghc-9.14.1-compatibility.v1.json", source)
