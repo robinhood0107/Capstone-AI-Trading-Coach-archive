@@ -73,12 +73,36 @@ else
     usage
 fi
 
+FIXTURE_ROOT="${S1_4X_LARGE_FIXTURE_ROOT:-}"
+[[ "$FIXTURE_ROOT" == /* && -d "$FIXTURE_ROOT" && ! -L "$FIXTURE_ROOT" \
+  && "$(realpath -- "$FIXTURE_ROOT")" == "$FIXTURE_ROOT" ]] || {
+  printf 'shared large-fixture root is invalid\n' >&2
+  exit 69
+}
+fixture_root_identity="$(stat -Lc '%d:%i' -- "$FIXTURE_ROOT")"
+verify_fixture_root_identity() {
+  [[ -d "$FIXTURE_ROOT" && ! -L "$FIXTURE_ROOT" \
+    && "$(realpath -- "$FIXTURE_ROOT")" == "$FIXTURE_ROOT" \
+    && "$(stat -Lc '%d:%i' -- "$FIXTURE_ROOT")" \
+      == "$fixture_root_identity" ]] || {
+    printf 'shared large-fixture root identity drift\n' >&2
+    exit 69
+  }
+}
+verify_fixture_root_identity
+
 JAVA_EXECUTABLE="${JAVA_HOME:?JAVA_HOME is required}/bin/java"
+JAVAC_EXECUTABLE="${JAVA_HOME:?JAVA_HOME is required}/bin/javac"
 [[ "$JAVA_EXECUTABLE" == /* \
   && -f "$JAVA_EXECUTABLE" \
   && -x "$JAVA_EXECUTABLE" \
   && ! -L "$JAVA_EXECUTABLE" ]] || usage
+[[ "$JAVAC_EXECUTABLE" == /* \
+  && -f "$JAVAC_EXECUTABLE" \
+  && -x "$JAVAC_EXECUTABLE" \
+  && ! -L "$JAVAC_EXECUTABLE" ]] || usage
 java_sha="$(sha256sum "$JAVA_EXECUTABLE" | awk '{print $1}')"
+javac_sha="$(sha256sum "$JAVAC_EXECUTABLE" | awk '{print $1}')"
 pinned_java_input="${S1_4X_SCALA_JAVA_PINNED_FD_PATH:-}"
 if [[ -z "$pinned_java_input" ]]; then
   [[ "$MODE" == "smoke" ]] || {
@@ -104,6 +128,30 @@ if [[ ! -f "$JAVA_EXEC" \
   exit 69
 fi
 export S1_4X_SCALA_JAVA_PINNED_FD_PATH="$JAVA_EXEC"
+pinned_javac_input="${S1_4X_SCALA_JAVAC_PINNED_FD_PATH:-}"
+if [[ -z "$pinned_javac_input" ]]; then
+  [[ "$MODE" == "smoke" ]] || {
+    printf 'qualification/full JMH requires a parent-sealed javac FD\n' >&2
+    exit 69
+  }
+  # Generated JMH Java도 pathname 재개방 없이 같은 javac inode로 컴파일한다.
+  exec {javac_pin_fd}<"$JAVAC_EXECUTABLE"
+  JAVAC_EXEC="/proc/$$/fd/$javac_pin_fd"
+elif [[ "$pinned_javac_input" =~ ^/proc/self/fd/([0-9]+)$ ]]; then
+  JAVAC_EXEC="/proc/$$/fd/${BASH_REMATCH[1]}"
+elif [[ "$pinned_javac_input" =~ ^/proc/[1-9][0-9]*/fd/[0-9]+$ ]]; then
+  JAVAC_EXEC="$pinned_javac_input"
+else
+  printf 'javac pinned FD path is invalid\n' >&2
+  exit 69
+fi
+if [[ ! -f "$JAVAC_EXEC" \
+  || ! -x "$JAVAC_EXEC" \
+  || "$(sha256sum "$JAVAC_EXEC" | awk '{print $1}')" != "$javac_sha" ]]; then
+  printf 'javac pinned FD identity mismatch\n' >&2
+  exit 69
+fi
+export S1_4X_SCALA_JAVAC_PINNED_FD_PATH="$JAVAC_EXEC"
 
 CACHE_ROOT="${S1_4X_CACHE_ROOT:-$HOME/.cache/s1-4x}"
 [[ "$CACHE_ROOT" == /* && -d "$CACHE_ROOT" && ! -L "$CACHE_ROOT" ]] || usage
@@ -235,6 +283,13 @@ list_file="$OUTPUT_DIR/jmh-list.txt"
 "$SCALA_ROOT/tools/compile-benchmarks.sh" \
   --profile "$PROFILE" \
   --output "$list_file"
+precompile_receipt="$OUTPUT_DIR/scala-jmh-generated-java-precompile.v1.json"
+precompiled_classes="$OUTPUT_DIR/generated-java-classes"
+[[ -f "$precompile_receipt" && ! -L "$precompile_receipt" \
+  && -d "$precompiled_classes" && ! -L "$precompiled_classes" ]] || {
+  printf 'JMH generated-Java precompile closure missing\n' >&2
+  exit 1
+}
 [[ "$(grep -Fxc "$benchmark" "$list_file")" -eq 1 ]] || {
   printf 'JMH list did not contain the exact benchmark once: %s\n' "$benchmark" >&2
   exit 1
@@ -292,6 +347,7 @@ command=(
   "${benchmark_sources[@]}"
   --workspace "$S1_4X_SCALA_WORKSPACE"
   --server=false
+  --classpath "$precompiled_classes"
   --jvm system
   --coursier-validate-checksums
   "${profile_options[@]}"
@@ -312,10 +368,19 @@ export S1_4X_BENCHMARK_CASE_ID="$CASE_ID"
 export S1_4X_BENCHMARK_PLAN="$PLAN"
 export S1_4X_BENCHMARK_PROFILE="$PROFILE"
 export S1_4X_BENCHMARK_RUN_MODE="$MODE"
-export S1_4X_FIXTURE_ROOT="$S1_ROOT/contract/fixtures"
+verify_fixture_root_identity
+export S1_4X_FIXTURE_ROOT="$FIXTURE_ROOT"
 export S1_4X_EFFECTIVE_JVM_EVIDENCE_DIR="$OUTPUT_DIR/fork-evidence"
 export S1_4X_MEASUREMENT_READY_MARKER="$OUTPUT_DIR/measurement-ready.v1.json"
 "${command[@]}" >"$OUTPUT_DIR/jmh.stdout" 2>"$OUTPUT_DIR/jmh.stderr"
+verify_fixture_root_identity
+python3 "$SCALA_ROOT/tools/precompile_jmh_generated_java.py" verify \
+  --workspace "$S1_4X_SCALA_WORKSPACE" \
+  --coursier-cache "$COURSIER_CACHE" \
+  --evidence-dir "$OUTPUT_DIR" \
+  --jmh-stdout "$OUTPUT_DIR/jmh.stdout" \
+  --javac-binary "$JAVAC_EXECUTABLE" \
+  --javac-exec "$JAVAC_EXEC" >/dev/null
 
 python3 - "$OUTPUT_DIR/fork-evidence" "$OUTPUT_DIR/fork-evidence.normalized.json" "$forks" <<'PY'
 import hashlib
@@ -336,7 +401,9 @@ output = Path(sys.argv[2])
 expected = int(sys.argv[3])
 paths = sorted(root.glob("jvm-fork-*.json"), key=lambda path: path.name)
 if len(paths) != expected:
-    raise SystemExit("JVM_FORK_FILE_COUNT_MISMATCH")
+    raise SystemExit(
+        f"JVM_FORK_FILE_COUNT_MISMATCH:expected={expected}:actual={len(paths)}"
+    )
 values = []
 process_ids = set()
 for index, path in enumerate(paths, start=1):
@@ -412,6 +479,7 @@ python3 - \
   "$OUTPUT_DIR/measurement-ready.v1.json" \
   "$OUTPUT_DIR/jmh.stdout" "$OUTPUT_DIR/jmh.stderr" \
   "$JVM_ALLOWLIST" "$SCALA_ROOT/compiler-profiles.v1.json" "$SCALA_CLI" \
+  "$precompile_receipt" \
   "$OUTPUT_DIR/scala-jmh-run-result.v1.json" \
   "$PROFILE" "$CASE_ID" "$MODE" "$logical_operations" "${command[@]}" <<'PY'
 import hashlib
@@ -432,11 +500,12 @@ from pathlib import Path
     allowlist,
     compiler_profiles,
     scala_cli,
+    precompile_receipt,
     output,
-) = map(Path, sys.argv[1:13])
-profile, case_id, mode = sys.argv[13:16]
-logical_operations = int(sys.argv[16])
-runtime_argv = sys.argv[17:]
+) = map(Path, sys.argv[1:14])
+profile, case_id, mode = sys.argv[14:17]
+logical_operations = int(sys.argv[17])
+runtime_argv = sys.argv[18:]
 
 def digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
@@ -521,6 +590,10 @@ def canonical(value: object) -> str:
 tool_paths = [
     ("SCALA_CLI_1_15_0", scala_cli),
     ("TEMURIN_25_0_3_9_LTS/bin/java", Path(os.environ["JAVA_HOME"]) / "bin/java"),
+    (
+        "TEMURIN_25_0_3_9_LTS/bin/javac",
+        Path(os.environ["JAVA_HOME"]) / "bin/javac",
+    ),
 ]
 if mode == "full":
     tool_paths.append(
@@ -554,6 +627,10 @@ tool_paths.extend(
         (
             "SCALA_ROOT/tools/source_input_manifest.py",
             scala_root / "tools/source_input_manifest.py",
+        ),
+        (
+            "SCALA_ROOT/tools/precompile_jmh_generated_java.py",
+            scala_root / "tools/precompile_jmh_generated_java.py",
         ),
         (
             "SCALA_ROOT/tools/t3_evidence.py",
@@ -615,6 +692,7 @@ result = {
     "jvmArgumentAllowlistSha256": digest(allowlist),
     "nativeValidationSha256": digest(validation),
     "measurementReadyMarkerSha256": digest(measurement_ready),
+    "generatedJavaPrecompileReceiptSha256": digest(precompile_receipt),
     "stdoutSha256": digest(stdout),
     "stderrSha256": digest(stderr),
     "exitCode": 0,

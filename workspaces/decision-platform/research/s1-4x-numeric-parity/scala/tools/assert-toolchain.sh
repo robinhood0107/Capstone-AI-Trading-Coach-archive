@@ -55,12 +55,16 @@ done
   fail "Scalafmt executable missing or unsafe"
 [[ -n "${JAVA_HOME:-}" && "$JAVA_HOME" == /* && -d "$JAVA_HOME" && ! -L "$JAVA_HOME" ]] ||
   fail "JAVA_HOME missing or unsafe"
-[[ -x "$JAVA_HOME/bin/java" && -f "$JAVA_HOME/release" ]] ||
-  fail "JAVA_HOME Java or release file missing"
+[[ -x "$JAVA_HOME/bin/java" && -x "$JAVA_HOME/bin/javac" \
+  && -f "$JAVA_HOME/release" && -f "$JAVA_HOME/lib/modules" \
+  && ! -L "$JAVA_HOME/lib/modules" ]] ||
+  fail "JAVA_HOME Java, javac, release, or modules file missing"
 [[ -z "${JAVA_TOOL_OPTIONS:-}" && -z "${_JAVA_OPTIONS:-}" && -z "${JDK_JAVA_OPTIONS:-}" ]] ||
   fail "ambient JVM option variables must be empty"
 
 java_path="$(realpath -- "$JAVA_HOME/bin/java")"
+javac_path="$(realpath -- "$JAVA_HOME/bin/javac")"
+jdk_modules_path="$(realpath -- "$JAVA_HOME/lib/modules")"
 export PATH="$JAVA_HOME/bin:$PATH"
 
 release_value() {
@@ -104,6 +108,8 @@ java_spec_actual="$(
 [[ "$java_spec_actual" == "25" ]] || fail "JDK specification version mismatch"
 
 java_sha="$(sha256sum "$java_path" | awk '{print $1}')"
+javac_sha="$(sha256sum "$javac_path" | awk '{print $1}')"
+jdk_modules_sha="$(sha256sum "$jdk_modules_path" | awk '{print $1}')"
 scala_cli_sha="$(sha256sum "$SCALA_CLI" | awk '{print $1}')"
 scalafix_sha="$(sha256sum "$SCALAFIX" | awk '{print $1}')"
 scalafmt_archive_sha="$(sha256sum "$SCALAFMT_ARCHIVE" | awk '{print $1}')"
@@ -149,6 +155,8 @@ grep -Fxq 'lineEndings = unix' "$SCALA_ROOT/.scalafmt.conf" ||
 
 jq -e \
   --arg java_sha "$java_sha" \
+  --arg javac_sha "$javac_sha" \
+  --arg jdk_modules_sha "$jdk_modules_sha" \
   --arg scala_cli_sha "$scala_cli_sha" \
   --arg scalafix_sha "$scalafix_sha" \
   --arg scalafmt_archive_sha "$scalafmt_archive_sha" \
@@ -179,7 +187,10 @@ jq -e \
       implementor: "Eclipse Adoptium",
       runtimeVersion: "25.0.3+9-LTS",
       vmName: "OpenJDK 64-Bit Server VM",
-      javaExecutableSha256: $java_sha
+      javaExecutableSha256: $java_sha,
+      javacExecutableSha256: $javac_sha,
+      jdkModulesPathId: "TEMURIN_25_0_3_9_LTS/lib/modules",
+      jdkModulesSha256: $jdk_modules_sha
     } and
     .scalaCli == {
       pathId: "SCALA_CLI_1_15_0",
@@ -242,10 +253,13 @@ jq -e \
   ' "$LOCK" >/dev/null ||
   fail "toolchain lock or structured provenance mismatch"
 
-printf 'SCALA_TOOLCHAIN_PASS lockSha256=%s provenanceSha256=%s scalaCliSha256=%s scalafixSha256=%s scalafmtSha256=%s jdk=%s\n' \
+printf 'SCALA_TOOLCHAIN_PASS lockSha256=%s provenanceSha256=%s scalaCliSha256=%s scalafixSha256=%s scalafmtSha256=%s javaSha256=%s javacSha256=%s jdkModulesSha256=%s jdk=%s\n' \
   "$(sha256sum "$LOCK" | awk '{print $1}')" \
   "$provenance_sha" \
   "$scala_cli_sha" \
   "$scalafix_sha" \
   "$scalafmt_executable_sha" \
+  "$java_sha" \
+  "$javac_sha" \
+  "$jdk_modules_sha" \
   "$java_spec_actual"

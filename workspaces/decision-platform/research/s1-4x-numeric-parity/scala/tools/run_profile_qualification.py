@@ -195,6 +195,27 @@ def main() -> int:
             != allowlist["javaExecutableSha256"]
         ):
             raise QualificationError("JAVA_PINNED_FD_IDENTITY_MISMATCH")
+        javac_pin = os.environ.get("S1_4X_SCALA_JAVAC_PINNED_FD_PATH")
+        if not javac_pin:
+            raise QualificationError("JAVAC_PINNED_FD_PATH_REQUIRED")
+        self_javac_pin = re.fullmatch(r"/proc/self/fd/([0-9]+)", javac_pin)
+        if self_javac_pin is not None:
+            javac_pin = (
+                f"/proc/{os.getpid()}/fd/{self_javac_pin.group(1)}"
+            )
+            os.environ["S1_4X_SCALA_JAVAC_PINNED_FD_PATH"] = javac_pin
+        elif re.fullmatch(
+            r"/proc/[1-9][0-9]*/fd/[0-9]+",
+            javac_pin,
+        ) is None:
+            raise QualificationError("JAVAC_PINNED_FD_PATH_INVALID")
+        if (
+            not Path(javac_pin).is_file()
+            or not os.access(javac_pin, os.X_OK)
+            or sha256_file(Path(javac_pin))
+            != toolchain_lock["jdk"]["javacExecutableSha256"]
+        ):
+            raise QualificationError("JAVAC_PINNED_FD_IDENTITY_MISMATCH")
         environment = os.environ.copy()
         oracle_root = arguments.scala_root.parent / "oracle"
         blocks = []
@@ -271,6 +292,10 @@ def main() -> int:
                         case_root
                         / "scala-jmh-native-validation.v1.json"
                     )
+                    precompile_path = (
+                        case_root
+                        / "scala-jmh-generated-java-precompile.v1.json"
+                    )
                     validation = strict_json(validation_path)
                     logical_operations = next(
                         item["logicalOperationsPerInvocation"]
@@ -311,6 +336,10 @@ def main() -> int:
                         != effective_hash
                         or run_result.get("nativeValidationSha256")
                         != sha256_file(validation_path)
+                        or run_result.get(
+                            "generatedJavaPrecompileReceiptSha256"
+                        )
+                        != sha256_file(precompile_path)
                         or validation.get("rawScoreNsPerInvocation")
                         != score
                         or validation.get(

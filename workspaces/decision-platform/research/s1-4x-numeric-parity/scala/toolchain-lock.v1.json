@@ -8,7 +8,10 @@
     "implementor": "Eclipse Adoptium",
     "runtimeVersion": "25.0.3+9-LTS",
     "vmName": "OpenJDK 64-Bit Server VM",
-    "javaExecutableSha256": "ac3505f0c58282f00a6585591324a86b038c89cd171105fe42a1a0cf2f13b517"
+    "javaExecutableSha256": "ac3505f0c58282f00a6585591324a86b038c89cd171105fe42a1a0cf2f13b517",
+    "javacExecutableSha256": "5dc287a983c41c8cee0c00e621d87a46ff9dd77202885814b39645074d714dd9",
+    "jdkModulesPathId": "TEMURIN_25_0_3_9_LTS/lib/modules",
+    "jdkModulesSha256": "0b4f933e2a29a05a74a869dddd823d1e7bc0ed9b38db0db25a44eab5dfb5c462"
   },
   "scalaCli": {
     "pathId": "SCALA_CLI_1_15_0",

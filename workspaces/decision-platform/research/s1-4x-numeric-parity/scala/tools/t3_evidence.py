@@ -16,6 +16,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import precompile_jmh_generated_java as jmh_precompile
+
 
 class T3EvidenceError(ValueError):
     """Frozen Scala T3 evidence가 불완전하거나 서로 일치하지 않음을 나타낸다."""
@@ -844,6 +846,7 @@ JMH_RUN_RESULT_KEYS = {
     "jvmArgumentAllowlistSha256",
     "nativeValidationSha256",
     "measurementReadyMarkerSha256",
+    "generatedJavaPrecompileReceiptSha256",
     "stdoutSha256",
     "stderrSha256",
     "exitCode",
@@ -875,6 +878,11 @@ def command_tool_closure(
         (
             "TEMURIN_25_0_3_9_LTS/bin/java",
             java_executable,
+            java_executable.parent.parent,
+        ),
+        (
+            "TEMURIN_25_0_3_9_LTS/bin/javac",
+            java_executable.parent / "javac",
             java_executable.parent.parent,
         ),
     ]
@@ -918,6 +926,11 @@ def command_tool_closure(
             (
                 "SCALA_ROOT/tools/source_input_manifest.py",
                 scala_root / "tools/source_input_manifest.py",
+                scala_root,
+            ),
+            (
+                "SCALA_ROOT/tools/precompile_jmh_generated_java.py",
+                scala_root / "tools/precompile_jmh_generated_java.py",
                 scala_root,
             ),
             (
@@ -1024,6 +1037,424 @@ def validate_measurement_ready_marker(
     ):
         raise T3EvidenceError("MEASUREMENT_READY_MARKER_INVALID")
     return marker_sha256
+
+
+def validate_generated_java_precompile(
+    *,
+    receipt_path: Path,
+    artifact_root: Path,
+    case_root: Path,
+    profile: str,
+    scala_root: Path,
+    scala_cli: Path,
+    source_input_paths: list[str],
+    source_manifest_sha256: str,
+    compiler_profiles_sha256: str,
+    snapshot: SealedEvidenceSnapshot,
+) -> str:
+    """Generated Java typed receipt와 sealed `.class` byte closure를 재검증한다."""
+
+    receipt = snapshot.json_object(
+        receipt_path,
+        root=artifact_root,
+        label=f"qualification.precompile.{profile}.{case_root.name}",
+    )
+    exact_fields = {
+        "schemaVersion",
+        "profileId",
+        "sourceInputManifestSha256",
+        "compilerProfilesSha256",
+        "toolchainLockSha256",
+        "scalaCli",
+        "javac",
+        "scalaCompile",
+        "jmhGenerator",
+        "generatedSourceRootPathId",
+        "generatedSources",
+        "generatedSourcesSha256",
+        "classpathEntries",
+        "classpathEntriesSha256",
+        "scalaClassOutputPathId",
+        "generatedClassOutputPathId",
+        "generatedClasses",
+        "generatedClassesSha256",
+        "javacProcess",
+        "status",
+        "aggregateStatus",
+    }
+    toolchain_path = scala_root / "toolchain-lock.v1.json"
+    toolchain = snapshot.json_object(
+        toolchain_path,
+        root=scala_root,
+        label="qualification.precompile.toolchain",
+    )
+    scala_cli_sha256 = snapshot.sha256(
+        scala_cli,
+        root=scala_cli.parent,
+        label="qualification.precompile.scalaCli",
+    )
+    javac_sha256 = toolchain.get("jdk", {}).get("javacExecutableSha256")
+    jdk_modules_path_id = toolchain.get("jdk", {}).get("jdkModulesPathId")
+    jdk_modules_sha256 = toolchain.get("jdk", {}).get("jdkModulesSha256")
+    if (
+        set(receipt) != exact_fields
+        or receipt.get("schemaVersion")
+        != "s1.4x-scala-jmh-generated-java-precompile-v1"
+        or receipt.get("profileId") != profile
+        or receipt.get("sourceInputManifestSha256")
+        != source_manifest_sha256
+        or receipt.get("compilerProfilesSha256")
+        != compiler_profiles_sha256
+        or receipt.get("toolchainLockSha256")
+        != snapshot.sha256(
+            toolchain_path,
+            root=scala_root,
+            label="qualification.precompile.toolchain",
+        )
+        or receipt.get("status") != "PASS"
+        or receipt.get("aggregateStatus") != "PASS"
+        or jdk_modules_path_id != "TEMURIN_25_0_3_9_LTS/lib/modules"
+        or SHA256.fullmatch(str(javac_sha256)) is None
+        or SHA256.fullmatch(str(jdk_modules_sha256)) is None
+        or receipt.get("scalaCli")
+        != {
+            "pathId": "SCALA_CLI_1_15_0",
+            "binarySha256": scala_cli_sha256,
+            "executionPathId": "PINNED_SCALA_CLI_1_15_0_FD",
+        }
+        or receipt.get("javac")
+        != {
+            "pathId": "TEMURIN_25_0_3_9_LTS/bin/javac",
+            "binarySha256": javac_sha256,
+            "executionPathId": "PINNED_JAVAC_FD",
+            "jdkModulesPathId": jdk_modules_path_id,
+            "jdkModulesSha256": jdk_modules_sha256,
+        }
+    ):
+        raise T3EvidenceError("JMH_PRECOMPILE_RECEIPT_IDENTITY_INVALID")
+
+    expected_compile = [
+        "SCALA_CLI_1_15_0",
+        "--power",
+        "compile",
+        *[f"SCALA_ROOT/{path}" for path in source_input_paths],
+        "--workspace",
+        "SCALA_WORKSPACE",
+        "--server=false",
+        "--classpath",
+        f"EVIDENCE_ROOT/{jmh_precompile.GENERATED_CLASSES_NAME}",
+        "--jvm",
+        "system",
+        "--coursier-validate-checksums",
+        *PROFILE_CLI_ARGUMENTS[profile],
+        "--jmh",
+        "--jmh-version",
+        "1.37",
+        "--print-classpath",
+    ]
+    compile_process = receipt.get("scalaCompile")
+    compile_stdout = safe_artifact(
+        artifact_root,
+        case_root / jmh_precompile.SCALA_COMPILE_STDOUT,
+    )
+    compile_stderr = safe_artifact(
+        artifact_root,
+        case_root / jmh_precompile.SCALA_COMPILE_STDERR,
+    )
+    if (
+        not isinstance(compile_process, dict)
+        or set(compile_process)
+        != {
+            "portableArgv",
+            "portableArgvSha256",
+            "runtimeArgvSha256",
+            "stdoutSha256",
+            "stderrSha256",
+            "exitCode",
+            "status",
+        }
+        or compile_process.get("portableArgv") != expected_compile
+        or compile_process.get("portableArgvSha256")
+        != canonical_sha256(expected_compile)
+        or SHA256.fullmatch(
+            str(compile_process.get("runtimeArgvSha256"))
+        )
+        is None
+        or compile_process.get("stdoutSha256")
+        != snapshot.sha256(
+            compile_stdout,
+            root=artifact_root,
+            label="qualification.precompile.scala.stdout",
+        )
+        or compile_process.get("stderrSha256")
+        != snapshot.sha256(
+            compile_stderr,
+            root=artifact_root,
+            label="qualification.precompile.scala.stderr",
+        )
+        or compile_process.get("exitCode") != 0
+        or compile_process.get("status") != "PASS"
+    ):
+        raise T3EvidenceError("JMH_PRECOMPILE_SCALA_PROCESS_INVALID")
+
+    generated_sources = receipt.get("generatedSources")
+    expected_source_paths = jmh_precompile.expected_generated_source_paths()
+    generator = receipt.get("jmhGenerator")
+    generated_source_root_id = receipt.get("generatedSourceRootPathId")
+    generator_class_input = (
+        str(generator.get("classInputPathId"))
+        if isinstance(generator, dict)
+        else ""
+    )
+    generator_build_id = generator_class_input.removesuffix("/classes/main")
+    if (
+        not isinstance(generator, dict)
+        or set(generator)
+        != {
+            "generatorId",
+            "processedClassCount",
+            "classInputPathId",
+            "generatedSourceRootPathId",
+            "generatedResourceRootPathId",
+            "classInputClosureSha256",
+            "generatedResourceClosureSha256",
+        }
+        or generator.get("generatorId") != "reflection"
+        or generator.get("processedClassCount") != 147
+        or SHA256.fullmatch(
+            str(generator.get("classInputClosureSha256"))
+        )
+        is None
+        or SHA256.fullmatch(
+            str(generator.get("generatedResourceClosureSha256"))
+        )
+        is None
+        or re.fullmatch(
+            r"SCALA_WORKSPACE/\.scala-build/"
+            r"(?P<build>[A-Za-z0-9._-]+)/classes/main",
+            str(generator.get("classInputPathId")),
+        )
+        is None
+        or generator.get("generatedSourceRootPathId")
+        != generated_source_root_id
+        or generated_source_root_id != f"{generator_build_id}_jmh/sources"
+        or generator.get("generatedResourceRootPathId")
+        != f"{generator_build_id}_jmh/resources"
+        or re.fullmatch(
+            r"SCALA_WORKSPACE/\.scala-build/"
+            r"[A-Za-z0-9._-]+_jmh/resources",
+            str(generator.get("generatedResourceRootPathId")),
+        )
+        is None
+        or not isinstance(generated_sources, list)
+        or len(generated_sources) != len(expected_source_paths)
+        or [item.get("path") for item in generated_sources]
+        != list(expected_source_paths)
+        or any(
+            not isinstance(item, dict)
+            or set(item) != {"path", "sha256"}
+            or SHA256.fullmatch(str(item.get("sha256"))) is None
+            for item in generated_sources
+        )
+        or receipt.get("generatedSourcesSha256")
+        != canonical_sha256(generated_sources)
+        or re.fullmatch(
+            r"SCALA_WORKSPACE/\.scala-build/"
+            r"[A-Za-z0-9._-]+_jmh/sources",
+            str(generated_source_root_id),
+        )
+        is None
+    ):
+        raise T3EvidenceError("JMH_PRECOMPILE_GENERATED_SOURCE_INVALID")
+
+    classpath_entries = receipt.get("classpathEntries")
+    class_output = receipt.get("scalaClassOutputPathId")
+    generated_resource_id = (
+        generator.get("generatedResourceRootPathId")
+        if isinstance(generator, dict)
+        else None
+    )
+    generated_class_output_id = (
+        f"EVIDENCE_ROOT/{jmh_precompile.GENERATED_CLASSES_NAME}"
+    )
+    if (
+        not isinstance(classpath_entries, list)
+        or not classpath_entries
+        or any(
+            not isinstance(item, dict)
+            or set(item) != {"pathId", "kind", "sha256"}
+            or item.get("kind") not in {"file", "directory"}
+            or SHA256.fullmatch(str(item.get("sha256"))) is None
+            or not str(item.get("pathId", "")).startswith(
+                (
+                    "SCALA_WORKSPACE/",
+                    "COURSIER_CACHE/",
+                    "EVIDENCE_ROOT/",
+                )
+            )
+            for item in classpath_entries
+        )
+        or len({item["pathId"] for item in classpath_entries})
+        != len(classpath_entries)
+        or receipt.get("classpathEntriesSha256")
+        != canonical_sha256(classpath_entries)
+        or class_output
+        not in {item["pathId"] for item in classpath_entries}
+        or sum(
+            item["pathId"] == generated_resource_id
+            for item in classpath_entries
+        )
+        != 1
+        or sum(
+            item["pathId"] == generated_class_output_id
+            for item in classpath_entries
+        )
+        != 1
+        or any(
+            item["kind"] != "directory"
+            for item in classpath_entries
+            if item["pathId"]
+            in {
+                class_output,
+                generated_resource_id,
+                generated_class_output_id,
+            }
+        )
+        or any(
+            item["pathId"].startswith("EVIDENCE_ROOT/")
+            and item["pathId"] != generated_class_output_id
+            for item in classpath_entries
+        )
+        or re.fullmatch(
+            r"SCALA_WORKSPACE/\.scala-build/"
+            r"[A-Za-z0-9._-]+_jmh_[0-9a-f]{10}/classes/main",
+            str(class_output),
+        )
+        is None
+    ):
+        raise T3EvidenceError("JMH_PRECOMPILE_CLASSPATH_INVALID")
+
+    generated_classes = receipt.get("generatedClasses")
+    class_directory = artifact_root / case_root / jmh_precompile.GENERATED_CLASSES_NAME
+    resolved_root = artifact_root.resolve(strict=True)
+    if (
+        class_directory.is_symlink()
+        or not class_directory.is_dir()
+        or not class_directory.resolve(strict=True).is_relative_to(
+            resolved_root
+        )
+        or receipt.get("generatedClassOutputPathId")
+        != generated_class_output_id
+        or not isinstance(generated_classes, list)
+        or not generated_classes
+    ):
+        raise T3EvidenceError("JMH_PRECOMPILE_CLASS_OUTPUT_INVALID")
+    actual_class_paths = sorted(
+        (
+            path.relative_to(class_directory).as_posix()
+            for path in class_directory.rglob("*")
+            if path.is_file() and not path.is_symlink()
+        ),
+        key=lambda value: value.encode("utf-8"),
+    )
+    if (
+        any(
+            path.is_symlink()
+            or (not path.is_dir() and not path.is_file())
+            for path in class_directory.rglob("*")
+        )
+        or
+        [item.get("path") for item in generated_classes]
+        != actual_class_paths
+        or any(
+            not isinstance(item, dict)
+            or set(item) != {"path", "sha256"}
+            or not item["path"].endswith(".class")
+            or item["sha256"]
+            != snapshot.sha256(
+                class_directory / item["path"],
+                root=artifact_root,
+                label=f"qualification.precompile.class.{item['path']}",
+            )
+            for item in generated_classes
+        )
+        or receipt.get("generatedClassesSha256")
+        != canonical_sha256(generated_classes)
+        or next(
+            item
+            for item in classpath_entries
+            if item["pathId"] == generated_class_output_id
+        ).get("sha256")
+        != receipt.get("generatedClassesSha256")
+        or any(
+            f"{path.removesuffix('.java')}.class"
+            not in actual_class_paths
+            for path in expected_source_paths
+        )
+    ):
+        raise T3EvidenceError("JMH_PRECOMPILE_CLASS_BYTES_INVALID")
+
+    expected_javac = [
+        "TEMURIN_25_0_3_9_LTS/bin/javac",
+        "-encoding",
+        "UTF-8",
+        "-proc:none",
+        "-classpath",
+        "SCALA_COMPILE_CLASSPATH",
+        "-d",
+        f"EVIDENCE_ROOT/{jmh_precompile.GENERATED_CLASSES_NAME}",
+        *[
+            f"SCALA_WORKSPACE_GENERATED/{path}"
+            for path in expected_source_paths
+        ],
+    ]
+    javac_process = receipt.get("javacProcess")
+    javac_stdout = safe_artifact(
+        artifact_root,
+        case_root / jmh_precompile.JAVAC_STDOUT,
+    )
+    javac_stderr = safe_artifact(
+        artifact_root,
+        case_root / jmh_precompile.JAVAC_STDERR,
+    )
+    if (
+        not isinstance(javac_process, dict)
+        or set(javac_process)
+        != {
+            "portableArgv",
+            "portableArgvSha256",
+            "runtimeArgvSha256",
+            "stdoutSha256",
+            "stderrSha256",
+            "exitCode",
+            "status",
+        }
+        or javac_process.get("portableArgv") != expected_javac
+        or javac_process.get("portableArgvSha256")
+        != canonical_sha256(expected_javac)
+        or SHA256.fullmatch(str(javac_process.get("runtimeArgvSha256")))
+        is None
+        or javac_process.get("stdoutSha256")
+        != snapshot.sha256(
+            javac_stdout,
+            root=artifact_root,
+            label="qualification.precompile.javac.stdout",
+        )
+        or javac_process.get("stderrSha256")
+        != snapshot.sha256(
+            javac_stderr,
+            root=artifact_root,
+            label="qualification.precompile.javac.stderr",
+        )
+        or javac_process.get("exitCode") != 0
+        or javac_process.get("status") != "PASS"
+    ):
+        raise T3EvidenceError("JMH_PRECOMPILE_JAVAC_PROCESS_INVALID")
+    return snapshot.sha256(
+        receipt_path,
+        root=artifact_root,
+        label=f"qualification.precompile.receipt.{profile}.{case_root.name}",
+    )
 
 
 def benchmark_case_contract(
@@ -1193,6 +1624,10 @@ def validate_qualification_case_artifacts(
         artifact_root,
         case_root / "measurement-ready.v1.json",
     )
+    precompile_path = safe_artifact(
+        artifact_root,
+        case_root / jmh_precompile.RECEIPT_NAME,
+    )
     stdout_path = safe_artifact(artifact_root, case_root / "jmh.stdout")
     stderr_path = safe_artifact(artifact_root, case_root / "jmh.stderr")
 
@@ -1260,6 +1695,8 @@ def validate_qualification_case_artifacts(
         "--workspace",
         "SCALA_WORKSPACE",
         "--server=false",
+        "--classpath",
+        f"EVIDENCE_ROOT/{jmh_precompile.GENERATED_CLASSES_NAME}",
         "--jvm",
         "system",
         "--coursier-validate-checksums",
@@ -1312,7 +1749,18 @@ def validate_qualification_case_artifacts(
     ):
         raise T3EvidenceError("JAVA_PINNED_FD_PATH_REQUIRED")
     runtime_tail = [
-        java_pinned_fd_path if item == "PINNED_JAVA_FD" else item
+        (
+            java_pinned_fd_path
+            if item == "PINNED_JAVA_FD"
+            else str(
+                artifact_root
+                / case_root
+                / jmh_precompile.GENERATED_CLASSES_NAME
+            )
+            if item
+            == f"EVIDENCE_ROOT/{jmh_precompile.GENERATED_CLASSES_NAME}"
+            else item
+        )
         for item in common_tail
     ]
     expected_runtime_argv = [
@@ -1354,6 +1802,18 @@ def validate_qualification_case_artifacts(
         expected_run_mode="qualification",
         snapshot=snapshot,
         artifact_root=artifact_root,
+    )
+    precompile_sha256 = validate_generated_java_precompile(
+        receipt_path=precompile_path,
+        artifact_root=artifact_root,
+        case_root=case_root,
+        profile=profile,
+        scala_root=scala_root,
+        scala_cli=scala_cli,
+        source_input_paths=source_input_paths,
+        source_manifest_sha256=source_manifest_sha256,
+        compiler_profiles_sha256=compiler_profiles_sha256,
+        snapshot=snapshot,
     )
     if (
         set(run) != JMH_RUN_RESULT_KEYS
@@ -1412,6 +1872,8 @@ def validate_qualification_case_artifacts(
             label=f"qualification.validation.r{repetition}.{profile}.{case_id}",
         )
         or run.get("measurementReadyMarkerSha256") != marker_sha256
+        or run.get("generatedJavaPrecompileReceiptSha256")
+        != precompile_sha256
         or run.get("stdoutSha256")
         != snapshot.sha256(
             stdout_path,
