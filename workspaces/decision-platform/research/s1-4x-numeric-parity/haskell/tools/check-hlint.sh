@@ -4,6 +4,8 @@ set -euo pipefail
 SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 HASKELL_ROOT="$(realpath "${SCRIPT_PATH%/*}/..")"
 NUMERIC_ROOT="$(realpath "$HASKELL_ROOT/..")"
+source "$HASKELL_ROOT/tools/python-runtime.sh"
+s1_4x_pin_benchmark_python
 "$HASKELL_ROOT/tools/assert-toolchain.sh" >/dev/null
 
 HLINT_BIN="${S1_4X_HLINT_BIN:?S1_4X_HLINT_BIN readiness path is required}"
@@ -37,7 +39,7 @@ else
 fi
 trap 'if [[ "${REMOVE_OUTPUT:-0}" -eq 1 ]]; then rm -rf -- "$OUTPUT_DIRECTORY"; fi' EXIT
 
-python3 "$HASKELL_ROOT/tools/haskell_evidence.py" source-inputs \
+"$S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH" "$HASKELL_ROOT/tools/haskell_evidence.py" source-inputs \
   --haskell-root "$HASKELL_ROOT" \
   --manifest "$SOURCE_MANIFEST" \
   >"$OUTPUT_DIRECTORY/source-inputs.before.stdout" \
@@ -58,7 +60,7 @@ set -e
   exit 2
 }
 
-python3 - \
+"$S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH" - \
   "$EXCEPTION_SCHEMA" \
   "$EXCEPTION_MANIFEST" \
   >"$OUTPUT_DIRECTORY/exception-schema.stdout" \
@@ -76,7 +78,7 @@ Draft202012Validator.check_schema(schema)
 Draft202012Validator(schema).validate(manifest)
 PY
 
-python3 "$HASKELL_ROOT/tools/hlint_inventory.py" \
+"$S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH" "$HASKELL_ROOT/tools/hlint_inventory.py" \
   --haskell-root "$HASKELL_ROOT" \
   --configuration "$HLINT_CONFIGURATION" \
   --manifest "$EXCEPTION_MANIFEST" \
@@ -85,7 +87,7 @@ python3 "$HASKELL_ROOT/tools/hlint_inventory.py" \
   2>"$OUTPUT_DIRECTORY/managed-inventory.stderr"
 
 mapfile -t FIXTURE_ROWS < <(
-  python3 - "$FIXTURE_MANIFEST" <<'PY'
+  "$S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH" - "$FIXTURE_MANIFEST" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -148,7 +150,7 @@ for row in "${FIXTURE_ROWS[@]}"; do
     printf 'HLint negative fixture exit drift: %s:%s\n' "$fixture_id" "$exit_code" >&2
     exit 2
   }
-  python3 - \
+  "$S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH" - \
     "$expected_tokens_json" \
     "$OUTPUT_DIRECTORY/$fixture_id.stdout" \
     "$OUTPUT_DIRECTORY/$fixture_id.stderr" <<'PY'
@@ -166,13 +168,13 @@ if missing:
 PY
 done
 
-python3 "$HASKELL_ROOT/tools/haskell_evidence.py" source-inputs \
+"$S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH" "$HASKELL_ROOT/tools/haskell_evidence.py" source-inputs \
   --haskell-root "$HASKELL_ROOT" \
   --manifest "$SOURCE_MANIFEST" \
   >"$OUTPUT_DIRECTORY/source-inputs.after.stdout" \
   2>"$OUTPUT_DIRECTORY/source-inputs.after.stderr"
 
-python3 - \
+"$S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH" - \
   "$OUTPUT_DIRECTORY" \
   "$SOURCE_MANIFEST" \
   "$FIXTURE_MANIFEST" \

@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/bin/false
 """S1.4X Haskell correctness, qualification, selector evidence workflow."""
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -120,8 +121,20 @@ class WorkflowError(RuntimeError):
     """Workflow input이나 실행 결과가 frozen contract에서 벗어났을 때 발생한다."""
 
 
+@dataclass(frozen=True)
+class BenchmarkPythonRuntime:
+    """Inherited CPython executable FD와 provenance source identity를 보존한다."""
+
+    source_path: Path
+    fd_path: Path
+    descriptor: int
+    sha256: str
+    mode: int
+    identity: tuple[int, int, int, int, int, int]
+
+
 def _load_pinned_runtime_helpers() -> tuple[Any, Any, type[Exception]]:
-    """Qualification에서만 FD pin helper를 지연 import해 marker 단독 실행을 보존한다."""
+    """Workflow 전체가 쓰는 FD pin helper를 지연 import해 module import를 가볍게 둔다."""
 
     try:
         from haskell_benchmark_block import (
@@ -138,6 +151,153 @@ def _load_pinned_runtime_helpers() -> tuple[Any, Any, type[Exception]]:
             pinned_executable_environment,
         )
     return pinned_executable_environment, pin_regular_file, BlockError
+
+
+def _benchmark_python_runtime() -> BenchmarkPythonRuntime:
+    """현재 process와 inherited FD를 accepted CPython 3.12.13 bytes에 결속한다."""
+
+    source_value = os.environ.get("S1_4X_BENCHMARK_PYTHON_BIN")
+    fd_value = os.environ.get("S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH")
+    expected_sha256 = os.environ.get("S1_4X_BENCHMARK_PYTHON_SHA256")
+    if (
+        source_value is None
+        or fd_value is None
+        or expected_sha256 is None
+    ):
+        raise WorkflowError("BENCHMARK_PYTHON_ENVIRONMENT_MISSING")
+    if (
+        not source_value.startswith("/")
+        or "\0" in source_value
+        or "\n" in source_value
+        or ":" in source_value
+        or "|" in source_value
+        or "//" in source_value
+        or "/./" in source_value
+        or "/../" in source_value
+        or source_value.endswith(("/.", "/.."))
+        or SHA256_PATTERN.fullmatch(expected_sha256) is None
+    ):
+        raise WorkflowError("BENCHMARK_PYTHON_SOURCE_LAYOUT_INVALID")
+    matched = re.fullmatch(r"/proc/self/fd/([0-9]+)", fd_value)
+    if matched is None or int(matched.group(1)) < 3:
+        raise WorkflowError("BENCHMARK_PYTHON_PINNED_FD_PATH_INVALID")
+    descriptor = int(matched.group(1))
+    if (
+        sys.implementation.name != "cpython"
+        or sys.version_info[:3] != (3, 12, 13)
+    ):
+        raise WorkflowError("BENCHMARK_PYTHON_VERSION_INVALID")
+    try:
+        before = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_mode & 0o111 == 0
+            or before.st_size < 0
+            or before.st_size > 1024 * 1024 * 1024
+        ):
+            raise WorkflowError("BENCHMARK_PYTHON_PINNED_FD_OBJECT_INVALID")
+        digest = hashlib.sha256()
+        offset = 0
+        while offset < before.st_size:
+            chunk = os.pread(
+                descriptor,
+                min(1024 * 1024, before.st_size - offset),
+                offset,
+            )
+            if not chunk:
+                raise WorkflowError("BENCHMARK_PYTHON_PINNED_FD_SHORT_READ")
+            digest.update(chunk)
+            offset += len(chunk)
+        pinned = os.fstat(descriptor)
+        current = os.stat("/proc/self/exe")
+    except OSError as exc:
+        raise WorkflowError("BENCHMARK_PYTHON_RUNTIME_FSTAT_FAILED") from exc
+    pinned_identity = (
+        pinned.st_dev,
+        pinned.st_ino,
+        pinned.st_size,
+        pinned.st_mtime_ns,
+        pinned.st_ctime_ns,
+        pinned.st_nlink,
+    )
+    if (
+        pinned_identity
+        != (
+            before.st_dev,
+            before.st_ino,
+            before.st_size,
+            before.st_mtime_ns,
+            before.st_ctime_ns,
+            before.st_nlink,
+        )
+        or not stat.S_ISREG(pinned.st_mode)
+        or pinned.st_mode & 0o111 == 0
+        or digest.hexdigest() != expected_sha256
+        or (pinned.st_dev, pinned.st_ino, pinned.st_size)
+        != (current.st_dev, current.st_ino, current.st_size)
+    ):
+        raise WorkflowError("BENCHMARK_PYTHON_RUNTIME_IDENTITY_INVALID")
+    return BenchmarkPythonRuntime(
+        source_path=Path(source_value),
+        fd_path=Path(fd_value),
+        descriptor=descriptor,
+        sha256=expected_sha256,
+        mode=pinned.st_mode,
+        identity=pinned_identity,
+    )
+
+
+def _pinned_file_path_id(pinned_file: Any) -> str:
+    """Sealed script bytes를 command receipt에 남길 portable path ID로 바꾼다."""
+
+    label = re.sub(r"[^A-Z0-9]+", "_", str(pinned_file.label).upper()).strip("_")
+    digest = _require_sha256(pinned_file.sha256, label=f"{label}-pinned-file")
+    if not label:
+        raise WorkflowError("PINNED_FILE_PATH_ID_INVALID")
+    return f"S1_4X_{label}_SHA256_{digest.upper()}"
+
+
+def _benchmark_python_path_id(runtime: BenchmarkPythonRuntime) -> str:
+    """Accepted interpreter bytes를 host-independent command ID로 표현한다."""
+
+    digest = _require_sha256(runtime.sha256, label="benchmark-python-runtime")
+    return f"S1_4X_BENCHMARK_CPYTHON_3_12_13_SHA256_{digest.upper()}"
+
+
+def _pin_python_script(path: Path, *, label: str) -> Any:
+    """Nested Python source를 immutable memfd로 봉인해 pathname race를 제거한다."""
+
+    _, pin_regular_file, pinned_runtime_error = _load_pinned_runtime_helpers()
+    try:
+        return pin_regular_file(
+            _absolute_regular(path, label=label),
+            label=label,
+            max_bytes=16 * 1024 * 1024,
+        )
+    except pinned_runtime_error as exc:
+        raise WorkflowError(f"{label}_PIN_INVALID:{exc}") from exc
+
+
+def _portable_argv(
+    command: Sequence[str],
+    path_ids: Mapping[str, str] | None,
+) -> list[str]:
+    """실제 FD argv를 receipt용 stable ID로 치환한다."""
+
+    if path_ids is None:
+        return list(command)
+    if any(
+        not isinstance(path, str)
+        or not path
+        or not isinstance(path_id, str)
+        or re.fullmatch(r"[A-Z0-9_]+", path_id) is None
+        for path, path_id in path_ids.items()
+    ):
+        raise WorkflowError("COMMAND_PORTABLE_PATH_IDS_INVALID")
+    portable = [path_ids.get(argument, argument) for argument in command]
+    if any(argument.startswith("/proc/self/fd/") for argument in portable):
+        raise WorkflowError("COMMAND_PINNED_FD_NOT_PORTABLE")
+    return portable
 
 
 def canonical_json_bytes(value: Any, *, trailing_newline: bool = False) -> bytes:
@@ -1865,7 +2025,14 @@ def resolve_selected_profile_commit_fixed_point(
     }
 
 
-def _sealed_child_environment(*, ghc_bin: Path, stack_bin: Path) -> dict[str, str]:
+def _sealed_child_environment(
+    *,
+    ghc_bin: Path,
+    stack_bin: Path,
+    python_runtime: BenchmarkPythonRuntime,
+) -> dict[str, str]:
+    """Nested child에 exact interpreter provenance와 inherited FD만 전달한다."""
+
     home = os.environ.get("HOME")
     if home is None:
         raise WorkflowError("HOME_MISSING")
@@ -1884,8 +2051,59 @@ def _sealed_child_environment(*, ghc_bin: Path, stack_bin: Path) -> dict[str, st
         "NUMEXPR_NUM_THREADS": "1",
         "VECLIB_MAXIMUM_THREADS": "1",
         "BLIS_NUM_THREADS": "1",
+        "S1_4X_BENCHMARK_PYTHON_BIN": str(python_runtime.source_path),
+        "S1_4X_BENCHMARK_PYTHON_SHA256": python_runtime.sha256,
+        "S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH": str(
+            python_runtime.fd_path
+        ),
     }
     return environment
+
+
+def _pass_fd_identities(
+    descriptors: Sequence[int],
+    *,
+    phase: str,
+) -> dict[int, tuple[int, int, int, int, int, int]]:
+    """Parent가 child 종료까지 소유해야 할 regular FD identity를 fstat한다."""
+
+    identities: dict[int, tuple[int, int, int, int, int, int]] = {}
+    for descriptor in descriptors:
+        try:
+            value = os.fstat(descriptor)
+        except OSError as exc:
+            raise WorkflowError(f"COMMAND_PASS_FD_NOT_OWNED:{phase}") from exc
+        if not stat.S_ISREG(value.st_mode):
+            raise WorkflowError(f"COMMAND_PASS_FD_NOT_REGULAR:{phase}")
+        identities[descriptor] = (
+            value.st_dev,
+            value.st_ino,
+            value.st_size,
+            value.st_mtime_ns,
+            value.st_ctime_ns,
+            value.st_nlink,
+        )
+    return identities
+
+
+def _child_runtime_descriptors(
+    environment: Mapping[str, str],
+    pass_fds: Sequence[int],
+    *,
+    phase: str,
+) -> tuple[int, ...]:
+    """Sealed environment가 광고한 runtime FD를 모든 nested child에 상속한다."""
+
+    descriptors = set(pass_fds)
+    runtime_fd_path = environment.get(
+        "S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH"
+    )
+    if runtime_fd_path is not None:
+        matched = re.fullmatch(r"/proc/self/fd/([0-9]+)", runtime_fd_path)
+        if matched is None or int(matched.group(1)) < 3:
+            raise WorkflowError(f"COMMAND_RUNTIME_FD_INVALID:{phase}")
+        descriptors.add(int(matched.group(1)))
+    return tuple(sorted(descriptors))
 
 
 def _run_logged(
@@ -1897,6 +2115,7 @@ def _run_logged(
     output_directory: Path,
     expected_exit_codes: frozenset[int] = frozenset({0}),
     pass_fds: Sequence[int] = (),
+    portable_path_ids: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     if phase not in CORRECTNESS_PHASES and not phase.startswith(("qualification-", "oci-")):
         raise WorkflowError(f"COMMAND_PHASE_INVALID:{phase}")
@@ -1904,12 +2123,18 @@ def _run_logged(
     stderr_path = output_directory / f"{phase}.stderr"
     if stdout_path.exists() or stderr_path.exists():
         raise WorkflowError(f"COMMAND_LOG_ALREADY_EXISTS:{phase}")
-    descriptors = tuple(sorted(set(pass_fds)))
+    descriptors = _child_runtime_descriptors(
+        environment,
+        pass_fds,
+        phase=phase,
+    )
     if any(
         type(descriptor) is not int or descriptor < 3
         for descriptor in descriptors
     ):
         raise WorkflowError(f"COMMAND_PASS_FDS_INVALID:{phase}")
+    before_fd_identities = _pass_fd_identities(descriptors, phase=phase)
+    receipt_command = _portable_argv(command, portable_path_ids)
     started_at = _iso_now()
     with stdout_path.open("xb") as standard_output, stderr_path.open("xb") as standard_error:
         completed = subprocess.run(
@@ -1922,11 +2147,13 @@ def _run_logged(
             stderr=standard_error,
             pass_fds=descriptors,
         )
+    if _pass_fd_identities(descriptors, phase=phase) != before_fd_identities:
+        raise WorkflowError(f"COMMAND_PASS_FD_IDENTITY_CHANGED:{phase}")
     finished_at = _iso_now()
     record = {
         "phase": phase,
-        "argv": list(command),
-        "argvSha256": canonical_sha256(list(command)),
+        "argv": receipt_command,
+        "argvSha256": canonical_sha256(receipt_command),
         "cwdPath": str(cwd),
         "startedAt": started_at,
         "finishedAt": finished_at,
@@ -1948,6 +2175,7 @@ def validate_logged_command_record(
     expected_argv: Sequence[str],
     expected_cwd: Path,
     evidence_directory: Path,
+    portable_path_ids: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """Command record의 exact argv/cwd/timestamps와 raw logs를 다시 결속한다."""
 
@@ -1964,7 +2192,7 @@ def validate_logged_command_record(
         "stderrPath",
         "stderrSha256",
     }
-    expected_command = list(expected_argv)
+    expected_command = _portable_argv(expected_argv, portable_path_ids)
     if (
         not isinstance(record, dict)
         or set(record) != expected_fields
@@ -2011,6 +2239,8 @@ def _run_compatibility_logged(
     phase: str,
     log_id: str,
     output_directory: Path,
+    pass_fds: Sequence[int] = (),
+    portable_path_ids: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """Compatibility 단계 하나를 raw stdout/stderr와 함께 실행해 기록한다."""
 
@@ -2023,6 +2253,18 @@ def _run_compatibility_logged(
     stderr_path = output_directory / f"{log_id}.stderr"
     if stdout_path.exists() or stderr_path.exists():
         raise WorkflowError(f"COMPATIBILITY_LOG_ALREADY_EXISTS:{log_id}")
+    descriptors = _child_runtime_descriptors(
+        environment,
+        pass_fds,
+        phase=phase,
+    )
+    if any(
+        type(descriptor) is not int or descriptor < 3
+        for descriptor in descriptors
+    ):
+        raise WorkflowError(f"COMPATIBILITY_PASS_FDS_INVALID:{phase}")
+    before_fd_identities = _pass_fd_identities(descriptors, phase=phase)
+    receipt_command = _portable_argv(command, portable_path_ids)
     started_at = _iso_now()
     with stdout_path.open("xb") as standard_output, stderr_path.open(
         "xb"
@@ -2035,13 +2277,16 @@ def _run_compatibility_logged(
             stdin=subprocess.DEVNULL,
             stdout=standard_output,
             stderr=standard_error,
+            pass_fds=descriptors,
         )
+    if _pass_fd_identities(descriptors, phase=phase) != before_fd_identities:
+        raise WorkflowError(f"COMPATIBILITY_PASS_FD_IDENTITY_CHANGED:{phase}")
     finished_at = _iso_now()
     return {
         "phase": phase,
         "logId": log_id,
-        "argv": list(command),
-        "argvSha256": canonical_sha256(list(command)),
+        "argv": receipt_command,
+        "argvSha256": canonical_sha256(receipt_command),
         "startedAt": started_at,
         "endedAt": finished_at,
         "exitCode": completed.returncode,
@@ -2108,6 +2353,7 @@ def _comparison_status(path: Path) -> dict[str, Any]:
 
 def _correctness(arguments: argparse.Namespace) -> None:
     output = _reserve_directory(arguments.output_dir)
+    python_runtime = arguments.benchmark_python_runtime
     haskell_root = Path(__file__).resolve(strict=True).parent.parent
     numeric_root = haskell_root.parent
     repo_root = numeric_root.parents[3]
@@ -2139,7 +2385,11 @@ def _correctness(arguments: argparse.Namespace) -> None:
     candidate_commit = _repo_commit(repo_root)
     evidence = _load_haskell_evidence(haskell_root)
     source_tree_sha256 = evidence.benchmark_source_tree_sha256(haskell_root)
-    environment = _sealed_child_environment(ghc_bin=ghc, stack_bin=stack)
+    environment = _sealed_child_environment(
+        ghc_bin=ghc,
+        stack_bin=stack,
+        python_runtime=python_runtime,
+    )
     stack_yaml = _absolute_regular(
         haskell_root / "stack.yaml",
         label="AUTHORITATIVE_STACK_YAML",
@@ -2195,12 +2445,18 @@ def _correctness(arguments: argparse.Namespace) -> None:
         numeric_root / "contract/fixtures",
         label="FIXTURE_ROOT",
     )
-    compare_script = _absolute_regular(
+    compare_script_source = _absolute_regular(
         numeric_root / "oracle/compare_results.py",
         label="COMPARE_RESULTS",
     )
-    python_bin = Path("/usr/bin/python3").resolve(strict=True)
-    _absolute_regular(python_bin, label="PYTHON", executable=True)
+    compare_script = _pin_python_script(
+        compare_script_source,
+        label="COMPARE_RESULTS_PY",
+    )
+    python_path_ids = {
+        str(python_runtime.fd_path): _benchmark_python_path_id(python_runtime),
+        str(compare_script.fd_path): _pinned_file_path_id(compare_script),
+    }
     requests = (
         (
             "canonical",
@@ -2242,8 +2498,8 @@ def _correctness(arguments: argparse.Namespace) -> None:
         records.append(
             _run_logged(
                 [
-                    str(python_bin),
-                    str(compare_script),
+                    str(python_runtime.fd_path),
+                    str(compare_script.fd_path),
                     "--expected",
                     str(expected),
                     "--actual",
@@ -2257,6 +2513,11 @@ def _correctness(arguments: argparse.Namespace) -> None:
                 environment=environment,
                 phase=compare_phase,
                 output_directory=output,
+                pass_fds=(
+                    python_runtime.descriptor,
+                    compare_script.descriptor,
+                ),
+                portable_path_ids=python_path_ids,
             )
         )
         _comparison_status(comparison)
@@ -2375,6 +2636,7 @@ def _host_validator_command(
     output: Path,
     root_pid: int,
     python_bin: Path,
+    validator_script: Path | None = None,
 ) -> list[str]:
     execution = plan.get("execution")
     environment = plan.get("environmentValidity")
@@ -2387,9 +2649,13 @@ def _host_validator_command(
         or any(type(cpu) is not int or cpu < 0 for cpu in cpu_set)
     ):
         raise WorkflowError("HOST_CPU_SET_INVALID")
-    validator = _absolute_regular(
-        numeric_root / "oracle/validate_environment.py",
-        label="HOST_VALIDATOR",
+    validator = (
+        _absolute_regular(
+            numeric_root / "oracle/validate_environment.py",
+            label="HOST_VALIDATOR",
+        )
+        if validator_script is None
+        else validator_script
     )
     return [
         str(python_bin),
@@ -2541,6 +2807,7 @@ def _qualification(arguments: argparse.Namespace) -> None:
     ):
         raise WorkflowError("QUALIFICATION_CLI_CONTRACT_INVALID")
     output = _reserve_directory(arguments.output_dir)
+    marker_python = arguments.benchmark_python_runtime
     plan_path = _absolute_regular(arguments.plan, label="QUALIFICATION_PLAN")
     plan = strict_json_load(plan_path)
     configuration, case_order = _qualification_contract(plan)
@@ -2569,26 +2836,14 @@ def _qualification(arguments: argparse.Namespace) -> None:
         large_fixture_root / "large",
         label="LARGE_FIXTURE_DIRECTORY",
     )
-    (
-        pinned_executable_environment,
-        pin_regular_file,
-        pinned_runtime_error,
-    ) = _load_pinned_runtime_helpers()
-    try:
-        marker_python = pinned_executable_environment(
-            "S1_4X_BENCHMARK_PYTHON",
-            label="QUALIFICATION_MARKER_PYTHON",
-        )
-        marker_script = pin_regular_file(
-            _absolute_regular(
-                Path(__file__).resolve(strict=True),
-                label="PROFILE_MARKER_SCRIPT",
-            ),
-            label="PROFILE_MARKER_SCRIPT",
-            max_bytes=16 * 1024 * 1024,
-        )
-    except pinned_runtime_error as exc:
-        raise WorkflowError(f"QUALIFICATION_PINNED_RUNTIME_INVALID:{exc}") from exc
+    marker_script = _pin_python_script(
+        Path(__file__).resolve(strict=True),
+        label="PROFILE_MARKER_SCRIPT",
+    )
+    host_validator = _pin_python_script(
+        numeric_root / "oracle/validate_environment.py",
+        label="HOST_VALIDATOR_PY",
+    )
     configured_python_sha256 = marker_python.sha256
     marker_script_sha256 = marker_script.sha256
     cache_value = os.environ.get("S1_4X_CACHE_ROOT")
@@ -2608,7 +2863,15 @@ def _qualification(arguments: argparse.Namespace) -> None:
         haskell_root / work_dir
     ).is_symlink():
         raise WorkflowError("QUALIFICATION_STACK_WORK_DIR_ALREADY_EXISTS")
-    environment = _sealed_child_environment(ghc_bin=ghc, stack_bin=stack)
+    environment = _sealed_child_environment(
+        ghc_bin=ghc,
+        stack_bin=stack,
+        python_runtime=marker_python,
+    )
+    host_path_ids = {
+        str(marker_python.fd_path): _benchmark_python_path_id(marker_python),
+        str(host_validator.fd_path): _pinned_file_path_id(host_validator),
+    }
     stack_yaml = _absolute_regular(
         haskell_root / "stack.yaml",
         label="AUTHORITATIVE_STACK_YAML",
@@ -2630,6 +2893,7 @@ def _qualification(arguments: argparse.Namespace) -> None:
                 output=host_report,
                 root_pid=os.getpid(),
                 python_bin=marker_python.fd_path,
+                validator_script=host_validator.fd_path,
             )
             host_record = _run_logged(
                 host_command,
@@ -2637,7 +2901,11 @@ def _qualification(arguments: argparse.Namespace) -> None:
                 environment=environment,
                 phase=f"qualification-{prefix}-host",
                 output_directory=output,
-                pass_fds=(marker_python.descriptor,),
+                pass_fds=(
+                    marker_python.descriptor,
+                    host_validator.descriptor,
+                ),
+                portable_path_ids=host_path_ids,
             )
             _validate_host_report(host_report, plan=plan, root_pid=os.getpid())
             marker_path = output / f"{prefix}-measurement-state.json"
@@ -2969,15 +3237,19 @@ def _validate_correctness_receipt(
         numeric_root / "contract/fixtures",
         label="FIXTURE_ROOT",
     )
-    compare_script = _absolute_regular(
+    compare_script_source = _absolute_regular(
         numeric_root / "oracle/compare_results.py",
         label="COMPARE_RESULTS",
     )
-    python_bin = _absolute_regular(
-        Path("/usr/bin/python3").resolve(strict=True),
-        label="PYTHON",
-        executable=True,
+    python_runtime = _benchmark_python_runtime()
+    compare_script = _pin_python_script(
+        compare_script_source,
+        label="COMPARE_RESULTS_PY",
     )
+    python_path_ids = {
+        str(python_runtime.fd_path): _benchmark_python_path_id(python_runtime),
+        str(compare_script.fd_path): _pinned_file_path_id(compare_script),
+    }
     matrices = (
         (
             "canonical",
@@ -2990,9 +3262,11 @@ def _validate_correctness_receipt(
             fixture_root / "invalid/semantic-errors.expected.v1.json",
         ),
     )
-    expected_commands: list[tuple[str, list[str], Path]] = [
-        ("build", build_command, haskell_root),
-        ("test", test_command, haskell_root),
+    expected_commands: list[
+        tuple[str, list[str], Path, Mapping[str, str] | None]
+    ] = [
+        ("build", build_command, haskell_root, None),
+        ("test", test_command, haskell_root, None),
     ]
     expected_artifact_fields = {
         "matrixId",
@@ -3010,6 +3284,7 @@ def _validate_correctness_receipt(
     environment = _sealed_child_environment(
         ghc_bin=compiler,
         stack_bin=stack,
+        python_runtime=python_runtime,
     )
     for artifact, (label, request, expected) in zip(
         receipt["comparisonArtifacts"],
@@ -3060,10 +3335,18 @@ def _validate_correctness_receipt(
             prefix=f".validate-{label}-",
         ) as temporary:
             recomputed = Path(temporary) / "comparison.json"
+            replay_descriptors = (
+                python_runtime.descriptor,
+                compare_script.descriptor,
+            )
+            replay_identities = _pass_fd_identities(
+                replay_descriptors,
+                phase=f"{label}-compare-replay",
+            )
             completed = subprocess.run(
                 [
-                    str(python_bin),
-                    str(compare_script),
+                    str(python_runtime.fd_path),
+                    str(compare_script.fd_path),
                     "--expected",
                     str(expected),
                     "--actual",
@@ -3078,10 +3361,16 @@ def _validate_correctness_receipt(
                 check=False,
                 stdin=subprocess.DEVNULL,
                 capture_output=True,
+                pass_fds=replay_descriptors,
             )
             if (
                 completed.returncode != 0
                 or recomputed.read_bytes() != comparison_payload
+                or _pass_fd_identities(
+                    replay_descriptors,
+                    phase=f"{label}-compare-replay",
+                )
+                != replay_identities
             ):
                 raise WorkflowError("CORRECTNESS_COMPARISON_REPLAY_DRIFT")
         expected_commands.extend(
@@ -3098,12 +3387,13 @@ def _validate_correctness_receipt(
                         str(actual),
                     ],
                     haskell_root,
+                    None,
                 ),
                 (
                     f"{label}-compare",
                     [
-                        str(python_bin),
-                        str(compare_script),
+                        str(python_runtime.fd_path),
+                        str(compare_script.fd_path),
                         "--expected",
                         str(expected),
                         "--actual",
@@ -3114,14 +3404,18 @@ def _validate_correctness_receipt(
                         str(comparison),
                     ],
                     repo_root,
+                    python_path_ids,
                 ),
             ]
         )
-    if tuple(phase for phase, _, _ in expected_commands) != CORRECTNESS_PHASES:
+    if (
+        tuple(phase for phase, _, _, _ in expected_commands)
+        != CORRECTNESS_PHASES
+    ):
         raise WorkflowError("CORRECTNESS_PHASE_SEQUENCE_DRIFT")
     if len(receipt["commands"]) != len(expected_commands):
         raise WorkflowError("CORRECTNESS_COMMAND_COUNT_DRIFT")
-    for record, (phase, argv, cwd) in zip(
+    for record, (phase, argv, cwd, portable_path_ids) in zip(
         receipt["commands"],
         expected_commands,
         strict=True,
@@ -3132,6 +3426,7 @@ def _validate_correctness_receipt(
             expected_argv=argv,
             expected_cwd=cwd,
             evidence_directory=output,
+            portable_path_ids=portable_path_ids,
         )
     return receipt
 
@@ -3195,18 +3490,25 @@ def _validate_qualification_artifact(
     ghcup = _required_environment_path("S1_4X_GHCUP_BIN")
     stack = _required_environment_path("S1_4X_STACK_BIN")
     _required_environment_path("S1_4X_AUTHORITATIVE_GHC_BIN")
-    marker_python = _required_environment_path("S1_4X_BENCHMARK_PYTHON_BIN")
-    marker_python_sha256 = _require_sha256(
-        os.environ.get("S1_4X_BENCHMARK_PYTHON_SHA256"),
-        label="benchmark-python",
-    )
-    if sha256_file(marker_python) != marker_python_sha256:
-        raise WorkflowError("BENCHMARK_PYTHON_SHA256_MISMATCH")
-    marker_script = _absolute_regular(
+    marker_python = _benchmark_python_runtime()
+    marker_python_sha256 = marker_python.sha256
+    marker_script_source = _absolute_regular(
         Path(__file__).resolve(strict=True),
         label="PROFILE_MARKER_SCRIPT",
     )
-    marker_script_sha256 = sha256_file(marker_script)
+    marker_script = _pin_python_script(
+        marker_script_source,
+        label="PROFILE_MARKER_SCRIPT",
+    )
+    marker_script_sha256 = marker_script.sha256
+    host_validator = _pin_python_script(
+        numeric_root / "oracle/validate_environment.py",
+        label="HOST_VALIDATOR_PY",
+    )
+    host_path_ids = {
+        str(marker_python.fd_path): _benchmark_python_path_id(marker_python),
+        str(host_validator.fd_path): _pinned_file_path_id(host_validator),
+    }
     cache_value = os.environ.get("S1_4X_CACHE_ROOT")
     if cache_value is None:
         raise WorkflowError("REQUIRED_ENVIRONMENT_MISSING:S1_4X_CACHE_ROOT")
@@ -3349,7 +3651,8 @@ def _validate_qualification_artifact(
                 plan=plan,
                 output=host_report_path,
                 root_pid=root_pid,
-                python_bin=Path(str(marker.get("pythonPinnedFdPath", ""))),
+                python_bin=marker_python.fd_path,
+                validator_script=host_validator.fd_path,
             )
             validate_logged_command_record(
                 host_record,
@@ -3357,6 +3660,7 @@ def _validate_qualification_artifact(
                 expected_argv=host_command,
                 expected_cwd=repo_root,
                 evidence_directory=output,
+                portable_path_ids=host_path_ids,
             )
             marker_sha256 = _require_sha256(
                 marker.get("measurementSha256"),
@@ -3383,13 +3687,15 @@ def _validate_qualification_artifact(
                 or measurement.get("qualificationCaseOrder")
                 != list(case_order)
                 or measurement.get("hostValiditySha256") != host_sha256
-                or measurement.get("markerPythonPath") != str(marker_python)
+                or measurement.get("markerPythonPath")
+                != str(marker_python.source_path)
                 or measurement.get("markerPythonPinnedFdPath")
                 != marker.get("pythonPinnedFdPath")
                 or _pinned_fd_number(marker.get("pythonPinnedFdPath")) is None
                 or measurement.get("markerPythonSha256")
                 != marker_python_sha256
-                or measurement.get("markerScriptPath") != str(marker_script)
+                or measurement.get("markerScriptPath")
+                != str(marker_script_source)
                 or measurement.get("markerScriptPinnedFdPath")
                 != marker.get("scriptPinnedFdPath")
                 or _pinned_fd_number(marker.get("scriptPinnedFdPath")) is None
@@ -3399,9 +3705,9 @@ def _validate_qualification_artifact(
                 != profile_marker_pre_run_sha256(measurement)
                 or marker.get("preRunSha256")
                 != measurement.get("preRunSha256")
-                or marker.get("pythonPath") != str(marker_python)
+                or marker.get("pythonPath") != str(marker_python.source_path)
                 or marker.get("pythonSha256") != marker_python_sha256
-                or marker.get("scriptPath") != str(marker_script)
+                or marker.get("scriptPath") != str(marker_script_source)
                 or marker.get("scriptSha256") != marker_script_sha256
                 or marker.get("argv") != measurement.get("markerArgv")
                 or marker.get("argvSha256")
@@ -3773,8 +4079,6 @@ def _portable_compatibility_replay_records(
     exact = {
         str(ghcup): "GHCUP_0_2_6_2_LINUX_X86_64",
         str(stack): "GHCUP_STACK_3_11_1",
-        "/usr/bin/python3": "SYSTEM_PYTHON3",
-        str(Path("/usr/bin/python3").resolve(strict=True)): "SYSTEM_PYTHON3",
     }
     prefixes = (
         (str(output) + "/", "OUTPUT_ROOT/"),
@@ -4200,6 +4504,7 @@ def _verify_cross_replay(arguments: argparse.Namespace) -> None:
 
 
 def _replay_compatibility_success(arguments: argparse.Namespace) -> None:
+    python_runtime = arguments.benchmark_python_runtime
     output = _absolute_existing_directory(
         arguments.output_dir,
         label="COMPATIBILITY_OUTPUT",
@@ -4274,6 +4579,7 @@ def _replay_compatibility_success(arguments: argparse.Namespace) -> None:
     environment = _sealed_child_environment(
         ghc_bin=compatibility_ghc,
         stack_bin=stack,
+        python_runtime=python_runtime,
     )
     solve_command = build_stack_command(
         ghcup=ghcup,
@@ -4379,6 +4685,8 @@ def _replay_compatibility_success(arguments: argparse.Namespace) -> None:
         log_id: str,
         command: Sequence[str],
         cwd: Path,
+        pass_fds: Sequence[int] = (),
+        portable_path_ids: Mapping[str, str] | None = None,
     ) -> dict[str, Any]:
         record = _run_compatibility_logged(
             command,
@@ -4387,6 +4695,8 @@ def _replay_compatibility_success(arguments: argparse.Namespace) -> None:
             phase=phase,
             log_id=log_id,
             output_directory=output,
+            pass_fds=pass_fds,
+            portable_path_ids=portable_path_ids,
         )
         actual_records.append(record)
         portable_records.extend(
@@ -4488,15 +4798,26 @@ def _replay_compatibility_success(arguments: argparse.Namespace) -> None:
         numeric_root / "contract/fixtures",
         label="FIXTURE_ROOT",
     )
-    compare_script = _absolute_regular(
+    compare_script_source = _absolute_regular(
         numeric_root / "oracle/compare_results.py",
         label="COMPARE_RESULTS",
     )
-    python_bin = _absolute_regular(
-        Path("/usr/bin/python3").resolve(strict=True),
-        label="PYTHON",
-        executable=True,
+    compare_script = _pin_python_script(
+        compare_script_source,
+        label="COMPARE_RESULTS_PY",
     )
+    profile_script = _pin_python_script(
+        Path(__file__).resolve(strict=True),
+        label="PROFILE_WORKFLOW_PY",
+    )
+    compare_path_ids = {
+        str(python_runtime.fd_path): _benchmark_python_path_id(python_runtime),
+        str(compare_script.fd_path): _pinned_file_path_id(compare_script),
+    }
+    profile_path_ids = {
+        str(python_runtime.fd_path): _benchmark_python_path_id(python_runtime),
+        str(profile_script.fd_path): _pinned_file_path_id(profile_script),
+    }
 
     semantic_request = _absolute_regular(
         fixture_root / "invalid/semantic-errors.v1.json",
@@ -4527,8 +4848,8 @@ def _replay_compatibility_success(arguments: argparse.Namespace) -> None:
         publish_failed("stableErrorReplay", [semantic_process], {})
         return
     semantic_compare_command = [
-        str(python_bin),
-        str(compare_script),
+        str(python_runtime.fd_path),
+        str(compare_script.fd_path),
         "--expected",
         str(semantic_expected),
         "--actual",
@@ -4543,6 +4864,11 @@ def _replay_compatibility_success(arguments: argparse.Namespace) -> None:
         log_id="stable-error-compare",
         command=semantic_compare_command,
         cwd=repo_root,
+        pass_fds=(
+            python_runtime.descriptor,
+            compare_script.descriptor,
+        ),
+        portable_path_ids=compare_path_ids,
     )
     if semantic_compare["exitCode"] != 0:
         publish_failed(
@@ -4615,8 +4941,8 @@ def _replay_compatibility_success(arguments: argparse.Namespace) -> None:
         "mismatchCount": 0,
     }
     oracle_command = [
-        str(python_bin),
-        str(compare_script),
+        str(python_runtime.fd_path),
+        str(compare_script.fd_path),
         "--expected",
         str(canonical_expected),
         "--actual",
@@ -4631,6 +4957,11 @@ def _replay_compatibility_success(arguments: argparse.Namespace) -> None:
         log_id="oracle-replay",
         command=oracle_command,
         cwd=repo_root,
+        pass_fds=(
+            python_runtime.descriptor,
+            compare_script.descriptor,
+        ),
+        portable_path_ids=compare_path_ids,
     )
     if oracle_record["exitCode"] != 0:
         publish_failed("oracleReplay", [oracle_record], {})
@@ -4653,8 +4984,8 @@ def _replay_compatibility_success(arguments: argparse.Namespace) -> None:
     }
     cross_artifact = output / "cross-replay.v1.json"
     cross_command = [
-        str(python_bin),
-        str(Path(__file__).resolve(strict=True)),
+        str(python_runtime.fd_path),
+        str(profile_script.fd_path),
         "verify-cross-replay",
         "--canonical-comparison",
         str(canonical_comparison),
@@ -4668,6 +4999,11 @@ def _replay_compatibility_success(arguments: argparse.Namespace) -> None:
         log_id="cross-replay",
         command=cross_command,
         cwd=repo_root,
+        pass_fds=(
+            python_runtime.descriptor,
+            profile_script.descriptor,
+        ),
+        portable_path_ids=profile_path_ids,
     )
     if cross_record["exitCode"] != 0:
         publish_failed("crossReplay", [cross_record], {})
@@ -5294,6 +5630,7 @@ def _oci_context_name(
 
 def _oci_correctness(arguments: argparse.Namespace) -> None:
     output = _reserve_directory(arguments.output_dir)
+    python_runtime = arguments.benchmark_python_runtime
     haskell_root = Path(__file__).resolve(strict=True).parent.parent
     numeric_root = haskell_root.parent
     repo_root = numeric_root.parents[3]
@@ -5364,7 +5701,11 @@ def _oci_correctness(arguments: argparse.Namespace) -> None:
     ).is_symlink():
         raise WorkflowError("OCI_STACK_WORK_DIR_ALREADY_EXISTS")
     docker_config.mkdir(mode=0o700)
-    environment = _sealed_child_environment(ghc_bin=ghc, stack_bin=stack)
+    environment = _sealed_child_environment(
+        ghc_bin=ghc,
+        stack_bin=stack,
+        python_runtime=python_runtime,
+    )
     environment["DOCKER_CONFIG"] = str(docker_config)
     stack_yaml = _absolute_regular(
         haskell_root / "stack.yaml",
@@ -5593,15 +5934,18 @@ def _oci_correctness(arguments: argparse.Namespace) -> None:
     )
     runtime_output = output / "runtime"
     runtime_output.mkdir(mode=0o700)
-    compare_script = _absolute_regular(
+    compare_script_source = _absolute_regular(
         numeric_root / "oracle/compare_results.py",
         label="COMPARE_RESULTS",
     )
-    python_bin = _absolute_regular(
-        Path("/usr/bin/python3").resolve(strict=True),
-        label="PYTHON",
-        executable=True,
+    compare_script = _pin_python_script(
+        compare_script_source,
+        label="COMPARE_RESULTS_PY",
     )
+    compare_path_ids = {
+        str(python_runtime.fd_path): _benchmark_python_path_id(python_runtime),
+        str(compare_script.fd_path): _pinned_file_path_id(compare_script),
+    }
     matrices = (
         (
             "canonical",
@@ -5644,8 +5988,8 @@ def _oci_correctness(arguments: argparse.Namespace) -> None:
         )
         _absolute_regular(actual, label=f"OCI_{label.upper()}_ACTUAL")
         compare_command = [
-            str(python_bin),
-            str(compare_script),
+            str(python_runtime.fd_path),
+            str(compare_script.fd_path),
             "--expected",
             str(expected),
             "--actual",
@@ -5662,6 +6006,11 @@ def _oci_correctness(arguments: argparse.Namespace) -> None:
                 environment=environment,
                 phase=f"oci-{label}-compare",
                 output_directory=output,
+                pass_fds=(
+                    python_runtime.descriptor,
+                    compare_script.descriptor,
+                ),
+                portable_path_ids=compare_path_ids,
             )
         )
         _comparison_status(comparison)
@@ -5912,6 +6261,7 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = _parser().parse_args(argv)
     try:
+        arguments.benchmark_python_runtime = _benchmark_python_runtime()
         arguments.handler(arguments)
     except (
         WorkflowError,

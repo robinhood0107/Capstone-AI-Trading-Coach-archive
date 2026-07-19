@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/bin/false
 """HLint managed ignores와 restricted-module import allowances를 exact 검증한다."""
 
 from __future__ import annotations

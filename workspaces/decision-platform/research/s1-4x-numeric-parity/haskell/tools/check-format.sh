@@ -3,6 +3,8 @@ set -euo pipefail
 
 SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 HASKELL_ROOT="$(realpath "${SCRIPT_PATH%/*}/..")"
+source "$HASKELL_ROOT/tools/python-runtime.sh"
+s1_4x_pin_benchmark_python
 "$HASKELL_ROOT/tools/assert-toolchain.sh" >/dev/null
 
 STYLISH_BIN="${S1_4X_STYLISH_BIN:?S1_4X_STYLISH_BIN readiness path is required}"
@@ -33,14 +35,14 @@ trap 'if [[ "${REMOVE_OUTPUT:-0}" -eq 1 ]]; then rm -rf -- "$OUTPUT_DIRECTORY"; 
 
 # pinned formatter가 mandated GHC2024 이름만 거부하는 exact leaf인지 먼저 재현한 뒤,
 # 동일 binary의 공식 edition 확장 config만 formatter-only fallback으로 허용한다.
-python3 "$HASKELL_ROOT/tools/stylish_fallback.py" probe \
+"$S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH" "$HASKELL_ROOT/tools/stylish_fallback.py" probe \
   --haskell-root "$HASKELL_ROOT" \
   --formatter-bin "$STYLISH_BIN" \
   --output "$OUTPUT_DIRECTORY/parser-capability.receipt.json" \
   >"$OUTPUT_DIRECTORY/parser-capability.stdout" \
   2>"$OUTPUT_DIRECTORY/parser-capability.stderr"
 
-python3 "$HASKELL_ROOT/tools/haskell_evidence.py" source-inputs \
+"$S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH" "$HASKELL_ROOT/tools/haskell_evidence.py" source-inputs \
   --haskell-root "$HASKELL_ROOT" \
   --manifest "$SOURCE_MANIFEST" \
   >"$OUTPUT_DIRECTORY/source-inputs.before.stdout" \
@@ -82,7 +84,7 @@ fixture_after="$(sha256sum "$MISFORMATTED_FIXTURE" | awk '{print $1}')"
   echo "stylish-haskell mutated the negative fixture" >&2
   exit 2
 }
-python3 - "$OUTPUT_DIRECTORY/misformatted.stdout" <<'PY'
+"$S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH" - "$OUTPUT_DIRECTORY/misformatted.stdout" <<'PY'
 import sys
 from pathlib import Path
 
@@ -97,20 +99,20 @@ if not all(token in formatted for token in required):
     raise SystemExit("stylish-haskell negative fixture output is incomplete")
 PY
 
-PYTHONPATH="$HASKELL_ROOT" python3 -m unittest -v \
+PYTHONPATH="$HASKELL_ROOT" "$S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH" -m unittest -v \
   tools.tests.test_haskell_evidence.HaskellEvidenceTests.test_git_enumerator_rejects_untracked_candidate_source_escape \
   tools.tests.test_haskell_evidence.HaskellEvidenceTests.test_source_manifest_rejects_a_stale_tracked_entry \
   tools.tests.test_haskell_evidence.HaskellEvidenceTests.test_source_manifest_rejects_an_intermediate_directory_symlink \
   >"$OUTPUT_DIRECTORY/source-input-negatives.stdout" \
   2>"$OUTPUT_DIRECTORY/source-input-negatives.stderr"
 
-python3 "$HASKELL_ROOT/tools/haskell_evidence.py" source-inputs \
+"$S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH" "$HASKELL_ROOT/tools/haskell_evidence.py" source-inputs \
   --haskell-root "$HASKELL_ROOT" \
   --manifest "$SOURCE_MANIFEST" \
   >"$OUTPUT_DIRECTORY/source-inputs.after.stdout" \
   2>"$OUTPUT_DIRECTORY/source-inputs.after.stderr"
 
-python3 - \
+"$S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH" - \
   "$OUTPUT_DIRECTORY" \
   "$SOURCE_MANIFEST" \
   "$MANDATED_CONFIGURATION" \

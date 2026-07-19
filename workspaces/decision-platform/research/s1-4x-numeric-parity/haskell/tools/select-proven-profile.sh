@@ -33,7 +33,9 @@ fi
 
 SCRIPT_PATH="$(readlink -f "$0")"
 HASKELL_ROOT="$(realpath "${SCRIPT_PATH%/*}/..")"
+source "$HASKELL_ROOT/tools/python-runtime.sh"
+s1_4x_pin_benchmark_python
 "$HASKELL_ROOT/tools/assert-toolchain.sh" >/dev/null
 
-exec /usr/bin/python3 "$HASKELL_ROOT/tools/profile_workflow.py" select-profile \
+exec "$S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH" "$HASKELL_ROOT/tools/profile_workflow.py" select-profile \
   --mode "$MODE"

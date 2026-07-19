@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/bin/false
 """기존 GHC 9.14.1 solve 실패를 portable typed evidence로 고정한다."""
 
 from __future__ import annotations

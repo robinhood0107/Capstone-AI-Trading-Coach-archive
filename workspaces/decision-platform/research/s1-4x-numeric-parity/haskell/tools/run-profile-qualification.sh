@@ -42,6 +42,8 @@ done < <(compgen -e)
 
 SCRIPT_PATH="$(readlink -f "$0")"
 HASKELL_ROOT="$(realpath "${SCRIPT_PATH%/*}/..")"
+source "$HASKELL_ROOT/tools/python-runtime.sh"
+s1_4x_pin_benchmark_python
 "$HASKELL_ROOT/tools/assert-toolchain.sh" >/dev/null
 
 if [[ "$BENCHMARK_PYTHON" != /* \
@@ -76,7 +78,7 @@ if [[ "$LARGE_FIXTURE_ROOT" != /* \
   exit 69
 fi
 
-exec "$BENCHMARK_PYTHON_PINNED_FD_PATH" "$HASKELL_ROOT/tools/profile_workflow.py" qualification \
+exec "$S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH" "$HASKELL_ROOT/tools/profile_workflow.py" qualification \
   --plan "$2" \
   --profiles "$4" \
   --enforce-order-plan \

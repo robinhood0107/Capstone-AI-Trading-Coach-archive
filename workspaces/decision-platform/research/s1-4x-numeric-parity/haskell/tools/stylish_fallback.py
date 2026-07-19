@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/bin/false
 """stylish-haskell 0.15.1.0의 GHC2024 parser fallback을 fail-closed 검증한다."""
 
 from __future__ import annotations

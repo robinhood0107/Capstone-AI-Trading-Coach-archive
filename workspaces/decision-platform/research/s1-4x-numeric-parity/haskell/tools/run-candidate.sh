@@ -49,6 +49,8 @@ SOURCE_MANIFEST="$HASKELL_ROOT/source-inputs.v1.json"
 QUALIFICATION_PLAN="$NUMERIC_ROOT/benchmarks/benchmark-plan.v1.json"
 PROFILE_HELPER="$HASKELL_ROOT/tools/profile_workflow.py"
 STACK_YAML_PATH="$HASKELL_ROOT/stack.yaml"
+source "$HASKELL_ROOT/tools/python-runtime.sh"
+s1_4x_pin_benchmark_python
 
 GHCUP_BIN="${S1_4X_GHCUP_BIN:?S1_4X_GHCUP_BIN readiness path is required}"
 STACK_BIN="${S1_4X_STACK_BIN:?S1_4X_STACK_BIN readiness path is required}"
@@ -82,7 +84,7 @@ fi
 
 "$HASKELL_ROOT/tools/assert-toolchain.sh" >/dev/null
 PROFILE_ID="$(
-  /usr/bin/python3 "$PROFILE_HELPER" candidate-runtime \
+  "$S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH" "$PROFILE_HELPER" candidate-runtime \
     --profile "$PROFILE_PATH" \
     --source-manifest "$SOURCE_MANIFEST" \
     --qualification-plan "$QUALIFICATION_PLAN"
@@ -101,7 +103,7 @@ case "$PROFILE_ID" in
 esac
 
 STACK_ROOT_PATH="$(
-  /usr/bin/python3 "$PROFILE_HELPER" candidate-stack-root \
+  "$S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH" "$PROFILE_HELPER" candidate-stack-root \
     --cache-root "$CACHE_ROOT" \
     --output "$OUTPUT_PATH"
 )"

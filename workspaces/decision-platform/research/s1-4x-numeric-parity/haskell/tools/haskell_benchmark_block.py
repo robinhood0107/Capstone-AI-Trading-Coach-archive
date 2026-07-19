@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/bin/false
 """Frozen Haskell Criterion family를 실행하고 shared native evidence pipeline에 연결한다."""
 
 from __future__ import annotations

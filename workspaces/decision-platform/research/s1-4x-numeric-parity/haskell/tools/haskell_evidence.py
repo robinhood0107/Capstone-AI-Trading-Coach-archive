@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/bin/false
 """S1.4X Haskell source, module-safety, profile evidence를 결정적으로 생성한다."""
 
 from __future__ import annotations
@@ -81,6 +81,7 @@ WORKFLOW_INPUT_PATHS = (
     "tools/haskell_evidence.py",
     "tools/hlint_inventory.py",
     "tools/profile_workflow.py",
+    "tools/python-runtime.sh",
     "tools/run-benchmark-block.sh",
     "tools/run-candidate.sh",
     "tools/run-correctness-profile.sh",

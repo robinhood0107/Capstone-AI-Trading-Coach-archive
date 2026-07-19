@@ -9,6 +9,8 @@ fi
 SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 HASKELL_ROOT="$(realpath "${SCRIPT_PATH%/*}/..")"
 NUMERIC_ROOT="$(realpath "$HASKELL_ROOT/..")"
+source "$HASKELL_ROOT/tools/python-runtime.sh"
+s1_4x_pin_benchmark_python
 
 # readiness packet의 runtime path를 명시적으로 주입해 tracked host path와 PATH discovery를 금지한다.
 GHCUP_BIN="${S1_4X_GHCUP_BIN:?S1_4X_GHCUP_BIN readiness path is required}"
@@ -114,7 +116,7 @@ LOCK="$HASKELL_ROOT/toolchain-lock.v1.json"
 COMPATIBILITY_EVIDENCE="$HASKELL_ROOT/ghc-compatibility-solve-failure.v1.json"
 
 compatibility_status="$(
-python3 - \
+"$S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH" - \
   "$LOCK" \
   "$PROVENANCE" \
   "$PROVENANCE_SCHEMA" \

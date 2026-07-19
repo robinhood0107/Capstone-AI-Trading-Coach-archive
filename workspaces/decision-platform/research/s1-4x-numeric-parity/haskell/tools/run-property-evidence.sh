@@ -9,6 +9,8 @@ fi
 SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 HASKELL_ROOT="$(realpath "${SCRIPT_PATH%/*}/..")"
 NUMERIC_ROOT="$(realpath "${HASKELL_ROOT}/..")"
+source "$HASKELL_ROOT/tools/python-runtime.sh"
+s1_4x_pin_benchmark_python
 OUTPUT_DIRECTORY="$(realpath -m "$2")"
 OUTPUT_PARENT="${OUTPUT_DIRECTORY%/*}"
 
@@ -48,7 +50,7 @@ if [[ "$CACHE_ROOT_CONFIGURED" != /* \
 fi
 CACHE_ROOT="$CACHE_ROOT_CONFIGURED"
 STACK_ROOT_PATH="$(
-  /usr/bin/python3 "$HASKELL_ROOT/tools/profile_workflow.py" \
+  "$S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH" "$HASKELL_ROOT/tools/profile_workflow.py" \
     isolated-stack-root \
     --cache-root "$CACHE_ROOT" \
     --purpose property \
@@ -82,21 +84,21 @@ validate_execution_closure() {
   local profile_result
   local closure_result
   source_result="$(
-    python3 "$HASKELL_ROOT/tools/haskell_evidence.py" source-inputs \
+    "$S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH" "$HASKELL_ROOT/tools/haskell_evidence.py" source-inputs \
       --haskell-root "$HASKELL_ROOT" \
       --manifest "$SOURCE_MANIFEST"
   )"
   profile_result="$(
-    python3 "$HASKELL_ROOT/tools/haskell_evidence.py" selected-profile \
+    "$S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH" "$HASKELL_ROOT/tools/haskell_evidence.py" selected-profile \
       --haskell-root "$HASKELL_ROOT" \
       --profile "$SELECTED_PROFILE" \
       --qualification-plan "$QUALIFICATION_PLAN"
   )"
   closure_result="$(
-    python3 "$HASKELL_ROOT/tools/haskell_evidence.py" property-closure \
+    "$S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH" "$HASKELL_ROOT/tools/haskell_evidence.py" property-closure \
       --haskell-root "$HASKELL_ROOT"
   )"
-  python3 - "$phase" "$source_result" "$profile_result" "$closure_result" <<'PY'
+  "$S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH" - "$phase" "$source_result" "$profile_result" "$closure_result" <<'PY'
 import json
 import sys
 
@@ -147,7 +149,7 @@ STACK_ARGUMENTS=(
 )
 
 BUILD_ARGV_SHA256="$(
-  python3 - \
+  "$S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH" - \
     "$STACK_BIN" \
     "${STACK_ARGUMENTS[@]}" \
     build \
