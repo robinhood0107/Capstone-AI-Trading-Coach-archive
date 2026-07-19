@@ -469,6 +469,27 @@ class ProfileSelectionContractTests(unittest.TestCase):
             workflow,
         )
 
+    def test_qualification_consumes_shared_materialized_large_fixture_root(
+        self,
+    ) -> None:
+        workflow = HELPER_PATH.read_text(encoding="utf-8")
+        wrapper = QUALIFICATION_WRAPPER.read_text(encoding="utf-8")
+        for source in (workflow, wrapper):
+            self.assertIn("S1_4X_LARGE_FIXTURE_ROOT", source)
+            self.assertNotIn("S1_4X_BENCHMARK_FIXTURE_ROOT", source)
+        self.assertIn(
+            "large_fixture_root = _absolute_existing_directory(",
+            workflow,
+        )
+        self.assertIn(
+            '"S1_4X_LARGE_FIXTURE_ROOT": str(large_fixture_root),',
+            workflow,
+        )
+        self.assertIn(
+            'LARGE_FIXTURE_ROOT="${S1_4X_LARGE_FIXTURE_ROOT:?',
+            wrapper,
+        )
+
     def test_final_profile_binds_selected_correctness_and_qualification(self) -> None:
         helper = load_helper()
         selection = {

@@ -186,6 +186,27 @@ class BenchmarkWrapperContractTests(unittest.TestCase):
         self.assertIn('"S1_4X_BENCHMARK_QUALIFICATION"', source)
         self.assertIn("INVALID_PRE_RUN_QUALIFICATION_STATE", source)
 
+    def test_timing_uses_only_shared_materialized_large_fixture_root(self) -> None:
+        wrapper = WRAPPER.read_text(encoding="utf-8")
+        helper = HELPER.read_text(encoding="utf-8")
+        benchmark = BENCHMARK_MAIN.read_text(encoding="utf-8")
+        for source in (wrapper, helper, benchmark):
+            self.assertIn("S1_4X_LARGE_FIXTURE_ROOT", source)
+            self.assertNotIn("S1_4X_BENCHMARK_FIXTURE_ROOT", source)
+        self.assertIn(
+            'requiredConfiguredDirectory "S1_4X_LARGE_FIXTURE_ROOT"',
+            benchmark,
+        )
+        self.assertNotIn('"../contract/fixtures"', benchmark)
+        self.assertIn(
+            'S1_4X_LARGE_FIXTURE_ROOT="$LARGE_FIXTURE_ROOT"',
+            wrapper,
+        )
+        self.assertIn(
+            '"S1_4X_LARGE_FIXTURE_ROOT": str(large_fixture_root),',
+            helper,
+        )
+
     def test_benchmark_self_reports_the_exact_executed_runtime_identity(self) -> None:
         source = BENCHMARK_MAIN.read_text(encoding="utf-8")
         for token in (
