@@ -162,6 +162,14 @@ jobs:
             '49c8a036ce399587205a11ac24e73465cadc5f3232e9418a9d87f4b7f746c4ec' \
             "$BOOT/ghcup-0.1.0.yaml" | sha256sum --check
 
+          VECTOR_ARCHIVE="$BOOT/vector-0.13.2.0.tar.gz"
+          curl -fL \
+            https://hackage.haskell.org/package/vector-0.13.2.0/vector-0.13.2.0.tar.gz \
+            -o "$VECTOR_ARCHIVE"
+          printf '%s  %s\n' \
+            '28f203c786cbf8ac6dc3fea3378ec36f34173d505fb4a1dd60fc8418ad91c423' \
+            "$VECTOR_ARCHIVE" | sha256sum --check
+
           export GHCUP_INSTALL_BASE_PREFIX="$PREFIX"
           GHCUP="$BOOT/ghcup"
           METADATA="file://$BOOT/ghcup-0.1.0.yaml"
@@ -192,6 +200,21 @@ jobs:
             "3ff3fb4b571876d668ddf4ad0245769c19a640283fabb0c2629038aa34197f62"
           test "$(sha256sum "$TOOLS/bin/stylish-haskell" | awk '{print $1}')" = \
             "385dc27bc2d0fb654e76ecadfb57bc0b7e1c58afe74f19923e20b696e6fe0d7b"
+          S1_4X="$GITHUB_WORKSPACE/workspaces/decision-platform/research/s1-4x-numeric-parity"
+          BENCHMARK_VENV="$RUNNER_TEMP/s1-4x-benchmark-python"
+          BASE_PYTHON="$(
+            "$S1_4X_UV_BIN" python find 3.12.13 --managed-python
+          )"
+          "$BASE_PYTHON" -m venv --copies "$BENCHMARK_VENV"
+          VIRTUAL_ENV="$BENCHMARK_VENV" \
+            "$S1_4X_UV_BIN" sync --frozen --no-dev \
+            --project "$S1_4X/oracle" --active
+          BENCHMARK_PYTHON="$BENCHMARK_VENV/bin/python"
+          test -f "$BENCHMARK_PYTHON"
+          test -x "$BENCHMARK_PYTHON"
+          test ! -L "$BENCHMARK_PYTHON"
+          test "$(sha256sum "$BENCHMARK_PYTHON" | awk '{print $1}')" = \
+            "9544d2a29138833e6177d45dbc57468d37710b5080c901fbb579d53f251cdd6f"
 
           {
             echo "GHCUP_INSTALL_BASE_PREFIX=$PREFIX"
@@ -201,6 +224,9 @@ jobs:
             echo "S1_4X_STACK_BIN=$STACK"
             echo "S1_4X_HLINT_BIN=$TOOLS/bin/hlint"
             echo "S1_4X_STYLISH_BIN=$TOOLS/bin/stylish-haskell"
+            echo "S1_4X_VECTOR_SOURCE_ARCHIVE=$VECTOR_ARCHIVE"
+            echo "S1_4X_BENCHMARK_PYTHON_BIN=$BENCHMARK_PYTHON"
+            echo "S1_4X_BENCHMARK_PYTHON_SHA256=$(sha256sum "$BENCHMARK_PYTHON" | awk '{print $1}')"
           } >> "$GITHUB_ENV"
 
       - name: Run every native, OCI, and frozen regression gate serially
@@ -216,6 +242,8 @@ jobs:
           S1_4X_DOCKER_SHA256="$(
             sha256sum "$S1_4X_DOCKER_BIN" | awk '{print $1}'
           )"
+          source "$S1_4X/haskell/tools/python-runtime.sh"
+          s1_4x_pin_benchmark_python
           "$S1_4X_DOCKER_BIN" pull "$S1_4X_SCALA_BASE_IMAGE_REF"
           "$S1_4X_DOCKER_BIN" pull \
             "docker.io/library/haskell@sha256:417d4bc30ac7d8d5ff04ec97937f86eb508b0c76bfd1a39b5ec225688531aa9d"
@@ -226,7 +254,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          artifact_bytes="$(du -sb "$RUNNER_TEMP/s1-4x-correctness" | cut -f1)"
+          test -f \
+            "$RUNNER_TEMP/s1-4x-correctness-final-audit/final-candidate-audit.json"
+          correctness_bytes="$(
+            du -sb "$RUNNER_TEMP/s1-4x-correctness" | cut -f1
+          )"
+          audit_bytes="$(
+            du -sb "$RUNNER_TEMP/s1-4x-correctness-final-audit" | cut -f1
+          )"
+          artifact_bytes="$((correctness_bytes + audit_bytes))"
           test "$artifact_bytes" -le "$S1_4X_ARTIFACT_MAX_BYTES"
 
       - name: Upload correctness prerequisite evidence
@@ -234,6 +270,14 @@ jobs:
         with:
           name: s1-4x-benchmark-correctness-${{ github.run_id }}
           path: ${{ runner.temp }}/s1-4x-correctness
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload typed final candidate audit evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: s1-4x-correctness-final-audit-${{ github.run_id }}
+          path: ${{ runner.temp }}/s1-4x-correctness-final-audit
           if-no-files-found: error
           retention-days: 14
 
@@ -305,19 +349,16 @@ jobs:
           set -euo pipefail
           ROOT="$GITHUB_WORKSPACE"
           S1_4X="$ROOT/workspaces/decision-platform/research/s1-4x-numeric-parity"
-          ORACLE="$S1_4X/oracle"
           RESULT_DIR="$RUNNER_TEMP/s1-4x-correctness"
-          BENCHMARK_PYTHON="$(
-            uv run --frozen --project "$ORACLE" \
-              python -c 'import os,sys; print(os.path.realpath(sys.executable))'
-          )"
+          BENCHMARK_PYTHON="$S1_4X_BENCHMARK_PYTHON_BIN"
           test -f "$BENCHMARK_PYTHON"
           test -x "$BENCHMARK_PYTHON"
           test ! -L "$BENCHMARK_PYTHON"
+          test "$(sha256sum "$BENCHMARK_PYTHON" | awk '{print $1}')" = \
+            "$S1_4X_BENCHMARK_PYTHON_SHA256"
           {
             echo "RESULT_DIR=$RESULT_DIR"
             echo "S1_4X_BENCHMARK_PYTHON_BIN=$BENCHMARK_PYTHON"
-            echo "S1_4X_BENCHMARK_PYTHON_SHA256=$(sha256sum "$BENCHMARK_PYTHON" | awk '{print $1}')"
             echo "S1_4X_SCALA_JVM_ALLOWLIST_RESULT=$RESULT_DIR/scala/jmh-smoke/scala-jvm-argument-allowlist.v1.json"
             echo "S1_4X_SCALA_QUALIFICATION_RESULT=$RESULT_DIR/scala/qualification/scala-profile-qualification.v1.json"
             echo "S1_4X_SCALA_CORRECTNESS_ROOT=$RESULT_DIR/scala/profiles"
@@ -346,7 +387,7 @@ jobs:
               "$S1_4X/integration/tools/run-python-benchmark-smoke.sh" \
                 "$BENCH_ROOT/python-smoke"
               SCALA_PROFILE="$(
-                jq -r '.selectedProfileId' \
+                jq -er '.selectedProfileId | select(. == "A" or . == "B" or . == "C")' \
                   "$S1_4X_SCALA_SELECTED_PROFILE_RESULT"
               )"
               "$S1_4X/scala/tools/run-jmh-native-smoke.sh" \

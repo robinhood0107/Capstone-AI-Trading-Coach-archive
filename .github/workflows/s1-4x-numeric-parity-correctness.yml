@@ -397,6 +397,14 @@ jobs:
             '49c8a036ce399587205a11ac24e73465cadc5f3232e9418a9d87f4b7f746c4ec' \
             "$BOOT/ghcup-0.1.0.yaml" | sha256sum --check
 
+          VECTOR_ARCHIVE="$BOOT/vector-0.13.2.0.tar.gz"
+          curl -fL \
+            https://hackage.haskell.org/package/vector-0.13.2.0/vector-0.13.2.0.tar.gz \
+            -o "$VECTOR_ARCHIVE"
+          printf '%s  %s\n' \
+            '28f203c786cbf8ac6dc3fea3378ec36f34173d505fb4a1dd60fc8418ad91c423' \
+            "$VECTOR_ARCHIVE" | sha256sum --check
+
           export GHCUP_INSTALL_BASE_PREFIX="$PREFIX"
           GHCUP="$BOOT/ghcup"
           METADATA="file://$BOOT/ghcup-0.1.0.yaml"
@@ -427,6 +435,21 @@ jobs:
             "3ff3fb4b571876d668ddf4ad0245769c19a640283fabb0c2629038aa34197f62"
           test "$(sha256sum "$TOOLS/bin/stylish-haskell" | awk '{print $1}')" = \
             "385dc27bc2d0fb654e76ecadfb57bc0b7e1c58afe74f19923e20b696e6fe0d7b"
+          S1_4X="$GITHUB_WORKSPACE/workspaces/decision-platform/research/s1-4x-numeric-parity"
+          BENCHMARK_VENV="$RUNNER_TEMP/s1-4x-benchmark-python"
+          BASE_PYTHON="$(
+            "$S1_4X_UV_BIN" python find 3.12.13 --managed-python
+          )"
+          "$BASE_PYTHON" -m venv --copies "$BENCHMARK_VENV"
+          VIRTUAL_ENV="$BENCHMARK_VENV" \
+            "$S1_4X_UV_BIN" sync --frozen --no-dev \
+            --project "$S1_4X/oracle" --active
+          BENCHMARK_PYTHON="$BENCHMARK_VENV/bin/python"
+          test -f "$BENCHMARK_PYTHON"
+          test -x "$BENCHMARK_PYTHON"
+          test ! -L "$BENCHMARK_PYTHON"
+          test "$(sha256sum "$BENCHMARK_PYTHON" | awk '{print $1}')" = \
+            "9544d2a29138833e6177d45dbc57468d37710b5080c901fbb579d53f251cdd6f"
 
           {
             echo "GHCUP_INSTALL_BASE_PREFIX=$PREFIX"
@@ -436,6 +459,9 @@ jobs:
             echo "S1_4X_STACK_BIN=$STACK"
             echo "S1_4X_HLINT_BIN=$TOOLS/bin/hlint"
             echo "S1_4X_STYLISH_BIN=$TOOLS/bin/stylish-haskell"
+            echo "S1_4X_VECTOR_SOURCE_ARCHIVE=$VECTOR_ARCHIVE"
+            echo "S1_4X_BENCHMARK_PYTHON_BIN=$BENCHMARK_PYTHON"
+            echo "S1_4X_BENCHMARK_PYTHON_SHA256=$(sha256sum "$BENCHMARK_PYTHON" | awk '{print $1}')"
           } >> "$GITHUB_ENV"
 
       - name: Materialize and validate job-local large fixtures
@@ -468,6 +494,8 @@ jobs:
           PLAN="$S1_4X/benchmarks/benchmark-plan.v1.json"
           RESULT_DIR="$RUNNER_TEMP/s1-4x-results"
           mkdir -p "$RESULT_DIR/haskell"
+          source "$HASKELL/tools/python-runtime.sh"
+          s1_4x_pin_benchmark_python
 
           "$HASKELL/tools/assert-toolchain.sh"
           "$HASKELL/tools/check-format.sh" \
@@ -478,6 +506,24 @@ jobs:
           "$HASKELL/tools/run-correctness-profile.sh" \
             baseline-o0-fasm \
             --output-dir "$RESULT_DIR/haskell/profiles/baseline-o0-fasm"
+          BASELINE_RECEIPT=\
+            "$RESULT_DIR/haskell/profiles/baseline-o0-fasm/correctness-receipt.v1.json"
+          BASELINE_STACK_WORK_DIR="$(jq -er '.stackWorkDir' "$BASELINE_RECEIPT")"
+          [[ "$BASELINE_STACK_WORK_DIR" == .stack-work-* \
+            && "$BASELINE_STACK_WORK_DIR" != */* ]]
+          BASELINE_INTERFACE_ROOT="$(realpath -e "$HASKELL/$BASELINE_STACK_WORK_DIR")"
+          mkdir -p "$RESULT_DIR/haskell/module-safety"
+          s1_4x_run_benchmark_python \
+            "$HASKELL/tools/haskell_evidence.py" module-safety \
+            --haskell-root "$HASKELL" \
+            --numeric-root "$S1_4X" \
+            --manifest "$HASKELL/source-inputs.v1.json" \
+            --interface-root "$BASELINE_INTERFACE_ROOT" \
+            --ghc-bin "$S1_4X_AUTHORITATIVE_GHC_BIN" \
+            --vector-archive "$S1_4X_VECTOR_SOURCE_ARCHIVE" \
+            --output \
+              "$RESULT_DIR/haskell/module-safety/haskell-module-safety-result.v1.json" \
+            --write
           "$HASKELL/tools/run-correctness-profile.sh" \
             optimized-o2-fasm \
             --output-dir "$RESULT_DIR/haskell/profiles/optimized-o2-fasm"
@@ -533,6 +579,8 @@ jobs:
           S1_4X="$GITHUB_WORKSPACE/workspaces/decision-platform/research/s1-4x-numeric-parity"
           HASKELL="$S1_4X/haskell"
           OUTPUT="$RUNNER_TEMP/s1-4x-ghc-9-14"
+          source "$HASKELL/tools/python-runtime.sh"
+          s1_4x_pin_benchmark_python
           "$HASKELL/tools/run-ghc-9.14.1-compatibility.sh" \
             --stack-yaml "$HASKELL/stack-ghc-9.14.1.yaml" \
             --full-matrix \
@@ -598,7 +646,7 @@ jobs:
           COVERAGE="$CROSS_ROOT/coverage"
           mkdir -p "$CROSS_ROOT"
           SCALA_PROFILE="$(
-            jq -r '.selectedProfileId' \
+            jq -er '.selectedProfileId | select(. == "A" or . == "B" or . == "C")' \
               "$RESULT_DIR/scala/scala-selected-profile-result.v1.json"
           )"
           export RESULT_DIR
@@ -626,6 +674,7 @@ jobs:
           uv run --frozen --project "$S1_4X/oracle" \
             python "$S1_4X/integration/coverage_execution.py" \
             --candidate scala \
+            --profile "$SCALA_PROFILE" \
             --runner "$S1_4X/scala/tools/run-property-evidence.sh" \
             --output-directory "$COVERAGE/scala" \
             --receipt "$COVERAGE/scala-coverage-receipt.json" \
@@ -711,7 +760,7 @@ jobs:
           OUTPUT="$RUNNER_TEMP/s1-4x-scala-oci"
           mkdir -p "$OUTPUT"
           PROFILE="$(
-            jq -r '.selectedProfileId' \
+            jq -er '.selectedProfileId | select(. == "A" or . == "B" or . == "C")' \
               "$RESULT_DIR/scala/scala-selected-profile-result.v1.json"
           )"
           CANDIDATE="$RESULT_DIR/scala/profiles/$PROFILE/candidate.jar"
@@ -774,6 +823,8 @@ jobs:
           HASKELL="$S1_4X/haskell"
           RESULT_DIR="$RUNNER_TEMP/s1-4x-results"
           OUTPUT="$RUNNER_TEMP/s1-4x-haskell-oci"
+          source "$HASKELL/tools/python-runtime.sh"
+          s1_4x_pin_benchmark_python
           export S1_4X_HASKELL_BASELINE_CORRECTNESS=\
             "$RESULT_DIR/haskell/profiles/baseline-o0-fasm/correctness-receipt.v1.json"
           export S1_4X_HASKELL_OPTIMIZED_CORRECTNESS=\
@@ -814,28 +865,40 @@ jobs:
       - *setup_uv
       - *expose_uv
 
-      - name: Run current S1.4 production regression
-        working-directory: workspaces/decision-platform/python-services
+      - name: Run typed production and frozen S1.4R regression evidence
         shell: bash
         run: |
           set -euo pipefail
-          uv lock --check
-          uv sync --frozen
-          uv run --frozen ruff check .
-          uv run --frozen mypy app
-          uv run --frozen pytest -q
-
-      - name: Run frozen S1.4R CPU x64 regression
-        working-directory: workspaces/decision-platform/research/s1-4r-jax-risk
-        shell: bash
-        run: |
-          set -euo pipefail
-          uv lock --check
-          uv sync --frozen --all-groups
-          uv run --frozen ruff check .
-          uv run --frozen mypy src benchmarks
           S1_4X="$GITHUB_WORKSPACE/workspaces/decision-platform/research/s1-4x-numeric-parity"
-          uv run --frozen --project "$S1_4X/oracle" pytest -q \
-            "$S1_4X/integration/tests/test_s1_4r_regression_boundary.py"
-          uv run --frozen pytest -q \
-            --deselect=tests/test_production_isolation.py::test_branch_diff_is_confined_to_the_research_project_and_two_workflows
+          EVIDENCE_ROOT="$RUNNER_TEMP/s1-4x-regression-evidence"
+          OUTPUT_ROOT="$EVIDENCE_ROOT/regression"
+          mkdir -p "$EVIDENCE_ROOT"
+          SUBJECT="$(git -C "$GITHUB_WORKSPACE" rev-parse HEAD)"
+          test "$SUBJECT" = "$GITHUB_SHA"
+          UV_SHA256="$(sha256sum "$S1_4X_UV_BIN" | awk '{print $1}')"
+          "$S1_4X_UV_BIN" run --frozen --no-config --project "$S1_4X/oracle" \
+            python "$S1_4X/integration/regression_gate.py" \
+            --repo-root "$GITHUB_WORKSPACE" \
+            --output-root "$OUTPUT_ROOT" \
+            --uv-bin "$S1_4X_UV_BIN" \
+            --uv-sha256 "$UV_SHA256" \
+            --benchmark-subject-commit "$SUBJECT"
+          test -f "$OUTPUT_ROOT/production-compound-receipt.v1.json"
+          test -f "$OUTPUT_ROOT/research-compound-receipt.v1.json"
+
+      - name: Enforce typed regression evidence size cap
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifact_bytes="$(
+            du -sb "$RUNNER_TEMP/s1-4x-regression-evidence" | cut -f1
+          )"
+          test "$artifact_bytes" -le "$S1_4X_ARTIFACT_MAX_BYTES"
+
+      - name: Upload typed regression evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: s1-4x-regression-evidence-${{ github.run_id }}
+          path: ${{ runner.temp }}/s1-4x-regression-evidence
+          if-no-files-found: error
+          retention-days: 14
