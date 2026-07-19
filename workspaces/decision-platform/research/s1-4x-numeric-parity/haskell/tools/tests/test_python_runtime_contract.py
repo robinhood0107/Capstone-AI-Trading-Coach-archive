@@ -425,6 +425,205 @@ class PythonRuntimeContractTests(unittest.TestCase):
             self.assertNotEqual(direct_result.returncode, 0)
             self.assertIn("No module named 'encodings'", direct_result.stderr)
 
+    def test_python_runtime_rejects_post_pin_closure_drift(self) -> None:
+        """Pin 이후 executable/config/dependency 변조도 새 기준으로 재수용하지 않는다."""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+
+            executable_python = copied_test_venv(root / "executable")
+            executable_result = subprocess.run(
+                [
+                    "/usr/bin/bash",
+                    "-c",
+                    'set -euo pipefail; source "$1"; '
+                    "s1_4x_pin_benchmark_python; "
+                    '/usr/bin/cp -- "$2" '
+                    '"$S1_4X_BENCHMARK_PYTHON_BIN"; '
+                    "s1_4x_run_benchmark_python -I -c "
+                    "'raise SystemExit(0)'",
+                    "python-runtime-contract",
+                    str(RUNTIME_HELPER),
+                    "/usr/bin/true",
+                ],
+                env=runtime_environment(executable_python),
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(executable_result.returncode, 69)
+            self.assertIn(
+                "pinned FD SHA-256 mismatch",
+                executable_result.stderr,
+            )
+
+            configuration_python = copied_test_venv(root / "configuration")
+            configuration = configuration_python.parent.parent / "pyvenv.cfg"
+            configuration_result = subprocess.run(
+                [
+                    "/usr/bin/bash",
+                    "-c",
+                    'set -euo pipefail; source "$1"; '
+                    "s1_4x_pin_benchmark_python; "
+                    '/usr/bin/touch -m -d "2030-01-01T00:00:00Z" "$2"; '
+                    "s1_4x_run_benchmark_python -I -c "
+                    "'raise SystemExit(0)'",
+                    "python-runtime-contract",
+                    str(RUNTIME_HELPER),
+                    str(configuration),
+                ],
+                env=runtime_environment(configuration_python),
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(configuration_result.returncode, 69)
+            self.assertIn(
+                "pyvenv.cfg changed after pin",
+                configuration_result.stderr,
+            )
+
+            dependency_python = copied_test_venv(root / "dependency")
+            site_packages = (
+                dependency_python.parent.parent
+                / "lib/python3.12/site-packages"
+            )
+            metadata = site_packages / "numpy-2.5.1.dist-info/METADATA"
+            module = site_packages / "numpy/__init__.py"
+            replacement_metadata = root / "numpy-metadata-drift"
+            replacement_metadata.write_text(
+                "Metadata-Version: 2.1\n"
+                "Name: numpy\n"
+                "Version: 2.5.0\n",
+                encoding="utf-8",
+            )
+            replacement_module = root / "numpy-module-drift"
+            replacement_module.write_text(
+                '__version__ = "2.5.0"\n',
+                encoding="utf-8",
+            )
+            dependency_result = subprocess.run(
+                [
+                    "/usr/bin/bash",
+                    "-c",
+                    'set -euo pipefail; source "$1"; '
+                    "s1_4x_pin_benchmark_python; "
+                    '/usr/bin/cp -- "$2" "$3"; '
+                    '/usr/bin/cp -- "$4" "$5"; '
+                    "s1_4x_run_benchmark_python -I -c "
+                    "'raise SystemExit(0)'",
+                    "python-runtime-contract",
+                    str(RUNTIME_HELPER),
+                    str(replacement_metadata),
+                    str(metadata),
+                    str(replacement_module),
+                    str(module),
+                ],
+                env=runtime_environment(dependency_python),
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(dependency_result.returncode, 69)
+            self.assertIn(
+                "dependency closure changed after pin",
+                dependency_result.stderr,
+            )
+
+    def test_profile_nested_runtime_rejects_stored_closure_drift(self) -> None:
+        """긴 workflow의 later child가 최초 Runtime closure를 다시 검증한다."""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            controller = root / "controller.py"
+            controller.write_text(
+                "import os\n"
+                "import shutil\n"
+                "import sys\n"
+                "from pathlib import Path\n"
+                "sys.path.insert(0, sys.argv[2])\n"
+                "import profile_workflow as workflow\n"
+                "runtime = workflow._benchmark_python_runtime()\n"
+                "mode = sys.argv[1]\n"
+                "venv_root = runtime.source_path.parent.parent\n"
+                "if mode == 'executable':\n"
+                "    backup = runtime.source_path.with_name('python.opened')\n"
+                "    runtime.source_path.rename(backup)\n"
+                "    shutil.copy2(backup, runtime.source_path)\n"
+                "    expected = 'COMMAND_RUNTIME_EXECUTABLE_CLOSURE_CHANGED'\n"
+                "elif mode == 'configuration':\n"
+                "    configuration = venv_root / 'pyvenv.cfg'\n"
+                "    os.utime(\n"
+                "        configuration,\n"
+                "        ns=(1893456000000000000, 1893456000000000000),\n"
+                "    )\n"
+                "    expected = 'COMMAND_RUNTIME_VENV_CONFIGURATION_CHANGED'\n"
+                "elif mode == 'dependency':\n"
+                "    site = venv_root / 'lib/python3.12/site-packages'\n"
+                "    (site / 'numpy-2.5.1.dist-info/METADATA').write_text(\n"
+                "        'Metadata-Version: 2.1\\nName: numpy\\nVersion: 2.5.0\\n'\n"
+                "    )\n"
+                "    (site / 'numpy/__init__.py').write_text(\n"
+                "        '__version__ = \"2.5.0\"\\n'\n"
+                "    )\n"
+                "    expected = 'COMMAND_RUNTIME_DEPENDENCY_CLOSURE_CHANGED'\n"
+                "else:\n"
+                "    raise SystemExit(90)\n"
+                "output = Path(sys.argv[3])\n"
+                "output.mkdir()\n"
+                "try:\n"
+                "    workflow._run_logged(\n"
+                "        [str(runtime.fd_path), '-I', '-c', "
+                "'raise SystemExit(0)'],\n"
+                "        cwd=output,\n"
+                "        environment=dict(os.environ),\n"
+                "        phase='canonical-compare',\n"
+                "        output_directory=output,\n"
+                "        pass_fds=(runtime.descriptor,),\n"
+                "        benchmark_python_runtime=runtime,\n"
+                "    )\n"
+                "except workflow.WorkflowError as error:\n"
+                "    if expected in str(error):\n"
+                "        raise SystemExit(0)\n"
+                "    print(str(error), file=sys.stderr)\n"
+                "    raise SystemExit(91)\n"
+                "raise SystemExit(92)\n",
+                encoding="utf-8",
+            )
+            for mode in ("executable", "configuration", "dependency"):
+                with self.subTest(mode=mode):
+                    python = copied_test_venv(root / mode)
+                    descriptor = os.open(python, os.O_RDONLY)
+                    output = root / f"{mode}-output"
+                    try:
+                        environment = runtime_environment(python)
+                        environment[
+                            "S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH"
+                        ] = f"/proc/self/fd/{descriptor}"
+                        environment["PYTHONDONTWRITEBYTECODE"] = "1"
+                        completed = subprocess.run(
+                            [
+                                str(python),
+                                str(controller),
+                                mode,
+                                str(TOOLS_ROOT),
+                                str(output),
+                            ],
+                            executable=f"/proc/self/fd/{descriptor}",
+                            env=environment,
+                            check=False,
+                            capture_output=True,
+                            text=True,
+                            pass_fds=(descriptor,),
+                        )
+                    finally:
+                        os.close(descriptor)
+                    self.assertEqual(
+                        completed.returncode,
+                        0,
+                        completed.stderr,
+                    )
+
 
 if __name__ == "__main__":
     unittest.main()
