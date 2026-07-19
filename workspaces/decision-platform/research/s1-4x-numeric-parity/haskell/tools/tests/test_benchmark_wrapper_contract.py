@@ -77,6 +77,19 @@ def _copied_benchmark_python(root: Path) -> Path:
 class BenchmarkWrapperContractTests(unittest.TestCase):
     """Outer wrapper가 frozen argv와 self-identity 경계를 바꾸지 못하게 한다."""
 
+    def test_criterion_environment_consumer_uses_a_lazy_pattern(self) -> None:
+        source = BENCHMARK_MAIN.read_text(encoding="utf-8")
+
+        self.assertRegex(
+            source,
+            r"\(\s*\\\s*~preparedCases\s*->\s*"
+            r'bgroup "" \(zipWith benchmark selectedCases preparedCases\)',
+        )
+        self.assertNotIn(
+            '(bgroup "" . zipWith benchmark selectedCases)',
+            source,
+        )
+
     def test_outer_wrapper_is_executable_and_has_one_helper(self) -> None:
         self.assertTrue(WRAPPER.is_file(), "outer benchmark wrapper is missing")
         self.assertTrue(HELPER.is_file(), "outer benchmark helper is missing")
@@ -159,7 +172,9 @@ class BenchmarkWrapperContractTests(unittest.TestCase):
                 )
                 block_dir.mkdir(parents=True)
                 integration_root = HASKELL_ROOT.parent / "integration"
-                integration_root.mkdir()
+                created_integration_root = not integration_root.exists()
+                if created_integration_root:
+                    integration_root.mkdir()
                 try:
                     completed = subprocess.run(
                         [
@@ -193,7 +208,8 @@ class BenchmarkWrapperContractTests(unittest.TestCase):
                         pass_fds=tuple(descriptors),
                     )
                 finally:
-                    integration_root.rmdir()
+                    if created_integration_root:
+                        integration_root.rmdir()
             finally:
                 for descriptor in descriptors:
                     os.close(descriptor)
