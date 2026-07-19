@@ -221,6 +221,7 @@ host identity, typed audit를 한 번 더 검증하고 네 portable report를 �
   python "$S1_4X/integration/finalize_benchmark_run.py" \
   --plan "$PLAN" \
   --run-directory "$BENCH_PARENT/run/s1-4x-full-local" \
+  --large-fixture-root "$S1_4X_LARGE_FIXTURE_ROOT" \
   --output-directory "$BENCH_PARENT/final-reports" \
   --benchmark-subject-commit "$SUBJECT" \
   --audit-ledger "$AUDIT_ROOT/final-candidate-audit.json"
