@@ -420,6 +420,7 @@ def main() -> int:
         SCALA_ROOT,
     )
     assert source_policy_violations == [], source_policy_violations
+    assert ".collect { case" not in jvm_evidence
     assert "JvmForkEvidence.record()" in benchmark_invocation
     for marker in (
         "RuntimeMXBean",
