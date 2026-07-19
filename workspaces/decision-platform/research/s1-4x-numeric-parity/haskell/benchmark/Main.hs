@@ -860,11 +860,11 @@ functionSpecification functionId =
     "deflated_sharpe_ratio" ->
       Just dsrSpecification
     "kupiec_unconditional_coverage_test" ->
-      Just (coverageSpecification functionId "kupiec_pof" True)
+      Just (coverageSpecification "kupiec_pof" True)
     "christoffersen_independence_test" ->
-      Just (coverageSpecification functionId "christoffersen_independence" False)
+      Just (coverageSpecification "christoffersen_independence" False)
     "christoffersen_conditional_coverage_test" ->
-      Just (coverageSpecification functionId "christoffersen_conditional_coverage" True)
+      Just (coverageSpecification "christoffersen_conditional_coverage" True)
     _ -> Nothing
 
 standardSpecification ::
@@ -959,11 +959,10 @@ dsrSpecification _ =
 
 coverageSpecification ::
   Text ->
-  Text ->
   Bool ->
   Int ->
   (Text, [Int], Int, Int, Value, Text, Text)
-coverageSpecification functionId caseName needsConfidence size =
+coverageSpecification caseName needsConfidence size =
   ( "coverage-batch",
     coverageSizes,
     32,
