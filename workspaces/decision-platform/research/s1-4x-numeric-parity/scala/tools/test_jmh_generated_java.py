@@ -55,9 +55,23 @@ def main() -> int:
             / ".scala-build/project_jmh_deadbeef/classes/main"
         )
         benchmark_list = class_output / "META-INF/BenchmarkList"
+        generated_resources = (
+            workspace
+            / ".scala-build/project_jmh/resources"
+        )
+        resource_benchmark_list = (
+            generated_resources / "META-INF/BenchmarkList"
+        )
+        generated_classes = root / "evidence/generated-java-classes"
         dependency = coursier / "https/repo.example/jmh-core.jar"
         benchmark_list.parent.mkdir(parents=True)
         benchmark_list.write_bytes(b"benchmark-list\n")
+        resource_benchmark_list.parent.mkdir(parents=True)
+        resource_benchmark_list.write_bytes(b"benchmark-list\n")
+        (resource_benchmark_list.parent / "CompilerHints").write_bytes(
+            b"compiler-hints\n"
+        )
+        generated_classes.mkdir(parents=True)
         dependency.parent.mkdir(parents=True)
         dependency.write_bytes(b"jar-bytes\n")
         for index, relative in enumerate(expected, start=1):
@@ -79,22 +93,26 @@ def main() -> int:
             / ".scala-build/project/classes/main"
         )
         generator_input.mkdir(parents=True)
+        (generator_input / "BenchmarkInvocation.class").write_bytes(
+            b"scala-class\n"
+        )
         generator_output = (
             workspace
             / ".scala-build/project_jmh"
         )
-        (generator_output / "resources").mkdir()
         generator_stdout = (
             f'Processing 147 classes from {generator_input} '
             'with "reflection" generator\n'
             f"Writing out Java source to {generator_output / 'sources'} "
             f"and resources to {generator_output / 'resources'}\n"
-            f"{class_output}:{dependency}\n"
+            f"{class_output}:{generated_resources}:"
+            f"{generated_classes}:{dependency}\n"
         )
         classpath = helper.classpath_closure(
             generator_stdout,
             workspace=workspace,
             coursier_cache=coursier,
+            evidence_dir=generated_classes.parent,
         )
         assert classpath.class_output == class_output
         assert classpath.processed_class_count == 147
@@ -108,6 +126,8 @@ def main() -> int:
                 "SCALA_WORKSPACE/"
                 ".scala-build/project_jmh_deadbeef/classes/main"
             ),
+            "SCALA_WORKSPACE/.scala-build/project_jmh/resources",
+            "EVIDENCE_ROOT/generated-java-classes",
             "COURSIER_CACHE/https/repo.example/jmh-core.jar",
         ]
         entry_values = [
@@ -122,12 +142,17 @@ def main() -> int:
             entry_values,
             workspace=workspace,
             coursier_cache=coursier,
+            evidence_dir=generated_classes.parent,
+        )
+        post_run_stdout = (
+            f'Processing 147 classes from {generator_input} '
+            'with "reflection" generator\n'
+            f"Writing out Java source to {generator_output / 'sources'} "
+            f"and resources to {generator_output / 'resources'}"
+            + "\n# JMH version: 1.37\n"
         )
         post_run = helper.generator_output_closure(
-            generator_stdout.splitlines()[0]
-            + "\n"
-            + generator_stdout.splitlines()[1]
-            + "\n# JMH version: 1.37\n",
+            post_run_stdout,
             workspace=workspace,
         )
         assert (
@@ -146,6 +171,7 @@ def main() -> int:
                 entry_values,
                 workspace=workspace,
                 coursier_cache=coursier,
+                evidence_dir=generated_classes.parent,
             ),
         )
         dependency.write_bytes(b"jar-bytes\n")
@@ -187,6 +213,7 @@ def main() -> int:
                 ),
                 workspace=workspace,
                 coursier_cache=coursier,
+                evidence_dir=generated_classes.parent,
             ),
         )
         expect_error(
@@ -196,6 +223,7 @@ def main() -> int:
                 generator_stdout.split("\n", maxsplit=1)[1],
                 workspace=workspace,
                 coursier_cache=coursier,
+                evidence_dir=generated_classes.parent,
             ),
         )
 

@@ -280,6 +280,12 @@ def main() -> int:
     assert "scala-jmh-generated-java-precompile.v1.json" in (
         compile_benchmarks
     )
+    assert '--classpath "$precompiled_classes"' in compile_benchmarks
+    assert compile_benchmarks.index(
+        'mkdir -p "$precompiled_classes"'
+    ) < compile_benchmarks.index(
+        "precompile_jmh_generated_java.py"
+    )
     assert "S1_4X_SCALA_CLI_EXEC_PATH" in compile_benchmarks
     assert '--workspace "$S1_4X_SCALA_WORKSPACE"' in compile_benchmarks
     assert "--server=true" not in compile_benchmarks
@@ -307,6 +313,8 @@ def main() -> int:
         "generatedJavaPrecompileReceiptSha256",
         "JVM_FORK_FILE_COUNT_MISMATCH:expected=",
         "S1_4X_FIXTURE_MATERIALIZATION_RECEIPT",
+        '--coursier-cache "$COURSIER_CACHE"',
+        '--jmh-stdout "$OUTPUT_DIR/jmh.stdout"',
     ):
         assert marker in native_smoke
     assert (
