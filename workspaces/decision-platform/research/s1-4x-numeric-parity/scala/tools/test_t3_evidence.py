@@ -8,6 +8,8 @@ import hashlib
 import json
 import math
 import os
+import shutil
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -315,6 +317,7 @@ def selector_fixture(
     root: Path,
     plan: dict,
     scores: dict[str, float | list[float]],
+    scala_cli_override: Path | None = None,
 ) -> dict:
     """63개 qualification case의 raw byte tree를 실제 selector 입력으로 만든다."""
 
@@ -337,9 +340,10 @@ def selector_fixture(
     java_sha = toolchain_lock["jdk"]["javaExecutableSha256"]
     javac_sha = toolchain_lock["jdk"]["javacExecutableSha256"]
 
-    scala_cli = root / "scala-cli"
-    scala_cli.write_bytes(b"selector-fixture-scala-cli\n")
-    scala_cli.chmod(0o755)
+    scala_cli = scala_cli_override or root / "scala-cli"
+    if scala_cli_override is None:
+        scala_cli.write_bytes(b"selector-fixture-scala-cli\n")
+        scala_cli.chmod(0o755)
     scala_cli_sha = module.sha256_file(scala_cli)
 
     stable_properties = dict(module.EXPECTED_STABLE_SYSTEM_PROPERTIES)
@@ -744,28 +748,26 @@ def selector_fixture(
                 "EVIDENCE_ROOT/native.json",
                 include_regex,
             ]
-            runtime = [
-                str(scala_cli),
-                "--power",
-                "run",
-                *[str(SCALA_ROOT / path) for path in jmh_inputs],
-                "--workspace",
-                str(module.isolated_scala_workspace(case_root)),
-                *[
-                    os.environ["S1_4X_SCALA_JAVA_PINNED_FD_PATH"]
-                    if item == "PINNED_JAVA_FD"
-                    else str(generated_class_root)
-                    if item
-                    == (
-                        "EVIDENCE_ROOT/"
-                        f"{module.jmh_precompile.GENERATED_CLASSES_NAME}"
-                    )
-                    else item
-                    for item in common_tail[2:]
-                ],
-                "-rff",
-                str(native_path),
-                include_regex,
+            runtime_identity = [
+                "PINNED_SCALA_CLI_1_15_0_FD",
+                *portable[1:],
+            ]
+            runtime_execution_identities = [
+                {
+                    "executionPathId": "PINNED_SCALA_CLI_1_15_0_FD",
+                    "binaryPathId": "SCALA_CLI_1_15_0",
+                    "binarySha256": scala_cli_sha,
+                },
+                {
+                    "executionPathId": "PINNED_JAVA_FD",
+                    "binaryPathId": "TEMURIN_25_0_3_9_LTS/bin/java",
+                    "binarySha256": java_sha,
+                },
+                {
+                    "executionPathId": "PINNED_JAVAC_FD",
+                    "binaryPathId": "TEMURIN_25_0_3_9_LTS/bin/javac",
+                    "binarySha256": javac_sha,
+                },
             ]
             closure_snapshot = module.SealedEvidenceSnapshot()
             command_tools = module.command_tool_closure(
@@ -788,7 +790,9 @@ def selector_fixture(
                 "benchmarkPlanSha256": plan_sha,
                 "sourceInputManifestSha256": source_manifest_sha,
                 "scalaCliBinarySha256": scala_cli_sha,
-                "scalaCliExecutionPathId": "SCALA_CLI_1_15_0",
+                "scalaCliExecutionPathId": (
+                    "PINNED_SCALA_CLI_1_15_0_FD"
+                ),
                 "compilerProfilesSha256": compiler_profiles_sha,
                 "profileOptionsSha256": canonical_sha256(
                     PROFILE_OPTIONS[profile]
@@ -796,7 +800,15 @@ def selector_fixture(
                 "inputPaths": jmh_inputs,
                 "portableArgv": portable,
                 "portableArgvSha256": canonical_sha256(portable),
-                "runtimeArgvSha256": canonical_sha256(runtime),
+                "runtimeArgvSha256": canonical_sha256(runtime_identity),
+                "liveRuntimeArgvSha256": "9" * 64,
+                "runtimeExecutionPathIdentities": (
+                    runtime_execution_identities
+                ),
+                "runtimeExecutionPathIdentitiesSha256": canonical_sha256(
+                    runtime_execution_identities
+                ),
+                "liveExecutionPathIdentitySha256": "8" * 64,
                 "commandToolClosure": command_tools,
                 "commandToolClosureSha256": canonical_sha256(
                     command_tools
@@ -1146,12 +1158,176 @@ def feature_evidence(planned: dict) -> dict:
     return evidence
 
 
+def sequential_qualification_selector_contract(
+    module,
+    *,
+    root: Path,
+    plan: dict,
+) -> None:
+    """실제 qualification shell 뒤 죽은 FD 없이 selector를 연속 실행한다."""
+
+    scala_cli = Path.home() / ".local/bin/scala-cli"
+    java_home = Path(os.environ["JAVA_HOME"])
+    template_root = root / "template"
+    template = selector_fixture(
+        module,
+        root=template_root,
+        plan=plan,
+        scores={"A": 100.0, "B": 95.0, "C": 96.0},
+        scala_cli_override=scala_cli,
+    )
+    result_dir = root / "result"
+    correctness_root = result_dir / "scala/profiles"
+    shutil.copytree(
+        template["correctness_artifact_root"],
+        correctness_root,
+    )
+    output_root = root / "qualification"
+    shim_root = root / "shim"
+    shim_root.mkdir()
+    shim = shim_root / "python3"
+    shim.write_text(
+        """#!/usr/bin/python3
+import importlib.util
+import os
+import pathlib
+import shutil
+import sys
+
+target = pathlib.Path(sys.argv[1])
+if target.name != "run_profile_qualification.py":
+    os.execv("/usr/bin/python3", ["/usr/bin/python3", *sys.argv[1:]])
+sys.path.insert(0, str(target.parent))
+specification = importlib.util.spec_from_file_location(
+    "run_profile_qualification_contract",
+    target,
+)
+module = importlib.util.module_from_spec(specification)
+sys.modules[specification.name] = module
+specification.loader.exec_module(module)
+template_root = pathlib.Path(os.environ["S1_4X_TEST_TEMPLATE_ROOT"])
+output_root = pathlib.Path(os.environ["S1_4X_TEST_OUTPUT_ROOT"])
+
+def mocked_run_checked(command, *, environment):
+    del environment
+    if "--output-dir" in command:
+        destination = pathlib.Path(
+            command[command.index("--output-dir") + 1]
+        )
+        source = template_root / destination.relative_to(output_root)
+        shutil.copytree(source, destination)
+        return
+    if "--output" in command:
+        destination = pathlib.Path(command[command.index("--output") + 1])
+        source = template_root / destination.relative_to(output_root)
+        shutil.copyfile(source, destination)
+        return
+    raise AssertionError(f"unexpected qualification command: {command!r}")
+
+module.run_checked = mocked_run_checked
+sys.argv = sys.argv[1:]
+raise SystemExit(module.main())
+""",
+        encoding="utf-8",
+        newline="\n",
+    )
+    shim.chmod(0o755)
+    environment = os.environ.copy()
+    for name in (
+        "S1_4X_SCALA_CLI_EXEC_PATH",
+        "S1_4X_SCALA_JAVA_PINNED_FD_PATH",
+        "S1_4X_SCALA_JAVAC_PINNED_FD_PATH",
+    ):
+        environment.pop(name, None)
+    environment.update(
+        {
+            "PATH": f"{shim_root}:{java_home}/bin:/usr/bin:/bin",
+            "JAVA_HOME": str(java_home),
+            "RESULT_DIR": str(result_dir),
+            "S1_4X_CACHE_ROOT": str(root / "cache"),
+            "S1_4X_UV_BIN": str(Path.home() / ".local/bin/uv"),
+            "S1_4X_SCALA_CLI_BIN": str(scala_cli),
+            "S1_4X_SCALAFIX_BIN": (
+                str(
+                    Path.home()
+                    / ".local/share/s1-4x/"
+                    "scalafix-0.14.7/bin/scalafix"
+                )
+            ),
+            "S1_4X_SCALAFMT_ARCHIVE": str(
+                Path.home()
+                / ".cache/s1-4x/coursier/https/github.com/"
+                "scalameta/scalafmt/releases/download/v3.11.4/"
+                "scalafmt-x86_64-pc-linux.zip"
+            ),
+            "S1_4X_SCALAFMT_BIN": str(
+                Path.home()
+                / ".cache/coursier/arc/https/github.com/"
+                "scalameta/scalafmt/releases/download/v3.11.4/"
+                "scalafmt-x86_64-pc-linux.zip/scalafmt"
+            ),
+            "S1_4X_SCALA_JVM_ALLOWLIST_RESULT": str(
+                template["jvm_allowlist_path"]
+            ),
+            "S1_4X_TEST_TEMPLATE_ROOT": str(template_root),
+            "S1_4X_TEST_OUTPUT_ROOT": str(output_root),
+        }
+    )
+    (root / "cache").mkdir()
+    qualification_process = subprocess.run(
+        [
+            str(TOOLS_ROOT / "run-profile-qualification.sh"),
+            "--plan",
+            str(S1_ROOT / "benchmarks/benchmark-plan.v1.json"),
+            "--profiles",
+            "A,B,C",
+            "--enforce-order-plan",
+            "--output-dir",
+            str(output_root),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+    assert qualification_process.returncode == 0, (
+        qualification_process.stdout,
+        qualification_process.stderr,
+    )
+    for name in (
+        "S1_4X_SCALA_CLI_EXEC_PATH",
+        "S1_4X_SCALA_JAVA_PINNED_FD_PATH",
+        "S1_4X_SCALA_JAVAC_PINNED_FD_PATH",
+    ):
+        environment.pop(name, None)
+    selected_output = root / "selected-profile.json"
+    selector_process = subprocess.run(
+        [
+            str(TOOLS_ROOT / "select-proven-profile.sh"),
+            "--plan",
+            str(S1_ROOT / "benchmarks/benchmark-plan.v1.json"),
+            "--qualification",
+            str(output_root / "scala-profile-qualification.v1.json"),
+            "--correctness-root",
+            str(correctness_root),
+            "--output",
+            str(selected_output),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+    assert selector_process.returncode == 0, (
+        selector_process.stdout,
+        selector_process.stderr,
+    )
+    selected = json.loads(selected_output.read_text(encoding="utf-8"))
+    assert selected["selectedProfileId"] == "B"
+
+
 def main() -> int:
     module = load_module()
-    os.environ.setdefault(
-        "S1_4X_SCALA_JAVA_PINNED_FD_PATH",
-        f"/proc/{os.getpid()}/fd/999",
-    )
     temporary_root = os.environ.get("S1_4X_TEST_TMP_ROOT")
     with tempfile.TemporaryDirectory(dir=temporary_root) as directory:
         duplicate_json = Path(directory) / "duplicate.json"
@@ -1225,6 +1401,11 @@ def main() -> int:
     selected = module.select_scala_profile(**selected_inputs)
     assert selected["selectedProfileId"] == "B"
     assert selected["fallbackExecuted"] is False
+    sequential_qualification_selector_contract(
+        module,
+        root=selector_root / "sequential",
+        plan=plan,
+    )
 
     case_order = plan["scalaProfileQualification"]["qualificationCaseOrder"]
 

@@ -253,14 +253,17 @@ def main() -> int:
     assert "profileOrderBlocks" in qualification
     assert "hostValidityBeforeEachProfileBlock" in qualification
     for marker in (
+        'exec {scala_cli_pin_fd}<"$SCALA_CLI"',
         'exec {java_pin_fd}<"$JAVA_EXECUTABLE"',
         'exec {javac_pin_fd}<"$JAVAC_EXECUTABLE"',
+        "S1_4X_SCALA_CLI_EXEC_PATH",
         "S1_4X_SCALA_JAVA_PINNED_FD_PATH",
         "S1_4X_SCALA_JAVAC_PINNED_FD_PATH",
         "javacExecutableSha256",
     ):
         assert marker in qualification
     for marker in (
+        "SCALA_CLI_PINNED_FD_PATH_REQUIRED",
         "JAVA_PINNED_FD_PATH_REQUIRED",
         "JAVAC_PINNED_FD_PATH_REQUIRED",
         "JAVAC_PINNED_FD_IDENTITY_MISMATCH",
@@ -304,6 +307,9 @@ def main() -> int:
         "SCALA_CLI_HOME",
         "commandToolClosureSha256",
         "environmentValuesSha256",
+        "runtimeExecutionPathIdentitiesSha256",
+        "liveRuntimeArgvSha256",
+        "liveExecutionPathIdentitySha256",
         "workspace_index = runtime_argv.index(\"--workspace\")",
         "runtime_argv[3:workspace_index]",
         '"-jvm", "PINNED_JAVA_FD"',
