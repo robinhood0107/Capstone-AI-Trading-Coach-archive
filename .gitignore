@@ -71,7 +71,6 @@ workspaces/decision-platform/research/s1-4x-numeric-parity/contract/fixtures/lar
 workspaces/decision-platform/research/s1-4x-numeric-parity/**/.scala-build/
 workspaces/decision-platform/research/s1-4x-numeric-parity/**/.bsp/
 workspaces/decision-platform/research/s1-4x-numeric-parity/**/.stack-work/
-workspaces/decision-platform/research/s1-4x-numeric-parity/**/.stack-work-s1-4x-*/
 workspaces/decision-platform/research/s1-4x-numeric-parity/haskell/.stack-root/
 workspaces/decision-platform/research/s1-4x-numeric-parity/**/.tool-bin/
 workspaces/decision-platform/research/s1-4x-numeric-parity/**/artifacts/
