@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
 import fcntl
 import hashlib
 import json
@@ -63,6 +64,20 @@ PINNED_TOOL_SHA256 = {
         "385dc27bc2d0fb654e76ecadfb57bc0b7e1c58afe74f19923e20b696e6fe0d7b"
     ),
 }
+_LINUX_MFD_CLOEXEC = 0x0001
+_LINUX_MFD_ALLOW_SEALING = 0x0002
+_LINUX_F_ADD_SEALS = 1033
+_LINUX_F_GET_SEALS = 1034
+_LINUX_F_SEAL_SEAL = 0x0001
+_LINUX_F_SEAL_SHRINK = 0x0002
+_LINUX_F_SEAL_GROW = 0x0004
+_LINUX_F_SEAL_WRITE = 0x0008
+_LINUX_REQUIRED_MEMFD_SEALS = (
+    _LINUX_F_SEAL_SEAL
+    | _LINUX_F_SEAL_SHRINK
+    | _LINUX_F_SEAL_GROW
+    | _LINUX_F_SEAL_WRITE
+)
 
 
 @dataclass(frozen=True)
@@ -123,6 +138,59 @@ class PinnedJsonEvidence:
     sha256: str
     document: Any
     identity: tuple[int, int, int, int, int, int]
+
+
+def _require_linux_memfd_abi(*, label: str) -> None:
+    """Python export 유무와 무관하게 사용하는 Linux memfd ABI가 일치해야 한다."""
+
+    if (
+        sys.platform != "linux"
+        or os.name != "posix"
+        or ctypes.sizeof(ctypes.c_int) != 4
+        or ctypes.sizeof(ctypes.c_uint) != 4
+        or not callable(getattr(fcntl, "fcntl", None))
+    ):
+        raise BlockError(f"{label}_MEMFD_ABI_UNAVAILABLE")
+    expected_exports = (
+        (os, "MFD_CLOEXEC", _LINUX_MFD_CLOEXEC),
+        (os, "MFD_ALLOW_SEALING", _LINUX_MFD_ALLOW_SEALING),
+        (fcntl, "F_ADD_SEALS", _LINUX_F_ADD_SEALS),
+        (fcntl, "F_GET_SEALS", _LINUX_F_GET_SEALS),
+        (fcntl, "F_SEAL_SEAL", _LINUX_F_SEAL_SEAL),
+        (fcntl, "F_SEAL_SHRINK", _LINUX_F_SEAL_SHRINK),
+        (fcntl, "F_SEAL_GROW", _LINUX_F_SEAL_GROW),
+        (fcntl, "F_SEAL_WRITE", _LINUX_F_SEAL_WRITE),
+    )
+    for module, name, expected in expected_exports:
+        if name not in vars(module):
+            continue
+        exported = getattr(module, name)
+        if type(exported) is not int or exported != expected:
+            raise BlockError(f"{label}_MEMFD_ABI_MISMATCH")
+
+
+def _create_linux_memfd(*, name: str, label: str) -> int:
+    """검증한 Linux ABI로 seal 허용 memfd를 만들고 wrapper 부재만 보완한다."""
+
+    _require_linux_memfd_abi(label=label)
+    flags = _LINUX_MFD_CLOEXEC | _LINUX_MFD_ALLOW_SEALING
+    python_memfd_create = getattr(os, "memfd_create", None)
+    if python_memfd_create is not None:
+        if not callable(python_memfd_create):
+            raise BlockError(f"{label}_MEMFD_ABI_MISMATCH")
+        return python_memfd_create(name, flags=flags)
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        libc_memfd_create = libc.memfd_create
+    except (AttributeError, OSError) as exc:
+        raise BlockError(f"{label}_MEMFD_ABI_UNAVAILABLE") from exc
+    libc_memfd_create.argtypes = [ctypes.c_char_p, ctypes.c_uint]
+    libc_memfd_create.restype = ctypes.c_int
+    descriptor = libc_memfd_create(name.encode("utf-8"), flags)
+    if descriptor < 0:
+        error_number = ctypes.get_errno()
+        raise OSError(error_number, os.strerror(error_number))
+    return descriptor
 
 
 def _source_path_layout(value: str, *, label: str) -> Path:
@@ -573,14 +641,9 @@ def pin_regular_file(
         label=label,
         max_bytes=max_bytes,
     )
-    if not hasattr(os, "memfd_create"):
-        raise BlockError(f"{label}_MEMFD_UNAVAILABLE")
-    descriptor = os.memfd_create(
-        f"s1-4x-{label.lower()}",
-        flags=(
-            getattr(os, "MFD_CLOEXEC", 0)
-            | getattr(os, "MFD_ALLOW_SEALING", 0)
-        ),
+    descriptor = _create_linux_memfd(
+        name=f"s1-4x-{label.lower()}",
+        label=label,
     )
     try:
         offset = 0
@@ -590,14 +653,15 @@ def pin_regular_file(
                 raise BlockError(f"{label}_MEMFD_WRITE_FAILED")
             offset += written
         os.fchmod(descriptor, stat.S_IMODE(snapshot.mode))
-        seals = (
-            fcntl.F_SEAL_SEAL
-            | fcntl.F_SEAL_SHRINK
-            | fcntl.F_SEAL_GROW
-            | fcntl.F_SEAL_WRITE
+        fcntl.fcntl(
+            descriptor,
+            _LINUX_F_ADD_SEALS,
+            _LINUX_REQUIRED_MEMFD_SEALS,
         )
-        fcntl.fcntl(descriptor, fcntl.F_ADD_SEALS, seals)
-        if fcntl.fcntl(descriptor, fcntl.F_GET_SEALS) != seals:
+        if (
+            fcntl.fcntl(descriptor, _LINUX_F_GET_SEALS)
+            != _LINUX_REQUIRED_MEMFD_SEALS
+        ):
             raise BlockError(f"{label}_MEMFD_SEAL_FAILED")
         fd_path = Path(f"/proc/self/fd/{descriptor}")
         (
@@ -885,19 +949,15 @@ def run_pinned_subprocess(
             raise BlockError(
                 f"{pinned.label}_PINNED_FD_OBJECT_CHANGED"
             )
-    required_seals = (
-        fcntl.F_SEAL_SEAL
-        | fcntl.F_SEAL_SHRINK
-        | fcntl.F_SEAL_GROW
-        | fcntl.F_SEAL_WRITE
-    )
+    if pinned_files:
+        _require_linux_memfd_abi(label="PINNED_SUBPROCESS")
     for pinned_file in pinned_files:
         if (
             fcntl.fcntl(
                 pinned_file.descriptor,
-                fcntl.F_GET_SEALS,
+                _LINUX_F_GET_SEALS,
             )
-            != required_seals
+            != _LINUX_REQUIRED_MEMFD_SEALS
         ):
             raise BlockError(f"{pinned_file.label}_PINNED_FD_NOT_SEALED")
     return subprocess.run(
