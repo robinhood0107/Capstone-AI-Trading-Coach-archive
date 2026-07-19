@@ -14,8 +14,9 @@ import           Data.List (sort)
 import           Data.Text (Text)
 import           Data.Time.Clock (UTCTime, getCurrentTime)
 import           Data.Time.Format (defaultTimeLocale, formatTime)
-import           System.Directory (doesDirectoryExist, doesPathExist, getExecutablePath,
-                                   listDirectory, pathIsSymbolicLink)
+import           System.Directory (doesDirectoryExist, doesPathExist, listDirectory,
+                                   pathIsSymbolicLink)
+import           System.Environment (getExecutablePath)
 import           System.FilePath (makeRelative, takeExtension, (</>))
 import           Test.QuickCheck (Args, Property, Result, chatty, isSuccess, maxDiscardRatio,
                                   maxShrinks, maxSuccess, numDiscarded, numTests, output,
@@ -128,6 +129,7 @@ runPropertyEvidence arguments =
       expectedPropertyClosureHash
       ] ->
       execute
+        arguments
         outputDirectory
         haskellRoot
         propertyPlanPath
@@ -150,6 +152,7 @@ runPropertyEvidence arguments =
         "property evidence requires: OUTPUT_DIR HASKELL_ROOT PROPERTY_PLAN SEED_CORPUS FUNCTION_REGISTRY ERROR_REGISTRY OUTER_RUNNER SELECTED_PROFILE SOURCE_MANIFEST PROFILE_ID PROFILE_OPTIONS PROFILE_OPTIONS_SHA256 BUILD_ARGV_SHA256 SELECTED_PROFILE_SHA256 SOURCE_MANIFEST_SHA256 SOURCE_TREE_SHA256 PROPERTY_CLOSURE_SHA256"
 
 execute ::
+  [String] ->
   FilePath ->
   FilePath ->
   FilePath ->
@@ -169,6 +172,7 @@ execute ::
   String ->
   IO ()
 execute
+  arguments
   outputDirectory
   haskellRoot
   propertyPlanPath
