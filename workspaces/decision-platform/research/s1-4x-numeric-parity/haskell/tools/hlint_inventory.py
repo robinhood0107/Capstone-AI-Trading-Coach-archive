@@ -81,7 +81,7 @@ EXPECTED_NONEMPTY_MODULE_WITHIN = {
     "System.Environment": ("Main", "S14X.BenchmarkMain", "S14X.TestMain"),
     "System.IO": ("Main", "S14X.AtomicOutputSpec", "S14X.Contract.AtomicOutput"),
 }
-ENTRY_FIELDS = {
+ENTRY_FIELD_ORDER = (
     "language",
     "file",
     "rule",
@@ -90,6 +90,84 @@ ENTRY_FIELDS = {
     "focusedTest",
     "owner",
     "expiresWhen",
+)
+ENTRY_FIELDS = set(ENTRY_FIELD_ORDER)
+SUPPRESSION_SCHEMA_VERSION = "s1.4x-suppression-exceptions-v1"
+SUPPRESSION_FILE_PATTERN = (
+    r"^(?!/)(?!.*(?:^|/)\.\.(?:/|$))[A-Za-z0-9._/-]+$"
+)
+ENTRY_MAX_LENGTHS = {
+    "file": 512,
+    "rule": 256,
+    "symbol": 512,
+    "reason": 1024,
+    "focusedTest": 512,
+    "expiresWhen": 512,
+}
+SUPPRESSION_UNIQUE_COMPOSITE = ("language", "file", "rule", "symbol")
+FROZEN_SUPPRESSION_SCHEMA = {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": (
+        "https://capstone-ai-trading-coach.invalid/"
+        "s1-4x/schemas/suppression-exception.schema.json"
+    ),
+    "title": "S1.4X reviewed suppression and partial-API exceptions",
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["schemaVersion", "entries"],
+    "properties": {
+        "schemaVersion": {"const": SUPPRESSION_SCHEMA_VERSION},
+        "entries": {
+            "type": "array",
+            "items": {"$ref": "#/$defs/entry"},
+            "x-s1-4x-unique-by-composite": list(
+                SUPPRESSION_UNIQUE_COMPOSITE
+            ),
+            "x-s1-4x-stale-or-unused-entry-is-error": True,
+        },
+    },
+    "$defs": {
+        "entry": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": list(ENTRY_FIELD_ORDER),
+            "properties": {
+                "language": {"enum": ["scala", "haskell"]},
+                "file": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": ENTRY_MAX_LENGTHS["file"],
+                    "pattern": SUPPRESSION_FILE_PATTERN,
+                },
+                "rule": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": ENTRY_MAX_LENGTHS["rule"],
+                },
+                "symbol": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": ENTRY_MAX_LENGTHS["symbol"],
+                },
+                "reason": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": ENTRY_MAX_LENGTHS["reason"],
+                },
+                "focusedTest": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": ENTRY_MAX_LENGTHS["focusedTest"],
+                },
+                "owner": {"const": "S1.4X"},
+                "expiresWhen": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": ENTRY_MAX_LENGTHS["expiresWhen"],
+                },
+            },
+        },
+    },
 }
 SOURCE_ROOTS = ("src", "app", "test", "benchmark")
 THROW_IO_NAMES = {"Control.Exception.throwIO", "throwIO"}
@@ -121,31 +199,79 @@ def strict_json_load(path: Path) -> Any:
 
 
 def _validate_entry(root: Path, entry: Mapping[str, object]) -> None:
+    """한 Haskell suppression entry의 schema와 live source/test 결속을 검증한다."""
+
     if set(entry) != ENTRY_FIELDS:
         raise InventoryError("lint exception entry field drift")
     if entry.get("language") != "haskell" or entry.get("owner") != "S1.4X":
         raise InventoryError("lint exception language or owner drift")
     if any(
-        not isinstance(entry.get(field), str) or not entry[field]
+        not isinstance(entry.get(field), str)
+        or not 1 <= len(entry[field]) <= ENTRY_MAX_LENGTHS.get(field, 512)
         for field in ENTRY_FIELDS
     ):
-        raise InventoryError("lint exception contains an empty field")
+        raise InventoryError("lint exception string type or length drift")
     relative = str(entry["file"])
-    if relative.startswith("/") or ".." in Path(relative).parts:
+    if re.fullmatch(SUPPRESSION_FILE_PATTERN, relative) is None:
         raise InventoryError("lint exception file escapes the Haskell root")
     source = root / relative
-    if source.is_symlink() or not source.is_file():
+    if (
+        source.is_symlink()
+        or not source.is_file()
+        or source.resolve(strict=True) != source
+    ):
         raise InventoryError(f"lint exception source is missing: {relative}")
     focused_path_text, separator, focused_name = str(entry["focusedTest"]).partition(
         ": "
     )
-    if not separator:
+    if (
+        not separator
+        or re.fullmatch(SUPPRESSION_FILE_PATTERN, focused_path_text) is None
+    ):
         raise InventoryError("focused lint test reference must use `path: test name`")
     focused_path = root / focused_path_text
-    if focused_path.is_symlink() or not focused_path.is_file():
+    if (
+        focused_path.is_symlink()
+        or not focused_path.is_file()
+        or focused_path.resolve(strict=True) != focused_path
+    ):
         raise InventoryError("focused lint test file is missing")
     if focused_name not in focused_path.read_text(encoding="utf-8"):
         raise InventoryError(f"focused lint test name is stale: {entry['focusedTest']}")
+
+
+def validate_suppression_contract(
+    root: Path,
+    schema: object,
+    manifest: object,
+) -> tuple[Mapping[str, object], ...]:
+    """Frozen schema와 Haskell manifest를 stdlib만으로 exact/live 검증한다."""
+
+    root = root.resolve(strict=True)
+    if schema != FROZEN_SUPPRESSION_SCHEMA:
+        raise InventoryError("suppression schema drift")
+    if (
+        not isinstance(manifest, dict)
+        or set(manifest) != {"schemaVersion", "entries"}
+        or manifest.get("schemaVersion") != SUPPRESSION_SCHEMA_VERSION
+        or not isinstance(manifest.get("entries"), list)
+    ):
+        raise InventoryError("suppression manifest outer shape drift")
+    entries = manifest["entries"]
+    composites: set[tuple[str, str, str, str]] = set()
+    validated: list[Mapping[str, object]] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise InventoryError("suppression manifest entry type drift")
+        _validate_entry(root, entry)
+        composite = tuple(
+            str(entry[field]) for field in SUPPRESSION_UNIQUE_COMPOSITE
+        )
+        if composite in composites:
+            raise InventoryError("duplicate lint exception composite")
+        composites.add(composite)
+        validated.append(entry)
+    return tuple(validated)
 
 
 def _yaml_scalar(token: str) -> str:
@@ -521,15 +647,9 @@ def validate_managed_ignored_diagnostics(
 
     bound_identities: set[tuple[str, str, str, tuple[str, ...], str]] = set()
     manifest_pairs: set[tuple[str, str]] = set()
-    composites: set[tuple[str, str, str]] = set()
     for entry in entries:
-        _validate_entry(root, entry)
         if entry["rule"] == "Avoid restricted module":
             continue
-        composite = (str(entry["file"]), str(entry["rule"]), str(entry["symbol"]))
-        if composite in composites:
-            raise InventoryError("duplicate lint exception composite")
-        composites.add(composite)
         declaration, separator, from_token = str(entry["symbol"]).partition(":")
         matches: list[tuple[str, str, str, tuple[str, ...], str]] = []
         for identity in managed_identities:
@@ -640,7 +760,6 @@ def validate_module_allowances(
             )
 
     for entry in entries:
-        _validate_entry(root, entry)
         if entry["rule"] != "Avoid restricted module":
             continue
         relative = str(entry["file"])
@@ -670,18 +789,15 @@ def validate_module_allowances(
 def _validate_command(arguments: argparse.Namespace) -> None:
     root = arguments.haskell_root.resolve(strict=True)
     configuration = arguments.configuration.read_text(encoding="utf-8")
+    schema = strict_json_load(arguments.schema)
     manifest = strict_json_load(arguments.manifest)
     diagnostics = strict_json_load(arguments.diagnostics)
+    entries = validate_suppression_contract(root, schema, manifest)
     if (
-        not isinstance(manifest, dict)
-        or manifest.get("schemaVersion") != "s1.4x-suppression-exceptions-v1"
-        or set(manifest) != {"schemaVersion", "entries"}
-        or not isinstance(manifest["entries"], list)
-        or not isinstance(diagnostics, list)
+        not isinstance(diagnostics, list)
         or any(not isinstance(item, dict) for item in diagnostics)
     ):
-        raise InventoryError("HLint inventory input shape drift")
-    entries = manifest["entries"]
+        raise InventoryError("HLint diagnostic inventory shape drift")
     validate_throw_io_restrictions(configuration)
     validate_no_source_local_suppressions(root)
     managed = validate_managed_ignored_diagnostics(
@@ -701,6 +817,8 @@ def _validate_command(arguments: argparse.Namespace) -> None:
                 ),
                 "restrictedModuleAllowanceCount": allowances.allowance_count,
                 "restrictedModuleImportedSymbolCount": allowances.imported_symbol_count,
+                "suppressionEntryCount": len(entries),
+                "suppressionSchemaStatus": "PASS",
                 "status": "PASS",
             },
             sort_keys=True,
@@ -712,6 +830,7 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--haskell-root", type=Path, required=True)
     parser.add_argument("--configuration", type=Path, required=True)
+    parser.add_argument("--schema", type=Path, required=True)
     parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--diagnostics", type=Path, required=True)
     parser.set_defaults(handler=_validate_command)

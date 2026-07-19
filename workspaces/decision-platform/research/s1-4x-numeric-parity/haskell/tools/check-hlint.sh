@@ -60,27 +60,10 @@ set -e
   exit 2
 }
 
-"$S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH" - \
-  "$EXCEPTION_SCHEMA" \
-  "$EXCEPTION_MANIFEST" \
-  >"$OUTPUT_DIRECTORY/exception-schema.stdout" \
-  2>"$OUTPUT_DIRECTORY/exception-schema.stderr" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-from jsonschema import Draft202012Validator
-
-schema_path, manifest_path = map(Path, sys.argv[1:])
-schema = json.loads(schema_path.read_text(encoding="utf-8"))
-manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-Draft202012Validator.check_schema(schema)
-Draft202012Validator(schema).validate(manifest)
-PY
-
 "$S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH" "$HASKELL_ROOT/tools/hlint_inventory.py" \
   --haskell-root "$HASKELL_ROOT" \
   --configuration "$HLINT_CONFIGURATION" \
+  --schema "$EXCEPTION_SCHEMA" \
   --manifest "$EXCEPTION_MANIFEST" \
   --diagnostics "$OUTPUT_DIRECTORY/ignored.json" \
   >"$OUTPUT_DIRECTORY/managed-inventory.stdout" \
