@@ -127,6 +127,25 @@ FORBIDDEN_STACK_ENVIRONMENT = (
     "STACK_OPTS",
     "STACK_CONFIG",
 )
+ORACLE_COMPARE_SOURCE_PATH_ID = "S1_4X_ORACLE_COMPARE_RESULTS_SOURCE"
+ORACLE_COMMON_SOURCE_PATH_ID = "S1_4X_ORACLE_COMMON_SOURCE"
+PINNED_ORACLE_COMPARE_BOOTSTRAP = (
+    "import pathlib,sys,types\n"
+    "compare_fd,common_fd,compare_source,common_source,*compare_argv="
+    "sys.argv[1:]\n"
+    "common=types.ModuleType('oracle_common')\n"
+    "common.__file__=common_source\n"
+    "common.__package__=''\n"
+    "common.__spec__=None\n"
+    "sys.modules['oracle_common']=common\n"
+    "exec(compile(pathlib.Path(common_fd).read_bytes(),common_source,'exec'),"
+    "common.__dict__)\n"
+    "sys.argv=[compare_source,*compare_argv]\n"
+    "namespace={'__name__':'__main__','__file__':compare_source,"
+    "'__package__':None,'__cached__':None}\n"
+    "exec(compile(pathlib.Path(compare_fd).read_bytes(),compare_source,'exec'),"
+    "namespace)\n"
+)
 OCI_PLATFORM = "linux/amd64"
 OCI_BASE_IMAGE = (
     "docker.io/library/haskell@sha256:"
@@ -157,6 +176,14 @@ class BenchmarkPythonRuntime:
     configuration_sha256: str
     configuration_identity: tuple[int, int, int, int, int, int, int]
     dependency_closure: tuple[str, str, str]
+
+
+@dataclass(frozen=True)
+class PinnedOracleComparator:
+    """Comparator와 sibling module을 같은 retained-FD 실행 폐쇄로 보존한다."""
+
+    compare_script: Any
+    common_module: Any
 
 
 @dataclass(frozen=True)
@@ -472,6 +499,88 @@ def _pin_python_script(path: Path, *, label: str) -> Any:
         )
     except pinned_runtime_error as exc:
         raise WorkflowError(f"{label}_PIN_INVALID:{exc}") from exc
+
+
+def _pin_oracle_comparator(numeric_root: Path) -> PinnedOracleComparator:
+    """Frozen comparator와 local import를 pathname 재개방 없이 함께 봉인한다."""
+
+    compare_script = _pin_python_script(
+        _absolute_regular(
+            numeric_root / "oracle/compare_results.py",
+            label="COMPARE_RESULTS",
+        ),
+        label="COMPARE_RESULTS_PY",
+    )
+    try:
+        common_module = _pin_python_script(
+            _absolute_regular(
+                numeric_root / "oracle/oracle_common.py",
+                label="ORACLE_COMMON",
+            ),
+            label="ORACLE_COMMON_PY",
+        )
+    except BaseException:
+        os.close(compare_script.descriptor)
+        raise
+    return PinnedOracleComparator(
+        compare_script=compare_script,
+        common_module=common_module,
+    )
+
+
+def _oracle_compare_command(
+    *,
+    python_path: Path,
+    comparator: PinnedOracleComparator,
+    arguments: Sequence[str],
+) -> list[str]:
+    """Pinned bytes를 쓰되 frozen source의 `__file__` 경로 의미를 보존한다."""
+
+    if any(not isinstance(argument, str) or "\0" in argument for argument in arguments):
+        raise WorkflowError("ORACLE_COMPARE_ARGUMENT_INVALID")
+    return [
+        str(python_path),
+        "-I",
+        "-c",
+        PINNED_ORACLE_COMPARE_BOOTSTRAP,
+        str(comparator.compare_script.fd_path),
+        str(comparator.common_module.fd_path),
+        str(comparator.compare_script.source_path),
+        str(comparator.common_module.source_path),
+        *arguments,
+    ]
+
+
+def _oracle_compare_pass_fds(
+    python_runtime: BenchmarkPythonRuntime,
+    comparator: PinnedOracleComparator,
+) -> tuple[int, int, int]:
+    """Comparator child에 accepted CPython과 두 source snapshot FD만 상속한다."""
+
+    return (
+        python_runtime.descriptor,
+        comparator.compare_script.descriptor,
+        comparator.common_module.descriptor,
+    )
+
+
+def _oracle_compare_path_ids(
+    python_runtime: BenchmarkPythonRuntime,
+    comparator: PinnedOracleComparator,
+) -> dict[str, str]:
+    """Comparator argv의 runtime, source FD, provenance path를 portable ID로 바꾼다."""
+
+    return {
+        str(python_runtime.fd_path): _benchmark_python_path_id(python_runtime),
+        str(comparator.compare_script.fd_path): _pinned_file_path_id(
+            comparator.compare_script
+        ),
+        str(comparator.common_module.fd_path): _pinned_file_path_id(
+            comparator.common_module
+        ),
+        str(comparator.compare_script.source_path): ORACLE_COMPARE_SOURCE_PATH_ID,
+        str(comparator.common_module.source_path): ORACLE_COMMON_SOURCE_PATH_ID,
+    }
 
 
 def _portable_argv(
@@ -3349,18 +3458,8 @@ def _correctness(arguments: argparse.Namespace) -> None:
         numeric_root / "contract/fixtures",
         label="FIXTURE_ROOT",
     )
-    compare_script_source = _absolute_regular(
-        numeric_root / "oracle/compare_results.py",
-        label="COMPARE_RESULTS",
-    )
-    compare_script = _pin_python_script(
-        compare_script_source,
-        label="COMPARE_RESULTS_PY",
-    )
-    python_path_ids = {
-        str(python_runtime.fd_path): _benchmark_python_path_id(python_runtime),
-        str(compare_script.fd_path): _pinned_file_path_id(compare_script),
-    }
+    comparator = _pin_oracle_comparator(numeric_root)
+    python_path_ids = _oracle_compare_path_ids(python_runtime, comparator)
     requests = (
         (
             "canonical",
@@ -3402,25 +3501,27 @@ def _correctness(arguments: argparse.Namespace) -> None:
         _absolute_regular(actual, label=f"{label.upper()}_ACTUAL")
         records.append(
             _run_logged(
-                [
-                    str(python_runtime.fd_path),
-                    str(compare_script.fd_path),
-                    "--expected",
-                    str(expected),
-                    "--actual",
-                    str(actual),
-                    "--request",
-                    str(request),
-                    "--output",
-                    str(comparison),
-                ],
+                _oracle_compare_command(
+                    python_path=python_runtime.fd_path,
+                    comparator=comparator,
+                    arguments=[
+                        "--expected",
+                        str(expected),
+                        "--actual",
+                        str(actual),
+                        "--request",
+                        str(request),
+                        "--output",
+                        str(comparison),
+                    ],
+                ),
                 cwd=repo_root,
                 environment=environment,
                 phase=compare_phase,
                 output_directory=output,
-                pass_fds=(
-                    python_runtime.descriptor,
-                    compare_script.descriptor,
+                pass_fds=_oracle_compare_pass_fds(
+                    python_runtime,
+                    comparator,
                 ),
                 portable_path_ids=python_path_ids,
                 benchmark_python_runtime=python_runtime,
@@ -4237,19 +4338,9 @@ def _validate_correctness_receipt(
         numeric_root / "contract/fixtures",
         label="FIXTURE_ROOT",
     )
-    compare_script_source = _absolute_regular(
-        numeric_root / "oracle/compare_results.py",
-        label="COMPARE_RESULTS",
-    )
     python_runtime = _benchmark_python_runtime()
-    compare_script = _pin_python_script(
-        compare_script_source,
-        label="COMPARE_RESULTS_PY",
-    )
-    python_path_ids = {
-        str(python_runtime.fd_path): _benchmark_python_path_id(python_runtime),
-        str(compare_script.fd_path): _pinned_file_path_id(compare_script),
-    }
+    comparator = _pin_oracle_comparator(numeric_root)
+    python_path_ids = _oracle_compare_path_ids(python_runtime, comparator)
     matrices = (
         (
             "canonical",
@@ -4335,26 +4426,28 @@ def _validate_correctness_receipt(
             prefix=f".validate-{label}-",
         ) as temporary:
             recomputed = Path(temporary) / "comparison.json"
-            replay_descriptors = (
-                python_runtime.descriptor,
-                compare_script.descriptor,
+            replay_descriptors = _oracle_compare_pass_fds(
+                python_runtime,
+                comparator,
             )
             replay_identities = _pass_fd_identities(
                 replay_descriptors,
                 phase=f"{label}-compare-replay",
             )
-            replay_command = [
-                str(python_runtime.fd_path),
-                str(compare_script.fd_path),
-                "--expected",
-                str(expected),
-                "--actual",
-                str(actual),
-                "--request",
-                str(request),
-                "--output",
-                str(recomputed),
-            ]
+            replay_command = _oracle_compare_command(
+                python_path=python_runtime.fd_path,
+                comparator=comparator,
+                arguments=[
+                    "--expected",
+                    str(expected),
+                    "--actual",
+                    str(actual),
+                    "--request",
+                    str(request),
+                    "--output",
+                    str(recomputed),
+                ],
+            )
             (
                 replay_execution_command,
                 replay_executable,
@@ -4410,18 +4503,20 @@ def _validate_correctness_receipt(
                 ),
                 (
                     f"{label}-compare",
-                    [
-                        str(python_runtime.fd_path),
-                        str(compare_script.fd_path),
-                        "--expected",
-                        str(expected),
-                        "--actual",
-                        str(actual),
-                        "--request",
-                        str(request),
-                        "--output",
-                        str(comparison),
-                    ],
+                    _oracle_compare_command(
+                        python_path=python_runtime.fd_path,
+                        comparator=comparator,
+                        arguments=[
+                            "--expected",
+                            str(expected),
+                            "--actual",
+                            str(actual),
+                            "--request",
+                            str(request),
+                            "--output",
+                            str(comparison),
+                        ],
+                    ),
                     repo_root,
                     python_path_ids,
                 ),
@@ -5856,22 +5951,12 @@ def _replay_compatibility_success(arguments: argparse.Namespace) -> None:
         numeric_root / "contract/fixtures",
         label="FIXTURE_ROOT",
     )
-    compare_script_source = _absolute_regular(
-        numeric_root / "oracle/compare_results.py",
-        label="COMPARE_RESULTS",
-    )
-    compare_script = _pin_python_script(
-        compare_script_source,
-        label="COMPARE_RESULTS_PY",
-    )
+    comparator = _pin_oracle_comparator(numeric_root)
     profile_script = _pin_python_script(
         Path(__file__).resolve(strict=True),
         label="PROFILE_WORKFLOW_PY",
     )
-    compare_path_ids = {
-        str(python_runtime.fd_path): _benchmark_python_path_id(python_runtime),
-        str(compare_script.fd_path): _pinned_file_path_id(compare_script),
-    }
+    compare_path_ids = _oracle_compare_path_ids(python_runtime, comparator)
     profile_path_ids = {
         str(python_runtime.fd_path): _benchmark_python_path_id(python_runtime),
         str(profile_script.fd_path): _pinned_file_path_id(profile_script),
@@ -5905,26 +5990,28 @@ def _replay_compatibility_success(arguments: argparse.Namespace) -> None:
     if semantic_process["exitCode"] != 0:
         publish_failed("stableErrorReplay", [semantic_process], {})
         return
-    semantic_compare_command = [
-        str(python_runtime.fd_path),
-        str(compare_script.fd_path),
-        "--expected",
-        str(semantic_expected),
-        "--actual",
-        str(semantic_actual),
-        "--request",
-        str(semantic_request),
-        "--output",
-        str(semantic_comparison),
-    ]
+    semantic_compare_command = _oracle_compare_command(
+        python_path=python_runtime.fd_path,
+        comparator=comparator,
+        arguments=[
+            "--expected",
+            str(semantic_expected),
+            "--actual",
+            str(semantic_actual),
+            "--request",
+            str(semantic_request),
+            "--output",
+            str(semantic_comparison),
+        ],
+    )
     semantic_compare = run_phase_command(
         phase="stableErrorReplay",
         log_id="stable-error-compare",
         command=semantic_compare_command,
         cwd=repo_root,
-        pass_fds=(
-            python_runtime.descriptor,
-            compare_script.descriptor,
+        pass_fds=_oracle_compare_pass_fds(
+            python_runtime,
+            comparator,
         ),
         portable_path_ids=compare_path_ids,
     )
@@ -5998,26 +6085,28 @@ def _replay_compatibility_success(arguments: argparse.Namespace) -> None:
         "status": "PASS",
         "mismatchCount": 0,
     }
-    oracle_command = [
-        str(python_runtime.fd_path),
-        str(compare_script.fd_path),
-        "--expected",
-        str(canonical_expected),
-        "--actual",
-        str(canonical_actual),
-        "--request",
-        str(canonical_request),
-        "--output",
-        str(canonical_comparison),
-    ]
+    oracle_command = _oracle_compare_command(
+        python_path=python_runtime.fd_path,
+        comparator=comparator,
+        arguments=[
+            "--expected",
+            str(canonical_expected),
+            "--actual",
+            str(canonical_actual),
+            "--request",
+            str(canonical_request),
+            "--output",
+            str(canonical_comparison),
+        ],
+    )
     oracle_record = run_phase_command(
         phase="oracleReplay",
         log_id="oracle-replay",
         command=oracle_command,
         cwd=repo_root,
-        pass_fds=(
-            python_runtime.descriptor,
-            compare_script.descriptor,
+        pass_fds=_oracle_compare_pass_fds(
+            python_runtime,
+            comparator,
         ),
         portable_path_ids=compare_path_ids,
     )
@@ -7847,18 +7936,8 @@ def _oci_correctness(arguments: argparse.Namespace) -> None:
     )
     runtime_output = output / "runtime"
     runtime_output.mkdir(mode=0o700)
-    compare_script_source = _absolute_regular(
-        numeric_root / "oracle/compare_results.py",
-        label="COMPARE_RESULTS",
-    )
-    compare_script = _pin_python_script(
-        compare_script_source,
-        label="COMPARE_RESULTS_PY",
-    )
-    compare_path_ids = {
-        str(python_runtime.fd_path): _benchmark_python_path_id(python_runtime),
-        str(compare_script.fd_path): _pinned_file_path_id(compare_script),
-    }
+    comparator = _pin_oracle_comparator(numeric_root)
+    compare_path_ids = _oracle_compare_path_ids(python_runtime, comparator)
     matrices = (
         (
             "canonical",
@@ -7897,18 +7976,20 @@ def _oci_correctness(arguments: argparse.Namespace) -> None:
             expected_image_id=image_id,
         )
         _absolute_regular(actual, label=f"OCI_{label.upper()}_ACTUAL")
-        compare_command = [
-            str(python_runtime.fd_path),
-            str(compare_script.fd_path),
-            "--expected",
-            str(expected),
-            "--actual",
-            str(actual),
-            "--request",
-            str(host_request),
-            "--output",
-            str(comparison),
-        ]
+        compare_command = _oracle_compare_command(
+            python_path=python_runtime.fd_path,
+            comparator=comparator,
+            arguments=[
+                "--expected",
+                str(expected),
+                "--actual",
+                str(actual),
+                "--request",
+                str(host_request),
+                "--output",
+                str(comparison),
+            ],
+        )
         commands.append(
             _run_logged(
                 compare_command,
@@ -7916,9 +7997,9 @@ def _oci_correctness(arguments: argparse.Namespace) -> None:
                 environment=environment,
                 phase=f"oci-{label}-compare",
                 output_directory=output,
-                pass_fds=(
-                    python_runtime.descriptor,
-                    compare_script.descriptor,
+                pass_fds=_oracle_compare_pass_fds(
+                    python_runtime,
+                    comparator,
                 ),
                 portable_path_ids=compare_path_ids,
                 benchmark_python_runtime=python_runtime,
