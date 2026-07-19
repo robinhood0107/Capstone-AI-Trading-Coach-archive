@@ -98,11 +98,17 @@ if not isinstance(fixtures, list) or not fixtures:
     raise SystemExit("empty HLint negative fixture manifest")
 seen = set()
 for fixture in fixtures:
-    if set(fixture) != {"fixtureId", "path", "expectedTokens"}:
+    if set(fixture) != {
+        "fixtureId",
+        "path",
+        "expectedTokens",
+        "policyTokens",
+    }:
         raise SystemExit("HLint negative fixture field drift")
     fixture_id = fixture["fixtureId"]
     path = fixture["path"]
     tokens = fixture["expectedTokens"]
+    policy_tokens = fixture["policyTokens"]
     if (
         not isinstance(fixture_id, str)
         or not fixture_id
@@ -112,6 +118,12 @@ for fixture in fixtures:
         or not isinstance(tokens, list)
         or not tokens
         or any(not isinstance(token, str) or not token for token in tokens)
+        or not isinstance(policy_tokens, list)
+        or not policy_tokens
+        or any(
+            not isinstance(token, str) or not token
+            for token in policy_tokens
+        )
     ):
         raise SystemExit("invalid HLint negative fixture entry")
     seen.add(fixture_id)
@@ -195,6 +207,7 @@ def sha256(path: Path) -> str:
 
 
 source_inputs = json.loads(source_manifest.read_text(encoding="utf-8"))
+fixture_inputs = json.loads(fixture_manifest.read_text(encoding="utf-8"))
 files = source_inputs["files"]
 logs = {
     path.name: sha256(path)
@@ -240,7 +253,7 @@ receipt = {
         ],
     ],
     "ignoredInventoryExitCode": ignored_exit_code,
-    "negativeFixtureCount": 9,
+    "negativeFixtureCount": len(fixture_inputs["fixtures"]),
     "logs": logs,
     "status": "PASS",
 }

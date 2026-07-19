@@ -4,47 +4,86 @@
     {
       "fixtureId": "qualified-from-just",
       "path": "tools/fixtures/hlint/qualified-from-just.hs",
-      "expectedTokens": ["fromJust"]
+      "expectedTokens": ["fromJust"],
+      "policyTokens": ["fromJust"]
     },
     {
       "fixtureId": "aliased-from-left",
       "path": "tools/fixtures/hlint/aliased-from-left.hs",
-      "expectedTokens": ["fromLeft"]
+      "expectedTokens": ["fromLeft"],
+      "policyTokens": ["fromLeft"]
     },
     {
       "fixtureId": "aliased-from-right",
       "path": "tools/fixtures/hlint/aliased-from-right.hs",
-      "expectedTokens": ["fromRight"]
+      "expectedTokens": ["fromRight"],
+      "policyTokens": ["fromRight"]
     },
     {
       "fixtureId": "qualified-throw",
       "path": "tools/fixtures/hlint/qualified-throw.hs",
-      "expectedTokens": ["throw"]
+      "expectedTokens": ["throw"],
+      "policyTokens": ["throw"]
     },
     {
       "fixtureId": "qualified-throw-io",
       "path": "tools/fixtures/hlint/qualified-throw-io.hs",
-      "expectedTokens": ["throwIO"]
+      "expectedTokens": ["throwIO"],
+      "policyTokens": ["throwIO"]
     },
     {
       "fixtureId": "unchecked-folds",
       "path": "tools/fixtures/hlint/unchecked-folds.hs",
-      "expectedTokens": ["foldl1", "maximum", "minimum"]
+      "expectedTokens": ["foldl1", "maximum", "minimum"],
+      "policyTokens": ["foldl1", "maximum", "minimum"]
     },
     {
       "fixtureId": "unsafe-module",
       "path": "tools/fixtures/hlint/unsafe-module.hs",
-      "expectedTokens": ["System.IO.Unsafe"]
+      "expectedTokens": ["System.IO.Unsafe", "unsafePerformIO"],
+      "policyTokens": ["System.IO.Unsafe", "unsafePerformIO"]
     },
     {
       "fixtureId": "core-system-io",
       "path": "tools/fixtures/hlint/core-system-io.hs",
-      "expectedTokens": ["System.IO"]
+      "expectedTokens": ["System.IO"],
+      "policyTokens": ["System.IO"]
     },
     {
       "fixtureId": "forbidden-extension",
       "path": "tools/fixtures/hlint/forbidden-extension.hs",
-      "expectedTokens": ["GeneralizedNewtypeDeriving"]
+      "expectedTokens": ["GeneralizedNewtypeDeriving"],
+      "policyTokens": ["GeneralizedNewtypeDeriving"]
+    },
+    {
+      "fixtureId": "debug-trace",
+      "path": "tools/fixtures/hlint/debug-trace.hs",
+      "expectedTokens": ["Debug.Trace"],
+      "policyTokens": ["Debug.Trace"]
+    },
+    {
+      "fixtureId": "forbidden-deriving",
+      "path": "tools/fixtures/hlint/forbidden-deriving.hs",
+      "expectedTokens": ["DeriveAnyClass", "DerivingVia"],
+      "policyTokens": ["DeriveAnyClass", "DerivingVia"]
+    },
+    {
+      "fixtureId": "foreign-interface",
+      "path": "tools/fixtures/hlint/foreign-interface.hs",
+      "expectedTokens": ["ForeignFunctionInterface", "Foreign.Ptr"],
+      "policyTokens": ["Foreign.Ptr", "foreign import", "foreign export"]
+    },
+    {
+      "fixtureId": "partial-and-unsafe",
+      "path": "tools/fixtures/hlint/partial-and-unsafe.hs",
+      "expectedTokens": ["undefined", "error", "head", "tail", "init", "last", "!!", "read"],
+      "policyTokens": ["undefined", "error", "head", "tail", "init", "last", "!!", "read"]
+    },
+    {
+      "fixtureId": "unsafe-modules",
+      "path": "tools/fixtures/hlint/unsafe-modules.hs",
+      "expectedTokens": ["GHC.IO.Unsafe", "unsafeDupablePerformIO", "unsafeInterleaveIO", "unsafeCoerce"],
+      "policyTokens": ["GHC.IO.Unsafe", "unsafeDupablePerformIO", "unsafeInterleaveIO", "unsafeCoerce"]
     }
   ]
 }
