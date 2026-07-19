@@ -20,7 +20,11 @@ TOOLS_ROOT = Path(__file__).resolve().parents[1]
 MODULE_PATH = TOOLS_ROOT / "haskell_benchmark_block.py"
 
 
-def copied_benchmark_python(root: Path) -> Path:
+def copied_benchmark_python(
+    root: Path,
+    *,
+    numpy_version: str = "2.5.1",
+) -> Path:
     """실행 route 회귀용 external venv CPython regular copy를 만든다."""
 
     venv_root = root / "benchmark-python-venv"
@@ -28,7 +32,7 @@ def copied_benchmark_python(root: Path) -> Path:
     site_packages = venv_root / "lib/python3.12/site-packages"
     for package, version in (
         ("jsonschema", "4.26.0"),
-        ("numpy", "2.5.1"),
+        ("numpy", numpy_version),
     ):
         package_root = site_packages / package
         package_root.mkdir()
@@ -491,6 +495,103 @@ class BenchmarkBlockHelperTests(unittest.TestCase):
             finally:
                 os.close(pinned_script.descriptor)
                 os.close(python_descriptor)
+
+    def test_helper_entry_validates_exact_venv_route_and_dependencies(
+        self,
+    ) -> None:
+        """Outer env-i exec 직후 source/FD/prefix/dependency closure를 재검증한다."""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            accepted_python = copied_benchmark_python(root / "accepted")
+            swapped_source = copied_benchmark_python(root / "source-swap")
+            drifted_python = copied_benchmark_python(
+                root / "dependency-drift",
+                numpy_version="2.5.0",
+            )
+            probe = root / "runtime-probe.py"
+            probe.write_text(
+                "import importlib.util\n"
+                "import json\n"
+                "import os\n"
+                "import sys\n"
+                "from pathlib import Path\n"
+                "helper_path = Path(os.environ['HELPER_PATH'])\n"
+                "spec = importlib.util.spec_from_file_location(\n"
+                "    'benchmark_runtime_probe_helper', helper_path\n"
+                ")\n"
+                "if spec is None or spec.loader is None:\n"
+                "    raise SystemExit(90)\n"
+                "module = importlib.util.module_from_spec(spec)\n"
+                "sys.modules[spec.name] = module\n"
+                "spec.loader.exec_module(module)\n"
+                "runtime = module._benchmark_python_runtime()\n"
+                "print(json.dumps({\n"
+                "    'source': str(runtime.source_path),\n"
+                "    'fd': str(runtime.fd_path),\n"
+                "    'prefix': sys.prefix,\n"
+                "}, sort_keys=True))\n",
+                encoding="utf-8",
+            )
+
+            def run_probe(
+                executable: Path,
+                *,
+                source_argv0: Path,
+            ) -> subprocess.CompletedProcess[str]:
+                descriptor = os.open(executable, os.O_RDONLY)
+                try:
+                    fd_path = f"/proc/self/fd/{descriptor}"
+                    return subprocess.run(
+                        [str(source_argv0), str(probe)],
+                        executable=fd_path,
+                        env={
+                            "HELPER_PATH": str(MODULE_PATH),
+                            "LC_ALL": "C",
+                            "PATH": "/usr/bin:/bin",
+                            "PYTHONDONTWRITEBYTECODE": "1",
+                            "S1_4X_BENCHMARK_PYTHON_BIN": str(source_argv0),
+                            "S1_4X_BENCHMARK_PYTHON_SHA256": hashlib.sha256(
+                                executable.read_bytes()
+                            ).hexdigest(),
+                            "S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH": fd_path,
+                        },
+                        check=False,
+                        capture_output=True,
+                        text=True,
+                        pass_fds=(descriptor,),
+                    )
+                finally:
+                    os.close(descriptor)
+
+            accepted = run_probe(
+                accepted_python,
+                source_argv0=accepted_python,
+            )
+            source_swapped = run_probe(
+                accepted_python,
+                source_argv0=swapped_source,
+            )
+            dependency_drifted = run_probe(
+                drifted_python,
+                source_argv0=drifted_python,
+            )
+
+        self.assertEqual(accepted.returncode, 0, accepted.stderr)
+        self.assertEqual(
+            json.loads(accepted.stdout)["source"],
+            str(accepted_python),
+        )
+        self.assertNotEqual(source_swapped.returncode, 0)
+        self.assertIn(
+            "BENCHMARK_PYTHON_SOURCE_FD_MISMATCH",
+            source_swapped.stderr,
+        )
+        self.assertNotEqual(dependency_drifted.returncode, 0)
+        self.assertIn(
+            "BENCHMARK_PYTHON_DEPENDENCY_CLOSURE_MISMATCH",
+            dependency_drifted.stderr,
+        )
 
     def test_pinned_tool_fd_inheritance_reaches_nested_stack_and_ghc(
         self,
