@@ -42,19 +42,35 @@ GENERATED_SUFFIXES = (
     "_jmhType_B3.java",
 )
 RECEIPT_NAME = "scala-jmh-generated-java-precompile.v1.json"
+GENERATED_SOURCES_NAME = "generated-java-sources"
 GENERATED_CLASSES_NAME = "generated-java-classes"
 SCALA_COMPILE_STDOUT = "scala-jmh-precompile.stdout"
 SCALA_COMPILE_STDERR = "scala-jmh-precompile.stderr"
 JAVAC_STDOUT = "scala-javac.stdout"
 JAVAC_STDERR = "scala-javac.stderr"
+JDK_MODULES_GATE_SNAPSHOT_VARIABLE = (
+    "S1_4X_JDK_MODULES_GATE_SNAPSHOT"
+)
 
 
 @dataclass(frozen=True)
 class FileDigest:
-    """폐쇄성 검증에 사용하는 상대 경로와 SHA-256."""
+    """한 번 연 regular inode의 상대 경로·bytes·metadata snapshot."""
 
     relative_path: str
     sha256: str
+    file_identity: tuple[int, int, int, int, int, int, int, int, int]
+    payload: bytes
+
+
+@dataclass(frozen=True)
+class RegularFileSnapshot:
+    """O_NOFOLLOW로 연 한 regular file의 bytes와 ctime 포함 identity."""
+
+    path: Path
+    sha256: str
+    file_identity: tuple[int, int, int, int, int, int, int, int, int]
+    payload: bytes | None
 
 
 @dataclass(frozen=True)
@@ -73,6 +89,7 @@ class ClasspathEntry:
     path_id: str
     kind: str
     sha256: str
+    identity_sha256: str
 
 
 @dataclass(frozen=True)
@@ -81,6 +98,7 @@ class ClasspathClosure:
 
     entries: tuple[ClasspathEntry, ...]
     class_output: Path
+    runtime_classpath_sha256: str
     processed_class_count: int
     generator_class_input: Path
     generated_source_root: Path
@@ -114,15 +132,356 @@ class ExecutableIdentity:
 
 
 def sha256_file(path: Path) -> str:
-    """Regular non-symlink file bytes를 SHA-256으로 고정한다."""
+    """단일-link regular inode를 open/fstat한 같은 bytes에서 해시한다."""
 
-    if path.is_symlink() or not path.is_file():
+    return _snapshot_regular_file(path, label=str(path)).sha256
+
+
+def _file_identity_value(
+    identity: tuple[int, int, int, int, int, int, int, int, int],
+) -> dict[str, int]:
+    return {
+        "device": identity[0],
+        "inode": identity[1],
+        "mode": identity[2],
+        "linkCount": identity[3],
+        "uid": identity[4],
+        "gid": identity[5],
+        "size": identity[6],
+        "mtimeNs": identity[7],
+        "ctimeNs": identity[8],
+    }
+
+
+def _snapshot_regular_file(
+    path: Path,
+    *,
+    label: str,
+    retain_payload: bool = True,
+) -> RegularFileSnapshot:
+    """Path race 없이 한 inode의 metadata와 bytes를 함께 capture한다."""
+
+    if (
+        not path.is_absolute()
+        or path.is_symlink()
+        or not path.is_file()
+    ):
         raise PrecompileError(f"UNSAFE_OR_MISSING_FILE:{path}")
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for block in iter(lambda: stream.read(1024 * 1024), b""):
+    try:
+        descriptor = os.open(
+            path,
+            os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+        )
+    except OSError as error:
+        raise PrecompileError(f"UNSAFE_OR_MISSING_FILE:{path}") from error
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+            raise PrecompileError(f"UNSAFE_OR_MISSING_FILE:{path}")
+        chunks: list[bytes] | None = [] if retain_payload else None
+        digest = hashlib.sha256()
+        payload_size = 0
+        while True:
+            block = os.read(descriptor, 1024 * 1024)
+            if not block:
+                break
+            payload_size += len(block)
+            if chunks is not None:
+                chunks.append(block)
             digest.update(block)
-    return digest.hexdigest()
+        after = os.fstat(descriptor)
+        try:
+            path_metadata = os.stat(path, follow_symlinks=False)
+        except OSError as error:
+            raise PrecompileError(f"{label}_IDENTITY_DRIFT") from error
+        if (
+            _stat_identity(before) != _stat_identity(after)
+            or _stat_identity(after) != _stat_identity(path_metadata)
+        ):
+            raise PrecompileError(f"{label}_IDENTITY_DRIFT")
+    finally:
+        os.close(descriptor)
+    payload = b"".join(chunks) if chunks is not None else None
+    if payload_size != after.st_size:
+        raise PrecompileError(f"{label}_IDENTITY_DRIFT")
+    return RegularFileSnapshot(
+        path=path,
+        sha256=digest.hexdigest(),
+        file_identity=_stat_identity(after),
+        payload=payload,
+    )
+
+
+def _verify_regular_file_snapshot(
+    snapshot: RegularFileSnapshot,
+    *,
+    label: str,
+) -> None:
+    """Bytes를 복원한 ABA도 ctime/inode 비교로 post-step에서 거부한다."""
+
+    try:
+        current = _snapshot_regular_file(
+            snapshot.path,
+            label=label,
+            retain_payload=snapshot.payload is not None,
+        )
+    except PrecompileError as error:
+        raise PrecompileError(f"{label}_IDENTITY_DRIFT") from error
+    if (
+        current.sha256 != snapshot.sha256
+        or current.file_identity != snapshot.file_identity
+        or (
+            snapshot.payload is not None
+            and current.payload != snapshot.payload
+        )
+    ):
+        raise PrecompileError(f"{label}_IDENTITY_DRIFT")
+
+
+def _verify_regular_file_identity(
+    snapshot: RegularFileSnapshot,
+    *,
+    label: str,
+) -> None:
+    """이미 전후 hash된 inode를 재사용할 때 ctime 포함 identity만 재확인한다."""
+
+    path = snapshot.path
+    if not path.is_absolute() or path.is_symlink():
+        raise PrecompileError(f"{label}_IDENTITY_DRIFT")
+    try:
+        descriptor = os.open(
+            path,
+            os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+        )
+    except OSError as error:
+        raise PrecompileError(f"{label}_IDENTITY_DRIFT") from error
+    try:
+        before = os.fstat(descriptor)
+        path_metadata = os.stat(path, follow_symlinks=False)
+        after = os.fstat(descriptor)
+    except OSError as error:
+        raise PrecompileError(f"{label}_IDENTITY_DRIFT") from error
+    finally:
+        os.close(descriptor)
+    if (
+        not stat.S_ISREG(before.st_mode)
+        or before.st_nlink != 1
+        or _stat_identity(before) != snapshot.file_identity
+        or _stat_identity(after) != snapshot.file_identity
+        or _stat_identity(path_metadata) != snapshot.file_identity
+    ):
+        raise PrecompileError(f"{label}_IDENTITY_DRIFT")
+
+
+def _regular_file_gate_value(
+    snapshot: RegularFileSnapshot,
+) -> dict[str, Any]:
+    """상위 qualification gate가 child에 넘길 immutable file snapshot이다."""
+
+    owner_pid = os.getpid()
+    owner_start_time, _ = _proc_identity(owner_pid)
+    owner_script = Path(__file__).with_name(
+        "run_profile_qualification.py"
+    ).resolve(strict=True)
+    return {
+        "schemaVersion": "s1.4x-regular-file-gate-snapshot-v1",
+        "path": str(snapshot.path),
+        "sha256": snapshot.sha256,
+        "fileIdentity": _file_identity_value(snapshot.file_identity),
+        "ownerProcess": {
+            "pid": owner_pid,
+            "startTimeTicks": owner_start_time,
+            "uid": os.getuid(),
+            "scriptPath": str(owner_script),
+            "scriptSha256": sha256_file(owner_script),
+        },
+    }
+
+
+def _proc_identity(pid: int) -> tuple[int, int]:
+    """Linux proc stat에서 process start tick과 parent PID를 읽는다."""
+
+    try:
+        raw = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+        fields = raw[raw.rindex(")") + 2 :].split()
+        start_time = int(fields[19])
+        parent_pid = int(fields[1])
+    except (OSError, UnicodeError, ValueError, IndexError) as error:
+        raise PrecompileError("JDK_MODULES_GATE_OWNER_INVALID") from error
+    if start_time <= 0 or parent_pid < 0:
+        raise PrecompileError("JDK_MODULES_GATE_OWNER_INVALID")
+    return start_time, parent_pid
+
+
+def _require_gate_owner(owner: Any) -> None:
+    """Gate owner가 현재 child의 실제 qualification ancestor인지 검증한다."""
+
+    expected_script = Path(__file__).with_name(
+        "run_profile_qualification.py"
+    ).resolve(strict=True)
+    if (
+        not isinstance(owner, dict)
+        or set(owner)
+        != {
+            "pid",
+            "startTimeTicks",
+            "uid",
+            "scriptPath",
+            "scriptSha256",
+        }
+        or type(owner.get("pid")) is not int
+        or owner["pid"] <= 1
+        or type(owner.get("startTimeTicks")) is not int
+        or type(owner.get("uid")) is not int
+        or owner["uid"] != os.getuid()
+        or owner.get("scriptPath") != str(expected_script)
+        or SHA256_PATTERN.fullmatch(
+            str(owner.get("scriptSha256"))
+        )
+        is None
+        or sha256_file(expected_script) != owner["scriptSha256"]
+    ):
+        raise PrecompileError("JDK_MODULES_GATE_OWNER_INVALID")
+    current = os.getppid()
+    ancestors: set[int] = set()
+    while current > 1 and current not in ancestors:
+        ancestors.add(current)
+        start_time, parent = _proc_identity(current)
+        if current == owner["pid"]:
+            try:
+                command_line = Path(
+                    f"/proc/{current}/cmdline"
+                ).read_bytes().split(b"\x00")
+                owner_executable = os.stat(
+                    f"/proc/{current}/exe",
+                    follow_symlinks=True,
+                )
+                current_executable = os.stat(
+                    "/proc/self/exe",
+                    follow_symlinks=True,
+                )
+            except OSError as error:
+                raise PrecompileError(
+                    "JDK_MODULES_GATE_OWNER_INVALID"
+                ) from error
+            if (
+                start_time != owner["startTimeTicks"]
+                or len(command_line) < 5
+                or command_line[1:5]
+                != [
+                    b"-E",
+                    b"-s",
+                    b"-S",
+                    str(expected_script).encode("utf-8"),
+                ]
+                or (
+                    owner_executable.st_dev,
+                    owner_executable.st_ino,
+                    owner_executable.st_mode,
+                    owner_executable.st_uid,
+                    owner_executable.st_gid,
+                )
+                != (
+                    current_executable.st_dev,
+                    current_executable.st_ino,
+                    current_executable.st_mode,
+                    current_executable.st_uid,
+                    current_executable.st_gid,
+                )
+            ):
+                raise PrecompileError(
+                    "JDK_MODULES_GATE_OWNER_INVALID"
+                )
+            return
+        current = parent
+    raise PrecompileError("JDK_MODULES_GATE_OWNER_INVALID")
+
+
+def _jdk_modules_snapshot(
+    path: Path,
+    *,
+    label: str,
+) -> RegularFileSnapshot:
+    """Qualification parent snapshot이 있으면 content 재해시 없이 identity만 검증한다."""
+
+    raw_gate = os.environ.get(JDK_MODULES_GATE_SNAPSHOT_VARIABLE)
+    if raw_gate is None:
+        return _snapshot_regular_file(
+            path,
+            label=label,
+            retain_payload=False,
+        )
+    if os.environ.get("S1_4X_BENCHMARK_RUN_MODE") != "qualification":
+        raise PrecompileError("JDK_MODULES_GATE_CONTEXT_INVALID")
+    try:
+        gate = json.loads(raw_gate)
+    except (UnicodeError, json.JSONDecodeError) as error:
+        raise PrecompileError("JDK_MODULES_GATE_SNAPSHOT_INVALID") from error
+    identity_value = gate.get("fileIdentity") if isinstance(gate, dict) else None
+    owner_value = gate.get("ownerProcess") if isinstance(gate, dict) else None
+    identity_keys = {
+        "device",
+        "inode",
+        "mode",
+        "linkCount",
+        "uid",
+        "gid",
+        "size",
+        "mtimeNs",
+        "ctimeNs",
+    }
+    if (
+        not isinstance(gate, dict)
+        or set(gate)
+        != {
+            "schemaVersion",
+            "path",
+            "sha256",
+            "fileIdentity",
+            "ownerProcess",
+        }
+        or gate.get("schemaVersion")
+        != "s1.4x-regular-file-gate-snapshot-v1"
+        or gate.get("path") != str(path)
+        or SHA256_PATTERN.fullmatch(str(gate.get("sha256"))) is None
+        or not isinstance(identity_value, dict)
+        or set(identity_value) != identity_keys
+        or any(type(identity_value[key]) is not int for key in identity_keys)
+        or identity_value["linkCount"] != 1
+    ):
+        raise PrecompileError("JDK_MODULES_GATE_SNAPSHOT_INVALID")
+    _require_gate_owner(owner_value)
+    snapshot = RegularFileSnapshot(
+        path=path,
+        sha256=gate["sha256"],
+        file_identity=(
+            identity_value["device"],
+            identity_value["inode"],
+            identity_value["mode"],
+            identity_value["linkCount"],
+            identity_value["uid"],
+            identity_value["gid"],
+            identity_value["size"],
+            identity_value["mtimeNs"],
+            identity_value["ctimeNs"],
+        ),
+        payload=None,
+    )
+    _verify_regular_file_identity(snapshot, label=label)
+    return snapshot
+
+
+def _verify_jdk_modules_snapshot(
+    snapshot: RegularFileSnapshot,
+    *,
+    label: str,
+) -> None:
+    """상위 gate가 content를 소유하면 child는 동일 inode identity만 재확인한다."""
+
+    if os.environ.get(JDK_MODULES_GATE_SNAPSHOT_VARIABLE) is None:
+        _verify_regular_file_snapshot(snapshot, label=label)
+    else:
+        _verify_regular_file_identity(snapshot, label=label)
 
 
 def canonical_sha256(value: Any) -> str:
@@ -177,34 +536,63 @@ def _require_absolute_regular(path: Path, *, label: str) -> Path:
     return path
 
 
-def _path_has_symlink(root: Path, path: Path) -> bool:
-    relative = path.relative_to(root)
-    current = root
-    for part in relative.parts:
-        current = current / part
-        if current.is_symlink():
-            return True
-    return False
-
-
 def _directory_files(root: Path) -> tuple[FileDigest, ...]:
+    try:
+        root_before = _stat_identity(os.stat(root, follow_symlinks=False))
+    except OSError as error:
+        raise PrecompileError(f"DIRECTORY_CLOSURE_INVALID:{root}") from error
     values: list[FileDigest] = []
     for path in root.rglob("*"):
-        if _path_has_symlink(root, path):
+        # pathlib rglob은 기본적으로 directory symlink를 재귀하지 않는다.
+        # 발견된 각 component 자체를 거부하면 같은 ancestor를 매 파일마다
+        # 반복 stat하지 않으면서 closure 밖 우회를 막을 수 있다.
+        if path.is_symlink():
             raise PrecompileError(f"SYMLINK_IN_CLOSURE:{path}")
         if path.is_dir():
             continue
         if not path.is_file():
             raise PrecompileError(f"NON_REGULAR_IN_CLOSURE:{path}")
+        snapshot = _snapshot_regular_file(
+            path,
+            label=f"DIRECTORY_FILE:{path.relative_to(root).as_posix()}",
+        )
+        if snapshot.payload is None:
+            raise PrecompileError(f"DIRECTORY_FILE_PAYLOAD_MISSING:{path}")
         values.append(
             FileDigest(
                 relative_path=path.relative_to(root).as_posix(),
-                sha256=sha256_file(path),
+                sha256=snapshot.sha256,
+                file_identity=snapshot.file_identity,
+                payload=snapshot.payload,
             )
         )
-    return tuple(
+    result = tuple(
         sorted(values, key=lambda item: item.relative_path.encode("utf-8"))
     )
+    for item in result:
+        path = root / item.relative_path
+        try:
+            current = os.stat(path, follow_symlinks=False)
+        except OSError as error:
+            raise PrecompileError(
+                f"DIRECTORY_FILE:{item.relative_path}_IDENTITY_DRIFT"
+            ) from error
+        # Capture 때의 content hash와 open/fstat identity에 ctime을 포함했으므로,
+        # scan 말미의 exact stat 비교가 bytes 복원형 ABA도 거부한다.
+        if (
+            path.is_symlink()
+            or _stat_identity(current) != item.file_identity
+        ):
+            raise PrecompileError(
+                f"DIRECTORY_FILE:{item.relative_path}_IDENTITY_DRIFT"
+            )
+    try:
+        root_after = _stat_identity(os.stat(root, follow_symlinks=False))
+    except OSError as error:
+        raise PrecompileError(f"DIRECTORY_CLOSURE_INVALID:{root}") from error
+    if root_before != root_after:
+        raise PrecompileError(f"DIRECTORY_CLOSURE_IDENTITY_DRIFT:{root}")
+    return result
 
 
 def _file_digest_values(
@@ -214,6 +602,22 @@ def _file_digest_values(
         {"path": item.relative_path, "sha256": item.sha256}
         for item in values
     ]
+
+
+def _file_identity_values(
+    values: Sequence[FileDigest],
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "path": item.relative_path,
+            "fileIdentity": _file_identity_value(item.file_identity),
+        }
+        for item in values
+    ]
+
+
+def _file_identity_sha256(values: Sequence[FileDigest]) -> str:
+    return canonical_sha256(_file_identity_values(values))
 
 
 def generated_source_closure(workspace: Path) -> GeneratedSourceClosure:
@@ -243,26 +647,106 @@ def generated_source_closure(workspace: Path) -> GeneratedSourceClosure:
 def generated_source_closure_at(
     root: Path,
     *,
-    workspace: Path,
+    workspace: Path | None = None,
+    evidence_dir: Path | None = None,
 ) -> GeneratedSourceClosure:
     """Receipt가 지목한 한 generated-Java root의 exact set을 검증한다."""
 
-    workspace = _require_absolute_directory(workspace, label="SCALA_WORKSPACE")
     root = _require_absolute_directory(
         root,
         label="GENERATED_SOURCE_ROOT",
     )
-    if (
-        not root.is_relative_to(workspace / ".scala-build")
+    workspace_root: Path | None = None
+    if workspace is not None:
+        workspace_root = _require_absolute_directory(
+            workspace,
+            label="SCALA_WORKSPACE",
+        )
+    evidence_root: Path | None = None
+    if evidence_dir is not None:
+        evidence_root = _require_absolute_directory(
+            evidence_dir,
+            label="EVIDENCE_ROOT",
+        )
+    if (workspace_root is None) == (evidence_root is None):
+        raise PrecompileError("GENERATED_SOURCE_ROOT_CLOSURE_MISMATCH")
+    if workspace_root is not None and (
+        not root.is_relative_to(workspace_root / ".scala-build")
         or root.name != "sources"
         or not root.parent.name.endswith("_jmh")
+    ):
+        raise PrecompileError("GENERATED_SOURCE_ROOT_CLOSURE_MISMATCH")
+    if (
+        evidence_root is not None
+        and root != evidence_root / GENERATED_SOURCES_NAME
     ):
         raise PrecompileError("GENERATED_SOURCE_ROOT_CLOSURE_MISMATCH")
     files = _directory_files(root)
     actual = tuple(item.relative_path for item in files)
     if actual != expected_generated_source_paths():
         raise PrecompileError("GENERATED_SOURCE_CLOSURE_MISMATCH")
+    _validate_generated_source_contents(files)
     return GeneratedSourceClosure(root=root, files=files)
+
+
+def _validate_generated_source_contents(
+    files: Sequence[FileDigest],
+) -> None:
+    """Filename-only fixture가 아니라 JMH generator Java shape인지 확인한다."""
+
+    for item in files:
+        try:
+            text = item.payload.decode("utf-8")
+        except UnicodeError as error:
+            raise PrecompileError(
+                "GENERATED_SOURCE_CONTENT_INVALID"
+            ) from error
+        relative = Path(item.relative_path)
+        package_name = ".".join(relative.parent.parts)
+        class_name = relative.stem
+        declaration = re.search(
+            rf"\bpublic\s+(?:final\s+)?class\s+{re.escape(class_name)}\b",
+            text,
+        )
+        if (
+            "\x00" in text
+            or "\r" in text
+            or not text.startswith(f"package {package_name};\n")
+            or declaration is None
+            or (
+                class_name.endswith("_benchmark_jmhTest")
+                and (
+                    "org.openjdk.jmh" not in text
+                    or f"public final class {class_name}" not in text
+                )
+            )
+        ):
+            raise PrecompileError("GENERATED_SOURCE_CONTENT_INVALID")
+
+
+def _copy_generated_sources(
+    source: GeneratedSourceClosure,
+    *,
+    evidence_dir: Path,
+) -> GeneratedSourceClosure:
+    """Generator bytes를 exclusive evidence tree로 복제해 javac 입력을 보존한다."""
+
+    destination = evidence_dir / GENERATED_SOURCES_NAME
+    if destination.exists() or destination.is_symlink():
+        raise PrecompileError("GENERATED_SOURCE_OUTPUT_ALREADY_EXISTS")
+    destination.mkdir()
+    for item in source.files:
+        output = destination / item.relative_path
+        output.parent.mkdir(parents=True, exist_ok=True)
+        with output.open("xb") as stream:
+            stream.write(item.payload)
+    copied = generated_source_closure_at(
+        destination,
+        evidence_dir=evidence_dir,
+    )
+    if _file_digest_values(copied.files) != _file_digest_values(source.files):
+        raise PrecompileError("GENERATED_SOURCE_COPY_DRIFT")
+    return copied
 
 
 def _portable_path_id(
@@ -272,6 +756,8 @@ def _portable_path_id(
     coursier_cache: Path,
     evidence_dir: Path,
 ) -> str:
+    if path == evidence_dir / GENERATED_SOURCES_NAME:
+        return f"EVIDENCE_ROOT/{GENERATED_SOURCES_NAME}"
     if path == evidence_dir / GENERATED_CLASSES_NAME:
         return f"EVIDENCE_ROOT/{GENERATED_CLASSES_NAME}"
     if path.is_relative_to(workspace):
@@ -281,12 +767,23 @@ def _portable_path_id(
     raise PrecompileError(f"CLASSPATH_ENTRY_OUTSIDE_SEALED_ROOTS:{path}")
 
 
-def _entry_digest(path: Path) -> tuple[str, str]:
+def _entry_digest(path: Path) -> tuple[str, str, str]:
     if path.is_file() and not path.is_symlink():
-        return "file", sha256_file(path)
+        snapshot = _snapshot_regular_file(path, label=f"CLASSPATH_FILE:{path}")
+        return (
+            "file",
+            snapshot.sha256,
+            canonical_sha256(_file_identity_value(snapshot.file_identity)),
+        )
     if path.is_dir() and not path.is_symlink():
-        files = _file_digest_values(_directory_files(path))
-        return "directory", canonical_sha256(files)
+        closure = _directory_files(path)
+        files = _file_digest_values(closure)
+        identity = _file_identity_values(closure)
+        return (
+            "directory",
+            canonical_sha256(files),
+            canonical_sha256(identity),
+        )
     raise PrecompileError(f"CLASSPATH_ENTRY_INVALID:{path}")
 
 
@@ -373,6 +870,7 @@ def classpath_closure(
     workspace: Path,
     coursier_cache: Path,
     evidence_dir: Path,
+    allow_trailing: bool = False,
 ) -> ClasspathClosure:
     """Scala CLI generator 2행과 printed classpath의 exact closure를 고정한다."""
 
@@ -386,9 +884,12 @@ def classpath_closure(
         label="EVIDENCE_ROOT",
     )
     lines = raw.splitlines()
-    if len(lines) != 3:
+    if len(lines) < 3 or (not allow_trailing and len(lines) != 3):
         raise PrecompileError("JMH_GENERATOR_STDOUT_INVALID")
-    generator = generator_output_closure(raw, workspace=workspace)
+    generator = generator_output_closure(
+        "\n".join(lines[:2]) + "\n",
+        workspace=workspace,
+    )
 
     raw_paths = lines[2].split(os.pathsep)
     if not raw_paths or any(not item for item in raw_paths):
@@ -410,13 +911,14 @@ def classpath_closure(
             coursier_cache=coursier_cache,
             evidence_dir=evidence_dir,
         )
-        kind, digest = _entry_digest(path)
+        kind, digest, identity_sha256 = _entry_digest(path)
         entries.append(
             ClasspathEntry(
                 path=path,
                 path_id=path_id,
                 kind=kind,
                 sha256=digest,
+                identity_sha256=identity_sha256,
             )
         )
         if (
@@ -450,6 +952,9 @@ def classpath_closure(
     return ClasspathClosure(
         entries=tuple(entries),
         class_output=class_outputs[0],
+        runtime_classpath_sha256=hashlib.sha256(
+            lines[2].encode("utf-8")
+        ).hexdigest(),
         processed_class_count=generator.processed_class_count,
         generator_class_input=generator.generator_class_input,
         generated_source_root=generator.generated_source_root,
@@ -461,6 +966,92 @@ def classpath_closure(
             generator.generated_resource_root_sha256
         ),
     )
+
+
+def require_matching_classpath(
+    expected: ClasspathClosure,
+    actual: ClasspathClosure,
+) -> None:
+    """Actual JMH stdout의 ordered entries와 class output을 compile과 결속한다."""
+
+    expected_values = [
+        (
+            item.path_id,
+            item.kind,
+            item.sha256,
+            item.identity_sha256,
+        )
+        for item in expected.entries
+    ]
+    actual_values = [
+        (
+            item.path_id,
+            item.kind,
+            item.sha256,
+            item.identity_sha256,
+        )
+        for item in actual.entries
+    ]
+    if (
+        actual_values != expected_values
+        or actual.class_output != expected.class_output
+        or actual.runtime_classpath_sha256
+        != expected.runtime_classpath_sha256
+        or actual.processed_class_count != expected.processed_class_count
+        or actual.generator_class_input != expected.generator_class_input
+        or actual.generated_source_root != expected.generated_source_root
+        or actual.generated_resource_root != expected.generated_resource_root
+        or actual.generator_class_input_sha256
+        != expected.generator_class_input_sha256
+        or actual.generated_resource_root_sha256
+        != expected.generated_resource_root_sha256
+    ):
+        raise PrecompileError("JMH_RUN_CLASSPATH_DRIFT")
+
+
+def require_jmh_stdout_binding(
+    compile_raw: str,
+    jmh_raw: str,
+) -> str:
+    """Actual stdout의 generator 2행을 compile log에, fork classpath를 hash에 묶는다."""
+
+    if (
+        "\x00" in compile_raw
+        or "\r" in compile_raw
+        or "\x00" in jmh_raw
+        or "\r" in jmh_raw
+    ):
+        raise PrecompileError("JMH_RUN_STDOUT_BINDING_INVALID")
+    compile_lines = compile_raw.splitlines()
+    jmh_lines = jmh_raw.splitlines()
+    if (
+        len(compile_lines) != 3
+        or not compile_raw.endswith("\n")
+        or len(jmh_lines) < 3
+        or tuple(jmh_lines[:2]) != tuple(compile_lines[:2])
+        or jmh_lines[2] != "# JMH version: 1.37"
+    ):
+        raise PrecompileError("JMH_RUN_STDOUT_BINDING_INVALID")
+    return hashlib.sha256(compile_lines[2].encode("utf-8")).hexdigest()
+
+
+def require_runtime_classpath_evidence(
+    expected_sha256: str,
+    forks: Any,
+) -> None:
+    """모든 실제 fork의 java.class.path hash를 compile classpath line에 결속한다."""
+
+    if (
+        SHA256_PATTERN.fullmatch(expected_sha256) is None
+        or not isinstance(forks, list)
+        or not forks
+        or any(
+            not isinstance(fork, dict)
+            or fork.get("runtimeClasspathSha256") != expected_sha256
+            for fork in forks
+        )
+    ):
+        raise PrecompileError("JMH_RUN_CLASSPATH_DRIFT")
 
 
 def _path_from_id(
@@ -483,7 +1074,11 @@ def _path_from_id(
             path = root / relative
             if (
                 prefix == "EVIDENCE_ROOT/"
-                and relative != Path(GENERATED_CLASSES_NAME)
+                and relative
+                not in {
+                    Path(GENERATED_SOURCES_NAME),
+                    Path(GENERATED_CLASSES_NAME),
+                }
             ):
                 raise PrecompileError("CLASSPATH_POST_RUN_DRIFT")
             if (
@@ -520,10 +1115,15 @@ def verify_classpath_entries(
     for item in values:
         if (
             not isinstance(item, dict)
-            or set(item) != {"pathId", "kind", "sha256"}
+            or set(item)
+            != {"pathId", "kind", "sha256", "identitySha256"}
             or item.get("kind") not in {"file", "directory"}
             or not isinstance(item.get("pathId"), str)
             or item["pathId"] in seen
+            or SHA256_PATTERN.fullmatch(
+                str(item.get("identitySha256"))
+            )
+            is None
         ):
             raise PrecompileError("CLASSPATH_POST_RUN_DRIFT")
         seen.add(item["pathId"])
@@ -533,12 +1133,14 @@ def verify_classpath_entries(
             coursier_cache=coursier_cache,
             evidence_dir=evidence_dir,
         )
-        kind, digest = _entry_digest(path)
+        kind, digest, identity_sha256 = _entry_digest(path)
         if kind != item["kind"] or digest != item.get("sha256"):
             raise PrecompileError("CLASSPATH_POST_RUN_DRIFT")
+        if identity_sha256 != item["identitySha256"]:
+            raise PrecompileError("CLASSPATH_POST_RUN_IDENTITY_DRIFT")
 
 
-def _strict_json(path: Path) -> dict[str, Any]:
+def _strict_json_value(path: Path) -> Any:
     def unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
         value: dict[str, Any] = {}
         for key, item in pairs:
@@ -547,13 +1149,17 @@ def _strict_json(path: Path) -> dict[str, Any]:
             value[key] = item
         return value
 
-    parsed = json.loads(
+    return json.loads(
         path.read_text(encoding="utf-8"),
         object_pairs_hook=unique_object,
         parse_constant=lambda value: (_ for _ in ()).throw(
             PrecompileError(f"NONFINITE_JSON:{value}")
         ),
     )
+
+
+def _strict_json(path: Path) -> dict[str, Any]:
+    parsed = _strict_json_value(path)
     if not isinstance(parsed, dict):
         raise PrecompileError(f"JSON_OBJECT_REQUIRED:{path}")
     return parsed
@@ -822,7 +1428,7 @@ def _portable_javac_argv(
             portable.append("SCALA_COMPILE_CLASSPATH")
         elif item.startswith(f"{source_root}/"):
             portable.append(
-                f"SCALA_WORKSPACE_GENERATED/"
+                f"EVIDENCE_ROOT_GENERATED/"
                 f"{item.removeprefix(f'{source_root}/')}"
             )
         else:
@@ -887,6 +1493,16 @@ def _generated_class_closure(destination: Path) -> tuple[FileDigest, ...]:
         )
     ):
         raise PrecompileError("GENERATED_CLASS_CLOSURE_INVALID")
+    for item in files:
+        internal_name = item.relative_path.removesuffix(".class").encode(
+            "utf-8"
+        )
+        if (
+            len(item.payload) < 8
+            or item.payload[:8] != b"\xca\xfe\xba\xbe\x00\x00\x00\x45"
+            or internal_name not in item.payload
+        ):
+            raise PrecompileError("GENERATED_CLASS_MAGIC_INVALID")
     relative_paths = {item.relative_path for item in files}
     for source in expected_generated_source_paths():
         expected_class = f"{source.removesuffix('.java')}.class"
@@ -955,13 +1571,17 @@ def precompile(arguments: argparse.Namespace) -> dict[str, Any]:
         label="JAVAC",
     )
     jdk_modules = arguments.javac_binary.parent.parent / "lib/modules"
+    jdk_modules_snapshot = _jdk_modules_snapshot(
+        jdk_modules,
+        label="JDK_MODULES",
+    )
     if (
         jdk_modules_path_id != "TEMURIN_25_0_3_9_LTS/lib/modules"
         or not jdk_modules.is_absolute()
         or jdk_modules.is_symlink()
         or not jdk_modules.is_file()
         or jdk_modules.resolve(strict=True) != jdk_modules
-        or sha256_file(jdk_modules) != jdk_modules_sha256
+        or jdk_modules_snapshot.sha256 != jdk_modules_sha256
     ):
         raise PrecompileError("JDK_MODULES_IDENTITY_MISMATCH")
     sources = _load_sources(
@@ -1026,15 +1646,23 @@ def precompile(arguments: argparse.Namespace) -> dict[str, Any]:
         label="SCALA_CLI_1_15_0",
     )
     _verify_executable_stability(javac_identity, label="JAVAC")
+    _verify_regular_file_identity(
+        jdk_modules_snapshot,
+        label="JDK_MODULES",
+    )
     classpath = classpath_closure(
         stdout_path.read_text(encoding="utf-8"),
         workspace=workspace,
         coursier_cache=coursier_cache,
         evidence_dir=evidence_dir,
     )
-    generated_sources = generated_source_closure_at(
+    workspace_generated_sources = generated_source_closure_at(
         classpath.generated_source_root,
         workspace=workspace,
+    )
+    generated_sources = _copy_generated_sources(
+        workspace_generated_sources,
+        evidence_dir=evidence_dir,
     )
     if _directory_files(destination):
         raise PrecompileError("GENERATED_CLASS_OUTPUT_PRE_JAVAC_DRIFT")
@@ -1059,21 +1687,48 @@ def precompile(arguments: argparse.Namespace) -> dict[str, Any]:
     if javac_exit != 0:
         raise PrecompileError(f"PINNED_JAVAC_FAILED:{javac_exit}")
     _verify_executable_stability(javac_identity, label="JAVAC")
+    _verify_regular_file_identity(
+        jdk_modules_snapshot,
+        label="JDK_MODULES",
+    )
+    if (
+        generated_source_closure_at(
+            workspace_generated_sources.root,
+            workspace=workspace,
+        )
+        != workspace_generated_sources
+        or generated_source_closure_at(
+            generated_sources.root,
+            evidence_dir=evidence_dir,
+        )
+        != generated_sources
+    ):
+        raise PrecompileError("GENERATED_SOURCE_DURING_JAVAC_DRIFT")
     generated_classes = _generated_class_closure(destination)
     if sha256_file(arguments.javac_binary) != javac_sha256:
         raise PrecompileError("JAVAC_BINARY_POST_EXEC_IDENTITY_MISMATCH")
-    if sha256_file(jdk_modules) != jdk_modules_sha256:
-        raise PrecompileError("JDK_MODULES_POST_EXEC_IDENTITY_MISMATCH")
+    try:
+        _verify_jdk_modules_snapshot(
+            jdk_modules_snapshot,
+            label="JDK_MODULES",
+        )
+    except PrecompileError as error:
+        raise PrecompileError(
+            "JDK_MODULES_POST_EXEC_IDENTITY_MISMATCH"
+        ) from error
     # javac이 외부 directory를 채운 뒤의 최종 bytes를 receipt classpath에
     # 기록해야 post-run 검증이 의도된 변경을 drift로 오인하지 않는다.
     refreshed_entries: list[ClasspathEntry] = []
     for item in classpath.entries:
-        entry_kind, entry_sha256 = _entry_digest(item.path)
+        entry_kind, entry_sha256, identity_sha256 = _entry_digest(item.path)
         if (
             entry_kind != item.kind
             or (
                 item.path != destination
-                and entry_sha256 != item.sha256
+                and (
+                    entry_sha256 != item.sha256
+                    or identity_sha256 != item.identity_sha256
+                )
             )
         ):
             raise PrecompileError("CLASSPATH_DURING_JAVAC_DRIFT")
@@ -1083,6 +1738,7 @@ def precompile(arguments: argparse.Namespace) -> dict[str, Any]:
                 path_id=item.path_id,
                 kind=entry_kind,
                 sha256=entry_sha256,
+                identity_sha256=identity_sha256,
             )
         )
     final_classpath_entries = tuple(refreshed_entries)
@@ -1104,6 +1760,7 @@ def precompile(arguments: argparse.Namespace) -> dict[str, Any]:
             "pathId": item.path_id,
             "kind": item.kind,
             "sha256": item.sha256,
+            "identitySha256": item.identity_sha256,
         }
         for item in final_classpath_entries
     ]
@@ -1125,11 +1782,16 @@ def precompile(arguments: argparse.Namespace) -> dict[str, Any]:
             "executionPathId": javac_execution_id,
             "jdkModulesPathId": jdk_modules_path_id,
             "jdkModulesSha256": jdk_modules_sha256,
+            "jdkModulesFileIdentity": _file_identity_value(
+                jdk_modules_snapshot.file_identity
+            ),
         },
         "scalaCompile": {
             "portableArgv": compile_portable,
             "portableArgvSha256": canonical_sha256(compile_portable),
-            "runtimeArgvSha256": canonical_sha256(compile_command),
+            "runtimeArgvSha256": canonical_sha256(
+                [scala_cli_execution_id, *compile_portable[1:]]
+            ),
             "stdoutSha256": sha256_file(stdout_path),
             "stderrSha256": sha256_file(stderr_path),
             "exitCode": compile_exit,
@@ -1164,13 +1826,16 @@ def precompile(arguments: argparse.Namespace) -> dict[str, Any]:
             ),
         },
         "generatedSourceRootPathId": (
-            f"SCALA_WORKSPACE/"
-            f"{generated_sources.root.relative_to(workspace).as_posix()}"
+            f"EVIDENCE_ROOT/{GENERATED_SOURCES_NAME}"
         ),
         "generatedSources": source_values,
         "generatedSourcesSha256": canonical_sha256(source_values),
+        "generatedSourcesIdentitySha256": _file_identity_sha256(
+            generated_sources.files
+        ),
         "classpathEntries": classpath_values,
         "classpathEntriesSha256": canonical_sha256(classpath_values),
+        "runtimeClasspathSha256": classpath.runtime_classpath_sha256,
         "scalaClassOutputPathId": _portable_path_id(
             classpath.class_output,
             workspace=workspace,
@@ -1182,10 +1847,15 @@ def precompile(arguments: argparse.Namespace) -> dict[str, Any]:
         ),
         "generatedClasses": class_values,
         "generatedClassesSha256": canonical_sha256(class_values),
+        "generatedClassesIdentitySha256": _file_identity_sha256(
+            generated_classes
+        ),
         "javacProcess": {
             "portableArgv": javac_portable,
             "portableArgvSha256": canonical_sha256(javac_portable),
-            "runtimeArgvSha256": canonical_sha256(javac_command),
+            "runtimeArgvSha256": canonical_sha256(
+                [javac_execution_id, *javac_portable[1:]]
+            ),
             "stdoutSha256": sha256_file(javac_stdout),
             "stderrSha256": sha256_file(javac_stderr),
             "exitCode": javac_exit,
@@ -1227,6 +1897,14 @@ def verify(arguments: argparse.Namespace) -> dict[str, Any]:
         arguments.jmh_stdout,
         label="JMH_STDOUT",
     )
+    compile_stdout = _require_absolute_regular(
+        evidence_dir / SCALA_COMPILE_STDOUT,
+        label="SCALA_COMPILE_STDOUT",
+    )
+    fork_evidence_path = _require_absolute_regular(
+        arguments.fork_evidence,
+        label="JVM_FORK_EVIDENCE",
+    )
     receipt_path = _require_absolute_regular(
         evidence_dir / RECEIPT_NAME,
         label="PRECOMPILE_RECEIPT",
@@ -1250,6 +1928,7 @@ def verify(arguments: argparse.Namespace) -> dict[str, Any]:
             "executionPathId",
             "jdkModulesPathId",
             "jdkModulesSha256",
+            "jdkModulesFileIdentity",
         }
         or javac.get("pathId") != "TEMURIN_25_0_3_9_LTS/bin/javac"
         or javac.get("jdkModulesPathId")
@@ -1266,12 +1945,18 @@ def verify(arguments: argparse.Namespace) -> dict[str, Any]:
         label="JAVAC",
     )
     modules = arguments.javac_binary.parent.parent / "lib/modules"
+    modules_snapshot = _jdk_modules_snapshot(
+        modules,
+        label="JDK_MODULES",
+    )
     if (
         javac.get("executionPathId") != javac_execution_id
         or modules.is_symlink()
         or not modules.is_file()
         or modules.resolve(strict=True) != modules
-        or sha256_file(modules) != javac["jdkModulesSha256"]
+        or modules_snapshot.sha256 != javac["jdkModulesSha256"]
+        or _file_identity_value(modules_snapshot.file_identity)
+        != javac.get("jdkModulesFileIdentity")
     ):
         raise PrecompileError("JDK_COMPILER_POST_RUN_DRIFT")
     try:
@@ -1290,13 +1975,15 @@ def verify(arguments: argparse.Namespace) -> dict[str, Any]:
     )
     sources = generated_source_closure_at(
         generated_source_root,
-        workspace=workspace,
+        evidence_dir=evidence_dir,
     )
     source_values = _file_digest_values(sources.files)
     if (
         receipt.get("generatedSources") != source_values
         or receipt.get("generatedSourcesSha256")
         != canonical_sha256(source_values)
+        or receipt.get("generatedSourcesIdentitySha256")
+        != _file_identity_sha256(sources.files)
     ):
         raise PrecompileError("GENERATED_SOURCE_POST_RUN_DRIFT")
 
@@ -1304,13 +1991,16 @@ def verify(arguments: argparse.Namespace) -> dict[str, Any]:
         evidence_dir / GENERATED_CLASSES_NAME,
         label="GENERATED_CLASS_OUTPUT",
     )
-    class_values = _file_digest_values(_generated_class_closure(destination))
+    generated_class_closure = _generated_class_closure(destination)
+    class_values = _file_digest_values(generated_class_closure)
     if (
         receipt.get("generatedClassOutputPathId")
         != f"EVIDENCE_ROOT/{GENERATED_CLASSES_NAME}"
         or receipt.get("generatedClasses") != class_values
         or receipt.get("generatedClassesSha256")
         != canonical_sha256(class_values)
+        or receipt.get("generatedClassesIdentitySha256")
+        != _file_identity_sha256(generated_class_closure)
     ):
         raise PrecompileError("GENERATED_CLASS_POST_RUN_DRIFT")
 
@@ -1363,12 +2053,21 @@ def verify(arguments: argparse.Namespace) -> dict[str, Any]:
         }
         or generator.get("generatorId") != "reflection"
         or generator.get("processedClassCount") != 147
-        or generator.get("generatedSourceRootPathId")
-        != generated_source_root_id
+        or not str(generator.get("generatedSourceRootPathId", "")).startswith(
+            "SCALA_WORKSPACE/.scala-build/"
+        )
+        or generated_source_root_id
+        != f"EVIDENCE_ROOT/{GENERATED_SOURCES_NAME}"
     ):
         raise PrecompileError("JMH_GENERATOR_POST_RUN_DRIFT")
+    compile_raw = compile_stdout.read_text(encoding="utf-8")
+    jmh_raw = jmh_stdout.read_text(encoding="utf-8")
+    stdout_runtime_classpath_sha256 = require_jmh_stdout_binding(
+        compile_raw,
+        jmh_raw,
+    )
     actual_generator = generator_output_closure(
-        jmh_stdout.read_text(encoding="utf-8"),
+        jmh_raw,
         workspace=workspace,
     )
     actual_generator_values = {
@@ -1407,6 +2106,64 @@ def verify(arguments: argparse.Namespace) -> dict[str, Any]:
     )
     if _file_digest_values(actual_sources.files) != source_values:
         raise PrecompileError("GENERATED_SOURCE_POST_RUN_DRIFT")
+
+    actual_classpath = classpath_closure(
+        compile_raw,
+        workspace=workspace,
+        coursier_cache=coursier_cache,
+        evidence_dir=evidence_dir,
+    )
+    actual_classpath_values = [
+        {
+            "pathId": item.path_id,
+            "kind": item.kind,
+            "sha256": item.sha256,
+            "identitySha256": item.identity_sha256,
+        }
+        for item in actual_classpath.entries
+    ]
+    expected_classpath_values = receipt.get("classpathEntries")
+    if len(actual_classpath_values) != len(expected_classpath_values):
+        raise PrecompileError("JMH_RUN_CLASSPATH_DRIFT")
+    for expected_item, actual_item in zip(
+        expected_classpath_values,
+        actual_classpath_values,
+        strict=True,
+    ):
+        if (
+            expected_item["pathId"] != actual_item["pathId"]
+            or expected_item["kind"] != actual_item["kind"]
+            or expected_item["sha256"] != actual_item["sha256"]
+            or expected_item["identitySha256"]
+            != actual_item["identitySha256"]
+        ):
+            raise PrecompileError("JMH_RUN_CLASSPATH_DRIFT")
+    actual_class_output_id = _portable_path_id(
+        actual_classpath.class_output,
+        workspace=workspace,
+        coursier_cache=coursier_cache,
+        evidence_dir=evidence_dir,
+    )
+    forks = _strict_json_value(fork_evidence_path)
+    if (
+        actual_class_output_id != receipt.get("scalaClassOutputPathId")
+        or receipt.get("runtimeClasspathSha256")
+        != actual_classpath.runtime_classpath_sha256
+        or stdout_runtime_classpath_sha256
+        != actual_classpath.runtime_classpath_sha256
+    ):
+        raise PrecompileError("JMH_RUN_CLASSPATH_DRIFT")
+    require_runtime_classpath_evidence(
+        actual_classpath.runtime_classpath_sha256,
+        forks,
+    )
+    try:
+        _verify_jdk_modules_snapshot(
+            modules_snapshot,
+            label="JDK_MODULES",
+        )
+    except PrecompileError as error:
+        raise PrecompileError("JDK_COMPILER_POST_RUN_DRIFT") from error
 
     return {
         "status": "PASS",
@@ -1499,6 +2256,11 @@ def _parser() -> argparse.ArgumentParser:
     )
     verify_parser.add_argument(
         "--jmh-stdout",
+        type=Path,
+        required=True,
+    )
+    verify_parser.add_argument(
+        "--fork-evidence",
         type=Path,
         required=True,
     )

@@ -58,7 +58,7 @@ mapfile -t profile_options < <(
     "$SCALA_ROOT/compiler-profiles.v1.json"
 )
 mapfile -t benchmark_sources < <(
-  python3 "$SCALA_ROOT/tools/source_input_manifest.py" \
+  python3 -E -s -S "$SCALA_ROOT/tools/source_input_manifest.py" \
     --scala-root "$SCALA_ROOT" \
     --manifest "$SCALA_ROOT/source-inputs.v1.json" \
     --policy "$S1_ROOT/contract/scala-source-policy.v1.json" \
@@ -86,7 +86,7 @@ mkdir -p "$precompiled_classes"
 
 # Helper는 exact `compile --server=false --jmh --print-classpath` 뒤 생성된
 # 30-file Java closure를 pinned javac으로 외부 sealed classes에 컴파일한다.
-python3 "$SCALA_ROOT/tools/precompile_jmh_generated_java.py" precompile \
+python3 -E -s -S "$SCALA_ROOT/tools/precompile_jmh_generated_java.py" precompile \
   --scala-root "$SCALA_ROOT" \
   --workspace "$SCALA_WORKSPACE" \
   --coursier-cache "$COURSIER_CACHE" \

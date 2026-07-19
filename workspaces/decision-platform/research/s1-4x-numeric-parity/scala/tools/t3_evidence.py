@@ -114,6 +114,7 @@ class SealedArtifact:
         payload: bytes,
         identity: tuple[int, int, int, int, int, int],
         label: str,
+        identity_only_postcheck: bool = False,
     ) -> None:
         self.path = path
         self.root = root
@@ -121,6 +122,7 @@ class SealedArtifact:
         self.identity = identity
         self.label = label
         self.sha256 = sha256_bytes(payload)
+        self.identity_only_postcheck = identity_only_postcheck
 
     def json_value(self) -> Any:
         """Path를 재개방하지 않고 capture 당시 bytes만 strict JSON으로 해석한다."""
@@ -152,14 +154,45 @@ class SealedEvidenceSnapshot:
 
     def __init__(self) -> None:
         self._artifacts: dict[Path, SealedArtifact] = {}
+        self._roots: dict[Path, tuple[int, int, int, int, int]] = {}
+        self._regular_files: dict[
+            Path,
+            tuple[jmh_precompile.RegularFileSnapshot, str],
+        ] = {}
+        self._regular_files_content_verified: set[Path] = set()
 
     @staticmethod
-    def _canonical_root(root: Path) -> Path:
+    def _root_identity(value: os.stat_result) -> tuple[int, int, int, int, int]:
+        return (
+            value.st_dev,
+            value.st_ino,
+            value.st_mode,
+            value.st_uid,
+            value.st_gid,
+        )
+
+    def _canonical_root(self, root: Path) -> Path:
+        existing = self._roots.get(root)
+        if existing is not None:
+            try:
+                current = os.stat(root, follow_symlinks=False)
+            except OSError as error:
+                raise T3EvidenceError(
+                    "SEALED_EVIDENCE_ROOT_INVALID"
+                ) from error
+            if (
+                not stat.S_ISDIR(current.st_mode)
+                or self._root_identity(current) != existing
+            ):
+                raise T3EvidenceError("SEALED_EVIDENCE_ROOT_SUBSTITUTED")
+            return root
         if not root.is_absolute() or root.is_symlink() or not root.is_dir():
             raise T3EvidenceError("SEALED_EVIDENCE_ROOT_INVALID")
         resolved = root.resolve(strict=True)
         if resolved != root:
             raise T3EvidenceError("SEALED_EVIDENCE_ROOT_NOT_CANONICAL")
+        metadata = os.stat(root, follow_symlinks=False)
+        self._roots[root] = self._root_identity(metadata)
         return root
 
     @staticmethod
@@ -173,15 +206,35 @@ class SealedEvidenceSnapshot:
             value.st_ctime_ns,
         )
 
-    @classmethod
+    def _pathname_identity(
+        self,
+        path: Path,
+        *,
+        label: str,
+    ) -> tuple[int, int, int, int, int, int]:
+        try:
+            metadata = os.stat(path, follow_symlinks=False)
+        except OSError as error:
+            raise T3EvidenceError(
+                f"SEALED_EVIDENCE_PATH_STAT_FAILED:{label}"
+            ) from error
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_nlink != 1
+        ):
+            raise T3EvidenceError(
+                f"SEALED_EVIDENCE_PATH_NOT_SINGLE_REGULAR:{label}"
+            )
+        return self._identity(metadata)
+
     def _open_lexical(
-        cls,
+        self,
         path: Path,
         *,
         root: Path,
         label: str,
     ) -> tuple[int, tuple[int, int, int, int, int, int]]:
-        canonical_root = cls._canonical_root(root)
+        canonical_root = self._canonical_root(root)
         if not path.is_absolute():
             raise T3EvidenceError(f"SEALED_EVIDENCE_PATH_NOT_ABSOLUTE:{label}")
         try:
@@ -197,6 +250,13 @@ class SealedEvidenceSnapshot:
         file_flags = os.O_RDONLY | os.O_NOFOLLOW
         current = os.open(canonical_root, directory_flags)
         try:
+            if (
+                self._root_identity(os.fstat(current))
+                != self._roots[canonical_root]
+            ):
+                raise T3EvidenceError(
+                    f"SEALED_EVIDENCE_ROOT_SUBSTITUTED:{label}"
+                )
             for component in relative.parts[:-1]:
                 next_directory = os.open(
                     component,
@@ -226,7 +286,7 @@ class SealedEvidenceSnapshot:
             raise T3EvidenceError(
                 f"SEALED_EVIDENCE_NOT_SINGLE_REGULAR:{label}"
             )
-        return descriptor, cls._identity(metadata)
+        return descriptor, self._identity(metadata)
 
     def capture(
         self,
@@ -240,8 +300,28 @@ class SealedEvidenceSnapshot:
         key = path
         existing = self._artifacts.get(key)
         if existing is not None:
+            canonical_root = self._canonical_root(root)
+            try:
+                relative = path.relative_to(canonical_root)
+            except ValueError as error:
+                raise T3EvidenceError(
+                    f"SEALED_EVIDENCE_OUTSIDE_ROOT:{label}"
+                ) from error
+            if (
+                existing.root != canonical_root
+                or not relative.parts
+                or any(part in {"", ".", ".."} for part in relative.parts)
+            ):
+                raise T3EvidenceError(
+                    f"SEALED_EVIDENCE_ROOT_MISMATCH:{label}"
+                )
             return existing
-        descriptor, before = self._open_lexical(path, root=root, label=label)
+        canonical_root = self._canonical_root(root)
+        descriptor, before = self._open_lexical(
+            path,
+            root=canonical_root,
+            label=label,
+        )
         try:
             chunks: list[bytes] = []
             while True:
@@ -252,14 +332,19 @@ class SealedEvidenceSnapshot:
             after = self._identity(os.fstat(descriptor))
         finally:
             os.close(descriptor)
+        path_after = self._pathname_identity(path, label=label)
         payload = b"".join(chunks)
-        if before != after or len(payload) != before[3]:
+        if (
+            before != after
+            or after != path_after
+            or len(payload) != before[3]
+        ):
             raise T3EvidenceError(
                 f"SEALED_EVIDENCE_CHANGED_DURING_CAPTURE:{label}"
             )
         artifact = SealedArtifact(
             path=path,
-            root=root,
+            root=canonical_root,
             payload=payload,
             identity=before,
             label=label,
@@ -269,6 +354,92 @@ class SealedEvidenceSnapshot:
 
     def sha256(self, path: Path, *, root: Path, label: str) -> str:
         return self.capture(path, root=root, label=label).sha256
+
+    def capture_regular_file(
+        self,
+        path: Path,
+        *,
+        label: str,
+    ) -> jmh_precompile.RegularFileSnapshot:
+        """대형 immutable dependency를 gate 전체에서 한 번만 hash해 공유한다."""
+
+        existing = self._regular_files.get(path)
+        if existing is not None:
+            return existing[0]
+        try:
+            captured = jmh_precompile._snapshot_regular_file(
+                path,
+                label=label,
+                retain_payload=False,
+            )
+        except jmh_precompile.PrecompileError as error:
+            raise T3EvidenceError(
+                f"SEALED_REGULAR_FILE_CAPTURE_INVALID:{label}"
+            ) from error
+        self._regular_files[path] = (captured, label)
+        return captured
+
+    def adopt_prevalidated_file(
+        self,
+        path: Path,
+        *,
+        root: Path,
+        label: str,
+        payload: bytes,
+        sha256: str,
+        file_identity: tuple[int, int, int, int, int, int, int, int, int],
+    ) -> SealedArtifact:
+        """open/fstat+hash closure가 이미 검증한 동일 bytes를 중복 재개방 없이 봉인한다."""
+
+        canonical_root = self._canonical_root(root)
+        try:
+            relative = path.relative_to(canonical_root)
+        except ValueError as error:
+            raise T3EvidenceError(
+                f"SEALED_EVIDENCE_OUTSIDE_ROOT:{label}"
+            ) from error
+        if (
+            not relative.parts
+            or any(part in {"", ".", ".."} for part in relative.parts)
+            or path.is_symlink()
+            or file_identity[3] != 1
+            or len(payload) != file_identity[6]
+            or sha256_bytes(payload) != sha256
+        ):
+            raise T3EvidenceError(
+                f"SEALED_EVIDENCE_PREVALIDATED_INVALID:{label}"
+            )
+        identity = (
+            file_identity[0],
+            file_identity[1],
+            file_identity[2],
+            file_identity[6],
+            file_identity[7],
+            file_identity[8],
+        )
+        existing = self._artifacts.get(path)
+        if existing is not None:
+            if (
+                existing.root != canonical_root
+                or not existing.identity_only_postcheck
+                or existing.identity != identity
+                or existing.payload != payload
+                or existing.sha256 != sha256
+            ):
+                raise T3EvidenceError(
+                    f"SEALED_EVIDENCE_PREVALIDATED_DRIFT:{label}"
+                )
+            return existing
+        artifact = SealedArtifact(
+            path=path,
+            root=canonical_root,
+            payload=payload,
+            identity=identity,
+            label=label,
+            identity_only_postcheck=True,
+        )
+        self._artifacts[path] = artifact
+        return artifact
 
     def json_value(self, path: Path, *, root: Path, label: str) -> Any:
         return self.capture(path, root=root, label=label).json_value()
@@ -288,6 +459,27 @@ class SealedEvidenceSnapshot:
                 root=self._root_for(path),
                 label=artifact.label,
             )
+            if artifact.identity_only_postcheck:
+                os.close(descriptor)
+                post_descriptor, post_identity = self._open_lexical(
+                    path,
+                    root=self._root_for(path),
+                    label=artifact.label,
+                )
+                os.close(post_descriptor)
+                pathname_identity = self._pathname_identity(
+                    path,
+                    label=artifact.label,
+                )
+                if (
+                    identity != artifact.identity
+                    or post_identity != artifact.identity
+                    or pathname_identity != artifact.identity
+                ):
+                    raise T3EvidenceError(
+                        f"SEALED_EVIDENCE_PATH_SUBSTITUTED:{artifact.label}"
+                    )
+                continue
             try:
                 digest = hashlib.sha256()
                 size = 0
@@ -299,14 +491,43 @@ class SealedEvidenceSnapshot:
                     digest.update(chunk)
             finally:
                 os.close(descriptor)
+            post_descriptor, post_identity = self._open_lexical(
+                path,
+                root=self._root_for(path),
+                label=artifact.label,
+            )
+            os.close(post_descriptor)
+            pathname_identity = self._pathname_identity(
+                path,
+                label=artifact.label,
+            )
             if (
                 identity != artifact.identity
+                or post_identity != artifact.identity
+                or pathname_identity != artifact.identity
                 or size != len(artifact.payload)
                 or digest.hexdigest() != artifact.sha256
             ):
                 raise T3EvidenceError(
                     f"SEALED_EVIDENCE_PATH_SUBSTITUTED:{artifact.label}"
                 )
+        for path, (captured, label) in self._regular_files.items():
+            try:
+                if path in self._regular_files_content_verified:
+                    jmh_precompile._verify_regular_file_identity(
+                        captured,
+                        label=label,
+                    )
+                else:
+                    jmh_precompile._verify_regular_file_snapshot(
+                        captured,
+                        label=label,
+                    )
+                    self._regular_files_content_verified.add(path)
+            except jmh_precompile.PrecompileError as error:
+                raise T3EvidenceError(
+                    f"SEALED_REGULAR_FILE_CHANGED:{label}"
+                ) from error
 
     def _root_for(self, path: Path) -> Path:
         artifact = self._artifacts[path]
@@ -1228,12 +1449,16 @@ HOST_VALIDITY_CHECK_IDS = {
 def safe_artifact(root: Path, relative: Path) -> Path:
     if not root.is_absolute() or not root.is_dir() or root.is_symlink():
         raise T3EvidenceError("QUALIFICATION_ARTIFACT_ROOT_INVALID")
+    if (
+        relative.is_absolute()
+        or not relative.parts
+        or any(part in {"", ".", ".."} for part in relative.parts)
+    ):
+        raise T3EvidenceError(f"QUALIFICATION_ARTIFACT_MISSING:{relative}")
     candidate = root / relative
-    resolved_root = root.resolve(strict=True)
     if (
         candidate.is_symlink()
         or not candidate.is_file()
-        or not candidate.resolve(strict=True).is_relative_to(resolved_root)
     ):
         raise T3EvidenceError(f"QUALIFICATION_ARTIFACT_MISSING:{relative}")
     return candidate
@@ -1302,6 +1527,175 @@ def validate_measurement_ready_marker(
     return marker_sha256
 
 
+def _classpath_log_binding(
+    raw: str,
+    *,
+    receipt: dict[str, Any],
+    physical_case_root: Path,
+) -> tuple[str, str, str]:
+    """Generator/classpath stdout 3행을 receipt portable path 순서로 해석한다."""
+
+    if "\x00" in raw or "\r" in raw:
+        raise T3EvidenceError("JMH_PRECOMPILE_STDOUT_BINDING_INVALID")
+    lines = raw.splitlines()
+    if len(lines) != 3 or not raw.endswith("\n"):
+        raise T3EvidenceError("JMH_PRECOMPILE_STDOUT_BINDING_INVALID")
+    processing = re.fullmatch(
+        r'Processing ([1-9][0-9]*) classes from (.+) '
+        r'with "reflection" generator',
+        lines[0],
+    )
+    generated = re.fullmatch(
+        r"Writing out Java source to (.+) and resources to (.+)",
+        lines[1],
+    )
+    generator = receipt.get("jmhGenerator")
+    entries = receipt.get("classpathEntries")
+    if (
+        processing is None
+        or generated is None
+        or not isinstance(generator, dict)
+        or not isinstance(entries, list)
+        or int(processing.group(1)) != generator.get("processedClassCount")
+    ):
+        raise T3EvidenceError("JMH_PRECOMPILE_STDOUT_BINDING_INVALID")
+
+    class_input = Path(processing.group(2))
+    source_root = Path(generated.group(1))
+    resource_root = Path(generated.group(2))
+    class_input_id = str(generator.get("classInputPathId", ""))
+    if not class_input_id.startswith("SCALA_WORKSPACE/"):
+        raise T3EvidenceError("JMH_PRECOMPILE_STDOUT_BINDING_INVALID")
+    class_input_relative = Path(
+        class_input_id.removeprefix("SCALA_WORKSPACE/")
+    )
+    if (
+        not class_input.is_absolute()
+        or len(class_input_relative.parts) < 2
+        or tuple(class_input.parts[-len(class_input_relative.parts) :])
+        != class_input_relative.parts
+    ):
+        raise T3EvidenceError("JMH_PRECOMPILE_STDOUT_BINDING_INVALID")
+    workspace = Path(
+        *class_input.parts[: -len(class_input_relative.parts)]
+    )
+    if not workspace.is_absolute():
+        raise T3EvidenceError("JMH_PRECOMPILE_STDOUT_BINDING_INVALID")
+
+    def expected_path(path_id: str, actual: Path) -> tuple[Path, Path | None]:
+        if path_id.startswith("SCALA_WORKSPACE/"):
+            return (
+                workspace / path_id.removeprefix("SCALA_WORKSPACE/"),
+                None,
+            )
+        if path_id.startswith("EVIDENCE_ROOT/"):
+            return (
+                physical_case_root
+                / path_id.removeprefix("EVIDENCE_ROOT/"),
+                None,
+            )
+        if path_id.startswith("COURSIER_CACHE/"):
+            relative = Path(path_id.removeprefix("COURSIER_CACHE/"))
+            if (
+                not actual.is_absolute()
+                or len(actual.parts) <= len(relative.parts)
+                or tuple(actual.parts[-len(relative.parts) :])
+                != relative.parts
+            ):
+                raise T3EvidenceError(
+                    "JMH_PRECOMPILE_STDOUT_BINDING_INVALID"
+                )
+            root = Path(*actual.parts[: -len(relative.parts)])
+            return root / relative, root
+        raise T3EvidenceError("JMH_PRECOMPILE_STDOUT_BINDING_INVALID")
+
+    for actual, field in (
+        (class_input, "classInputPathId"),
+        (source_root, "generatedSourceRootPathId"),
+        (resource_root, "generatedResourceRootPathId"),
+    ):
+        expected, _ = expected_path(str(generator.get(field, "")), actual)
+        if actual != expected:
+            raise T3EvidenceError("JMH_PRECOMPILE_STDOUT_BINDING_INVALID")
+
+    raw_paths = lines[2].split(os.pathsep)
+    if len(raw_paths) != len(entries):
+        raise T3EvidenceError("JMH_PRECOMPILE_STDOUT_BINDING_INVALID")
+    coursier_root: Path | None = None
+    for raw_path, item in zip(raw_paths, entries, strict=True):
+        if not isinstance(item, dict):
+            raise T3EvidenceError("JMH_PRECOMPILE_STDOUT_BINDING_INVALID")
+        actual = Path(raw_path)
+        expected, observed_coursier = expected_path(
+            str(item.get("pathId", "")),
+            actual,
+        )
+        if actual != expected:
+            raise T3EvidenceError("JMH_PRECOMPILE_STDOUT_BINDING_INVALID")
+        if observed_coursier is not None:
+            if coursier_root is None:
+                coursier_root = observed_coursier
+            elif coursier_root != observed_coursier:
+                raise T3EvidenceError(
+                    "JMH_PRECOMPILE_STDOUT_BINDING_INVALID"
+                )
+    return lines[0], lines[1], lines[2]
+
+
+def validate_jmh_stdout_precompile_binding(
+    *,
+    compile_stdout: Path,
+    jmh_stdout: Path,
+    receipt: dict[str, Any],
+    fork_evidence: Any,
+    artifact_root: Path,
+    case_root: Path,
+    snapshot: SealedEvidenceSnapshot,
+) -> None:
+    """Actual JMH stdout의 첫 classpath 3행을 compile log/receipt와 exact 결속한다."""
+
+    compile_artifact = snapshot.capture(
+        compile_stdout,
+        root=artifact_root,
+        label=f"qualification.precompile.stdoutBinding.{case_root}",
+    )
+    jmh_artifact = snapshot.capture(
+        jmh_stdout,
+        root=artifact_root,
+        label=f"qualification.jmh.stdoutBinding.{case_root}",
+    )
+    try:
+        compile_raw = compile_artifact.payload.decode("utf-8")
+        jmh_raw = jmh_artifact.payload.decode("utf-8")
+    except UnicodeError as error:
+        raise T3EvidenceError("JMH_RUN_STDOUT_BINDING_INVALID") from error
+    prefix = _classpath_log_binding(
+        compile_raw,
+        receipt=receipt,
+        physical_case_root=artifact_root / case_root,
+    )
+    jmh_lines = jmh_raw.splitlines()
+    runtime_classpath_sha256 = hashlib.sha256(
+        prefix[2].encode("utf-8")
+    ).hexdigest()
+    if (
+        len(jmh_lines) < 3
+        or tuple(jmh_lines[:2]) != prefix[:2]
+        or jmh_lines[2] != "# JMH version: 1.37"
+        or receipt.get("runtimeClasspathSha256")
+        != runtime_classpath_sha256
+        or not isinstance(fork_evidence, list)
+        or not fork_evidence
+        or any(
+            not isinstance(fork, dict)
+            or fork.get("runtimeClasspathSha256")
+            != runtime_classpath_sha256
+            for fork in fork_evidence
+        )
+    ):
+        raise T3EvidenceError("JMH_RUN_STDOUT_BINDING_INVALID")
+
+
 def validate_generated_java_precompile(
     *,
     receipt_path: Path,
@@ -1313,6 +1707,7 @@ def validate_generated_java_precompile(
     source_input_paths: list[str],
     source_manifest_sha256: str,
     compiler_profiles_sha256: str,
+    jdk_modules_snapshot: jmh_precompile.RegularFileSnapshot,
     snapshot: SealedEvidenceSnapshot,
 ) -> str:
     """Generated Java typed receipt와 sealed `.class` byte closure를 재검증한다."""
@@ -1335,12 +1730,15 @@ def validate_generated_java_precompile(
         "generatedSourceRootPathId",
         "generatedSources",
         "generatedSourcesSha256",
+        "generatedSourcesIdentitySha256",
         "classpathEntries",
         "classpathEntriesSha256",
+        "runtimeClasspathSha256",
         "scalaClassOutputPathId",
         "generatedClassOutputPathId",
         "generatedClasses",
         "generatedClassesSha256",
+        "generatedClassesIdentitySha256",
         "javacProcess",
         "status",
         "aggregateStatus",
@@ -1392,7 +1790,13 @@ def validate_generated_java_precompile(
             "executionPathId": "PINNED_JAVAC_FD",
             "jdkModulesPathId": jdk_modules_path_id,
             "jdkModulesSha256": jdk_modules_sha256,
+            "jdkModulesFileIdentity": (
+                jmh_precompile._file_identity_value(
+                    jdk_modules_snapshot.file_identity
+                )
+            ),
         }
+        or jdk_modules_snapshot.sha256 != jdk_modules_sha256
     ):
         raise T3EvidenceError("JMH_PRECOMPILE_RECEIPT_IDENTITY_INVALID")
 
@@ -1414,6 +1818,10 @@ def validate_generated_java_precompile(
         "--jmh-version",
         "1.37",
         "--print-classpath",
+    ]
+    expected_compile_runtime = [
+        "PINNED_SCALA_CLI_1_15_0_FD",
+        *expected_compile[1:],
     ]
     compile_process = receipt.get("scalaCompile")
     compile_stdout = safe_artifact(
@@ -1439,10 +1847,8 @@ def validate_generated_java_precompile(
         or compile_process.get("portableArgv") != expected_compile
         or compile_process.get("portableArgvSha256")
         != canonical_sha256(expected_compile)
-        or SHA256.fullmatch(
-            str(compile_process.get("runtimeArgvSha256"))
-        )
-        is None
+        or compile_process.get("runtimeArgvSha256")
+        != canonical_sha256(expected_compile_runtime)
         or compile_process.get("stdoutSha256")
         != snapshot.sha256(
             compile_stdout,
@@ -1459,6 +1865,25 @@ def validate_generated_java_precompile(
         or compile_process.get("status") != "PASS"
     ):
         raise T3EvidenceError("JMH_PRECOMPILE_SCALA_PROCESS_INVALID")
+    try:
+        compile_raw = snapshot.capture(
+            compile_stdout,
+            root=artifact_root,
+            label="qualification.precompile.scala.stdout",
+        ).payload.decode("utf-8")
+    except UnicodeError as error:
+        raise T3EvidenceError(
+            "JMH_PRECOMPILE_STDOUT_BINDING_INVALID"
+        ) from error
+    compile_prefix = _classpath_log_binding(
+        compile_raw,
+        receipt=receipt,
+        physical_case_root=artifact_root / case_root,
+    )
+    if receipt.get("runtimeClasspathSha256") != hashlib.sha256(
+        compile_prefix[2].encode("utf-8")
+    ).hexdigest():
+        raise T3EvidenceError("JMH_PRECOMPILE_STDOUT_BINDING_INVALID")
 
     generated_sources = receipt.get("generatedSources")
     expected_source_paths = jmh_precompile.expected_generated_source_paths()
@@ -1499,8 +1924,9 @@ def validate_generated_java_precompile(
         )
         is None
         or generator.get("generatedSourceRootPathId")
-        != generated_source_root_id
-        or generated_source_root_id != f"{generator_build_id}_jmh/sources"
+        != f"{generator_build_id}_jmh/sources"
+        or generated_source_root_id
+        != f"EVIDENCE_ROOT/{jmh_precompile.GENERATED_SOURCES_NAME}"
         or generator.get("generatedResourceRootPathId")
         != f"{generator_build_id}_jmh/resources"
         or re.fullmatch(
@@ -1521,14 +1947,56 @@ def validate_generated_java_precompile(
         )
         or receipt.get("generatedSourcesSha256")
         != canonical_sha256(generated_sources)
-        or re.fullmatch(
-            r"SCALA_WORKSPACE/\.scala-build/"
-            r"[A-Za-z0-9._-]+_jmh/sources",
-            str(generated_source_root_id),
+        or SHA256.fullmatch(
+            str(receipt.get("generatedSourcesIdentitySha256"))
         )
         is None
     ):
         raise T3EvidenceError("JMH_PRECOMPILE_GENERATED_SOURCE_INVALID")
+
+    generated_source_directory = (
+        artifact_root / case_root / jmh_precompile.GENERATED_SOURCES_NAME
+    )
+    try:
+        actual_generated_sources = (
+            jmh_precompile.generated_source_closure_at(
+                generated_source_directory,
+                evidence_dir=artifact_root / case_root,
+            )
+        )
+    except jmh_precompile.PrecompileError as error:
+        raise T3EvidenceError(
+            "JMH_PRECOMPILE_GENERATED_SOURCE_INVALID"
+        ) from error
+    actual_source_values = jmh_precompile._file_digest_values(
+        actual_generated_sources.files
+    )
+    if (
+        generated_sources != actual_source_values
+        or receipt.get("generatedSourcesSha256")
+        != canonical_sha256(actual_source_values)
+        or receipt.get("generatedSourcesIdentitySha256")
+        != jmh_precompile._file_identity_sha256(
+            actual_generated_sources.files
+        )
+    ):
+        raise T3EvidenceError("JMH_PRECOMPILE_GENERATED_SOURCE_INVALID")
+    for item in actual_generated_sources.files:
+        adopted = snapshot.adopt_prevalidated_file(
+            generated_source_directory / item.relative_path,
+            root=artifact_root,
+            label=(
+                "qualification.precompile.source."
+                f"{item.relative_path}"
+            ),
+            payload=item.payload,
+            sha256=item.sha256,
+            file_identity=item.file_identity,
+        )
+        if adopted.sha256 != item.sha256:
+            raise T3EvidenceError(
+                "JMH_PRECOMPILE_GENERATED_SOURCE_INVALID"
+            )
 
     classpath_entries = receipt.get("classpathEntries")
     class_output = receipt.get("scalaClassOutputPathId")
@@ -1545,9 +2013,14 @@ def validate_generated_java_precompile(
         or not classpath_entries
         or any(
             not isinstance(item, dict)
-            or set(item) != {"pathId", "kind", "sha256"}
+            or set(item)
+            != {"pathId", "kind", "sha256", "identitySha256"}
             or item.get("kind") not in {"file", "directory"}
             or SHA256.fullmatch(str(item.get("sha256"))) is None
+            or SHA256.fullmatch(
+                str(item.get("identitySha256"))
+            )
+            is None
             or not str(item.get("pathId", "")).startswith(
                 (
                     "SCALA_WORKSPACE/",
@@ -1612,43 +2085,57 @@ def validate_generated_java_precompile(
         or not generated_classes
     ):
         raise T3EvidenceError("JMH_PRECOMPILE_CLASS_OUTPUT_INVALID")
-    actual_class_paths = sorted(
-        (
-            path.relative_to(class_directory).as_posix()
-            for path in class_directory.rglob("*")
-            if path.is_file() and not path.is_symlink()
-        ),
-        key=lambda value: value.encode("utf-8"),
-    )
-    if (
-        any(
-            path.is_symlink()
-            or (not path.is_dir() and not path.is_file())
-            for path in class_directory.rglob("*")
+    try:
+        actual_class_closure = jmh_precompile._generated_class_closure(
+            class_directory
         )
-        or
-        [item.get("path") for item in generated_classes]
-        != actual_class_paths
+    except jmh_precompile.PrecompileError as error:
+        raise T3EvidenceError(
+            "JMH_PRECOMPILE_CLASS_BYTES_INVALID"
+        ) from error
+    actual_class_values = jmh_precompile._file_digest_values(
+        actual_class_closure
+    )
+    for item in actual_class_closure:
+        adopted = snapshot.adopt_prevalidated_file(
+            class_directory / item.relative_path,
+            root=artifact_root,
+            label=f"qualification.precompile.class.{item.relative_path}",
+            payload=item.payload,
+            sha256=item.sha256,
+            file_identity=item.file_identity,
+        )
+        if adopted.sha256 != item.sha256:
+            raise T3EvidenceError("JMH_PRECOMPILE_CLASS_BYTES_INVALID")
+    actual_class_paths = [
+        item["path"] for item in actual_class_values
+    ]
+    if (
+        generated_classes != actual_class_values
         or any(
             not isinstance(item, dict)
             or set(item) != {"path", "sha256"}
             or not item["path"].endswith(".class")
-            or item["sha256"]
-            != snapshot.sha256(
-                class_directory / item["path"],
-                root=artifact_root,
-                label=f"qualification.precompile.class.{item['path']}",
-            )
             for item in generated_classes
         )
         or receipt.get("generatedClassesSha256")
-        != canonical_sha256(generated_classes)
+        != canonical_sha256(actual_class_values)
+        or receipt.get("generatedClassesIdentitySha256")
+        != jmh_precompile._file_identity_sha256(
+            actual_class_closure
+        )
         or next(
             item
             for item in classpath_entries
             if item["pathId"] == generated_class_output_id
         ).get("sha256")
         != receipt.get("generatedClassesSha256")
+        or next(
+            item
+            for item in classpath_entries
+            if item["pathId"] == generated_class_output_id
+        ).get("identitySha256")
+        != receipt.get("generatedClassesIdentitySha256")
         or any(
             f"{path.removesuffix('.java')}.class"
             not in actual_class_paths
@@ -1667,10 +2154,11 @@ def validate_generated_java_precompile(
         "-d",
         f"EVIDENCE_ROOT/{jmh_precompile.GENERATED_CLASSES_NAME}",
         *[
-            f"SCALA_WORKSPACE_GENERATED/{path}"
+            f"EVIDENCE_ROOT_GENERATED/{path}"
             for path in expected_source_paths
         ],
     ]
+    expected_javac_runtime = ["PINNED_JAVAC_FD", *expected_javac[1:]]
     javac_process = receipt.get("javacProcess")
     javac_stdout = safe_artifact(
         artifact_root,
@@ -1695,8 +2183,8 @@ def validate_generated_java_precompile(
         or javac_process.get("portableArgv") != expected_javac
         or javac_process.get("portableArgvSha256")
         != canonical_sha256(expected_javac)
-        or SHA256.fullmatch(str(javac_process.get("runtimeArgvSha256")))
-        is None
+        or javac_process.get("runtimeArgvSha256")
+        != canonical_sha256(expected_javac_runtime)
         or javac_process.get("stdoutSha256")
         != snapshot.sha256(
             javac_stdout,
@@ -1859,6 +2347,7 @@ def validate_qualification_case_artifacts(
     benchmark_plan_sha256: str,
     jvm_allowlist: dict[str, Any],
     jvm_allowlist_sha256: str,
+    jdk_modules_snapshot: jmh_precompile.RegularFileSnapshot,
     snapshot: SealedEvidenceSnapshot,
 ) -> float:
     """선택기가 각 raw JMH/fork/log/process byte를 다시 열어 score를 재구성한다."""
@@ -1899,12 +2388,13 @@ def validate_qualification_case_artifacts(
         root=artifact_root,
         label=f"qualification.effective.r{repetition}.{profile}.{case_id}",
     )
+    fork_evidence = snapshot.json_value(
+        fork_path,
+        root=artifact_root,
+        label=f"qualification.fork.r{repetition}.{profile}.{case_id}",
+    )
     recomputed_effective = validate_effective_jvm_evidence(
-        snapshot.json_value(
-            fork_path,
-            root=artifact_root,
-            label=f"qualification.fork.r{repetition}.{profile}.{case_id}",
-        ),
+        fork_evidence,
         expected_forks=policy["forks"],
         allowlist=jvm_allowlist,
         allowlist_sha256=jvm_allowlist_sha256,
@@ -1958,6 +2448,8 @@ def validate_qualification_case_artifacts(
         "system",
         "--coursier-validate-checksums",
         *PROFILE_CLI_ARGUMENTS[profile],
+        "--java-prop",
+        "java.io.tmpdir=EVIDENCE_ROOT/jmh-tmp",
         "--jmh",
         "--jmh-version",
         "1.37",
@@ -2044,6 +2536,26 @@ def validate_qualification_case_artifacts(
         source_input_paths=source_input_paths,
         source_manifest_sha256=source_manifest_sha256,
         compiler_profiles_sha256=compiler_profiles_sha256,
+        jdk_modules_snapshot=jdk_modules_snapshot,
+        snapshot=snapshot,
+    )
+    validated_precompile_receipt = snapshot.json_object(
+        precompile_path,
+        root=artifact_root,
+        label=(
+            f"qualification.precompile.r{repetition}.{profile}.{case_id}"
+        ),
+    )
+    validate_jmh_stdout_precompile_binding(
+        compile_stdout=safe_artifact(
+            artifact_root,
+            case_root / jmh_precompile.SCALA_COMPILE_STDOUT,
+        ),
+        jmh_stdout=stdout_path,
+        receipt=validated_precompile_receipt,
+        fork_evidence=fork_evidence,
+        artifact_root=artifact_root,
+        case_root=case_root,
         snapshot=snapshot,
     )
     if (
@@ -2497,6 +3009,11 @@ def select_scala_profile(
         != pinned_scala_cli_sha256
     ):
         raise T3EvidenceError("PROFILE_SELECTOR_LOCAL_INPUT_INVALID")
+    java_home_value = os.environ.get("JAVA_HOME")
+    if not java_home_value:
+        raise T3EvidenceError("JAVA_HOME_REQUIRED")
+    jdk_modules_path = Path(java_home_value) / "lib/modules"
+    jdk_modules_snapshot: jmh_precompile.RegularFileSnapshot | None = None
     if (
         set(jvm_allowlist) != JVM_ALLOWLIST_KEYS
         or jvm_allowlist.get("schemaVersion")
@@ -2818,6 +3335,11 @@ def select_scala_profile(
         for item in measurements:
             profile = item["profileId"]
             case_id = item["caseId"]
+            if jdk_modules_snapshot is None:
+                jdk_modules_snapshot = snapshot.capture_regular_file(
+                    jdk_modules_path,
+                    label="SELECTOR_JDK_MODULES",
+                )
             scores[(repetition, profile, case_id)] = (
                 validate_qualification_case_artifacts(
                     plan=plan,
@@ -2836,6 +3358,7 @@ def select_scala_profile(
                     benchmark_plan_sha256=benchmark_plan_sha256,
                     jvm_allowlist=jvm_allowlist,
                     jvm_allowlist_sha256=jvm_allowlist_sha256,
+                    jdk_modules_snapshot=jdk_modules_snapshot,
                     snapshot=snapshot,
                 )
             )
@@ -3182,6 +3705,7 @@ JVM_FORK_KEYS = {
     "vendor",
     "javaHomePathId",
     "inputArguments",
+    "inputArgumentFiles",
     "stableSystemProperties",
     "ambientJvmOptionVariables",
     "systemPropertiesSha256",
@@ -3226,6 +3750,7 @@ EXPECTED_BENCHMARK_ENVIRONMENT = {
     "S1_4X_BENCHMARK_RUN_MODE": "SET",
     "S1_4X_EFFECTIVE_JVM_EVIDENCE_DIR": "SET",
     "S1_4X_FIXTURE_ROOT": "SET",
+    "S1_4X_JMH_TMPDIR": "SET",
     "S1_4X_MEASUREMENT_READY_MARKER": "SET",
     "S1_4X_SCALA_WORKSPACE": "SET",
     "COURSIER_CACHE": "SET",
@@ -3234,6 +3759,16 @@ EXPECTED_BENCHMARK_ENVIRONMENT = {
     "SCALA_CLI_CONFIG": "SET",
     "XDG_CONFIG_HOME": "SET",
 }
+JMH_COMPILE_COMMAND_PREFIX = "-XX:CompileCommandFile="
+JMH_COMPILE_COMMAND_PATH_ID = "JMH_COMPILE_COMMAND_FILE"
+JMH_TMPDIR_PREFIX = "-Djava.io.tmpdir="
+JMH_TMPDIR_PATH_ID = "EVIDENCE_ROOT/jmh-tmp"
+JMH_TMPDIR_PORTABLE_ARGUMENT = f"{JMH_TMPDIR_PREFIX}{JMH_TMPDIR_PATH_ID}"
+JMH_LAUNCHER_ONLY_ARGUMENTS = (
+    "-XX:+UnlockDiagnosticVMOptions",
+    "-XX:+UnlockExperimentalVMOptions",
+    "-DcompilerBlackholesEnabled=true",
+)
 
 
 def canonical_pairs_sha256(values: dict[str, str]) -> str:
@@ -3247,6 +3782,185 @@ def canonical_pairs_sha256(values: dict[str, str]) -> str:
         for key in sorted(values, key=lambda item: item.encode("utf-8"))
     ).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()
+
+
+def normalized_jvm_arguments(fork: dict[str, Any]) -> list[str]:
+    """Randomized JMH argument file을 captured content identity로 치환한다."""
+
+    arguments = fork.get("inputArguments")
+    files = fork.get("inputArgumentFiles")
+    if (
+        not isinstance(arguments, list)
+        or any(type(item) is not str for item in arguments)
+        or not isinstance(files, list)
+    ):
+        raise T3EvidenceError("JVM_ARGUMENT_FILE_WITNESS_INVALID")
+    compile_indexes = [
+        index
+        for index, item in enumerate(arguments)
+        if item.startswith(JMH_COMPILE_COMMAND_PREFIX)
+    ]
+    tmp_indexes = [
+        index
+        for index, item in enumerate(arguments)
+        if item.startswith(JMH_TMPDIR_PREFIX)
+    ]
+    if (
+        bool(compile_indexes) != bool(tmp_indexes)
+        or (compile_indexes and len(tmp_indexes) != 1)
+    ):
+        raise T3EvidenceError("JVM_ARGUMENT_FILE_WITNESS_INVALID")
+    tmp_directory: Path | None = None
+    if tmp_indexes:
+        raw_tmp = arguments[tmp_indexes[0]].removeprefix(JMH_TMPDIR_PREFIX)
+        tmp_directory = Path(raw_tmp)
+        if (
+            not raw_tmp
+            or "\x00" in raw_tmp
+            or "\r" in raw_tmp
+            or not tmp_directory.is_absolute()
+            or tmp_directory.name != "jmh-tmp"
+            or tmp_directory.is_relative_to(Path("/tmp"))
+        ):
+            raise T3EvidenceError("JVM_ARGUMENT_FILE_WITNESS_INVALID")
+    if len(files) != len(compile_indexes):
+        raise T3EvidenceError("JVM_ARGUMENT_FILE_WITNESS_INVALID")
+    by_index: dict[int, dict[str, Any]] = {}
+    for item in files:
+        if (
+            not isinstance(item, dict)
+            or set(item)
+            != {
+                "argumentIndex",
+                "argumentPrefix",
+                "pathId",
+                "sha256",
+                "fileIdentitySha256",
+            }
+            or type(item.get("argumentIndex")) is not int
+            or item["argumentIndex"] in by_index
+            or item.get("argumentPrefix") != JMH_COMPILE_COMMAND_PREFIX
+            or item.get("pathId") != JMH_COMPILE_COMMAND_PATH_ID
+            or SHA256.fullmatch(str(item.get("sha256"))) is None
+            or SHA256.fullmatch(
+                str(item.get("fileIdentitySha256"))
+            )
+            is None
+        ):
+            raise T3EvidenceError("JVM_ARGUMENT_FILE_WITNESS_INVALID")
+        index = item["argumentIndex"]
+        if (
+            index < 0
+            or index >= len(arguments)
+            or index not in compile_indexes
+        ):
+            raise T3EvidenceError("JVM_ARGUMENT_FILE_WITNESS_INVALID")
+        raw_path = arguments[index].removeprefix(
+            JMH_COMPILE_COMMAND_PREFIX
+        )
+        if (
+            not raw_path
+            or "\x00" in raw_path
+            or "\r" in raw_path
+            or not Path(raw_path).is_absolute()
+            or tmp_directory is None
+            or Path(raw_path).parent != tmp_directory
+        ):
+            raise T3EvidenceError("JVM_ARGUMENT_FILE_WITNESS_INVALID")
+        by_index[index] = item
+    if set(by_index) != set(compile_indexes):
+        raise T3EvidenceError("JVM_ARGUMENT_FILE_WITNESS_INVALID")
+    return [
+        (
+            f"{JMH_COMPILE_COMMAND_PREFIX}{JMH_COMPILE_COMMAND_PATH_ID}"
+            f"#sha256={by_index[index]['sha256']}"
+            if index in by_index
+            else JMH_TMPDIR_PORTABLE_ARGUMENT
+            if index in tmp_indexes
+            else argument
+        )
+        for index, argument in enumerate(arguments)
+    ]
+
+
+def reported_jvm_arguments(
+    effective_jvm_arguments: list[str],
+) -> list[str]:
+    """JMH JSON이 보고하는 args와 launcher-only actual fork args를 분리한다."""
+
+    if (
+        not isinstance(effective_jvm_arguments, list)
+        or any(type(item) is not str for item in effective_jvm_arguments)
+    ):
+        raise T3EvidenceError("JMH_EFFECTIVE_ARGUMENTS_INVALID")
+    compile_markers = [
+        item
+        for item in effective_jvm_arguments
+        if item.startswith(
+            f"{JMH_COMPILE_COMMAND_PREFIX}{JMH_COMPILE_COMMAND_PATH_ID}"
+            "#sha256="
+        )
+    ]
+    launcher_present = any(
+        item in JMH_LAUNCHER_ONLY_ARGUMENTS
+        for item in effective_jvm_arguments
+    )
+    if not compile_markers and not launcher_present:
+        return list(effective_jvm_arguments)
+    if effective_jvm_arguments.count(JMH_TMPDIR_PORTABLE_ARGUMENT) != 1:
+        raise T3EvidenceError("JMH_LAUNCHER_ARGUMENT_CLOSURE_INVALID")
+    if (
+        len(compile_markers) != 1
+        or SHA256.fullmatch(
+            compile_markers[0].removeprefix(
+                f"{JMH_COMPILE_COMMAND_PREFIX}"
+                f"{JMH_COMPILE_COMMAND_PATH_ID}#sha256="
+            )
+        )
+        is None
+    ):
+        raise T3EvidenceError("JMH_LAUNCHER_ARGUMENT_CLOSURE_INVALID")
+    suffix = [
+        *JMH_LAUNCHER_ONLY_ARGUMENTS,
+        compile_markers[0],
+    ]
+    if effective_jvm_arguments[-len(suffix) :] != suffix:
+        raise T3EvidenceError("JMH_LAUNCHER_ARGUMENT_CLOSURE_INVALID")
+    return effective_jvm_arguments[: -len(suffix)]
+
+
+def normalized_native_reported_jvm_arguments(arguments: Any) -> list[str]:
+    """Native JSON의 physical output tmpdir만 portable path ID로 치환한다."""
+
+    if (
+        not isinstance(arguments, list)
+        or any(type(item) is not str for item in arguments)
+    ):
+        raise T3EvidenceError("JMH_NATIVE_REPORTED_ARGUMENTS_INVALID")
+    tmp_indexes = [
+        index
+        for index, item in enumerate(arguments)
+        if item.startswith(JMH_TMPDIR_PREFIX)
+    ]
+    if not tmp_indexes:
+        return list(arguments)
+    if len(tmp_indexes) != 1:
+        raise T3EvidenceError("JMH_NATIVE_REPORTED_ARGUMENTS_INVALID")
+    raw_tmp = arguments[tmp_indexes[0]].removeprefix(JMH_TMPDIR_PREFIX)
+    tmp_directory = Path(raw_tmp)
+    if (
+        not raw_tmp
+        or "\x00" in raw_tmp
+        or "\r" in raw_tmp
+        or not tmp_directory.is_absolute()
+        or tmp_directory.name != "jmh-tmp"
+        or tmp_directory.is_relative_to(Path("/tmp"))
+    ):
+        raise T3EvidenceError("JMH_NATIVE_REPORTED_ARGUMENTS_INVALID")
+    return [
+        JMH_TMPDIR_PORTABLE_ARGUMENT if index in tmp_indexes else item
+        for index, item in enumerate(arguments)
+    ]
 
 
 def require_jvm_fork(
@@ -3271,12 +3985,15 @@ def require_jvm_fork(
         or fork.get("javaHomePathId") != "TEMURIN_25_0_3_9_LTS"
         or not isinstance(fork.get("inputArguments"), list)
         or not all(isinstance(item, str) for item in fork["inputArguments"])
-        or (
-            allowed_arguments is not None
-            and fork.get("inputArguments") != allowed_arguments
-        )
+        or not isinstance(fork.get("inputArgumentFiles"), list)
         or fork.get("stableSystemProperties") != stable_system_properties
         or fork.get("ambientJvmOptionVariables") != ambient_jvm_options
+    ):
+        raise T3EvidenceError(f"JVM_FORK_IDENTITY_MISMATCH:{expected_index}")
+    normalized_arguments = normalized_jvm_arguments(fork)
+    if (
+        allowed_arguments is not None
+        and normalized_arguments != allowed_arguments
     ):
         raise T3EvidenceError(f"JVM_FORK_IDENTITY_MISMATCH:{expected_index}")
     if (
@@ -3329,7 +4046,7 @@ def assemble_jvm_argument_allowlist(
         stable_system_properties=EXPECTED_STABLE_SYSTEM_PROPERTIES,
         ambient_jvm_options=EXPECTED_AMBIENT_JVM_OPTIONS,
     )
-    observed_arguments = fork["inputArguments"]
+    observed_arguments = normalized_jvm_arguments(fork)
     return {
         "schemaVersion": "s1.4x-scala-jvm-argument-allowlist-v1",
         "benchmarkPlanSha256": benchmark_plan_sha256,
@@ -3385,6 +4102,19 @@ def validate_effective_jvm_evidence(
             isinstance(item, str)
             for item in allowlist.get("effectiveJvmArguments", [])
         )
+        or any(
+            item.startswith(JMH_COMPILE_COMMAND_PREFIX)
+            and not item.startswith(
+                f"{JMH_COMPILE_COMMAND_PREFIX}"
+                f"{JMH_COMPILE_COMMAND_PATH_ID}#sha256="
+            )
+            for item in allowlist.get("effectiveJvmArguments", [])
+        )
+        or any(
+            item.startswith(JMH_TMPDIR_PREFIX)
+            and item != JMH_TMPDIR_PORTABLE_ARGUMENT
+            for item in allowlist.get("effectiveJvmArguments", [])
+        )
         or allowlist.get("stableSystemProperties")
         != EXPECTED_STABLE_SYSTEM_PROPERTIES
         or allowlist.get("ambientJvmOptionVariables")
@@ -3397,6 +4127,7 @@ def validate_effective_jvm_evidence(
         != canonical_sha256(allowlist.get("effectiveJvmArguments"))
     ):
         raise T3EvidenceError("JVM_ARGUMENT_ALLOWLIST_INVALID")
+    reported_jvm_arguments(allowlist["effectiveJvmArguments"])
     for key in (
         "benchmarkPlanSha256",
         "capabilitySmokePlanSha256",
@@ -3466,11 +4197,17 @@ def validate_jmh_native_json(
         or not isinstance(expected_measurement_time, str)
     ):
         raise T3EvidenceError("JMH_EXPECTED_EXECUTION_INVALID")
+    expected_reported_jvm_arguments = reported_jvm_arguments(
+        effective_jvm_arguments
+    )
     canonical_warmup_time = canonical_time(expected_warmup_time)
     canonical_measurement_time = canonical_time(expected_measurement_time)
     if not isinstance(native, list) or len(native) != 1 or not isinstance(native[0], dict):
         raise T3EvidenceError("JMH_EXACT_ONE_RESULT_REQUIRED")
     result = native[0]
+    actual_reported_jvm_arguments = normalized_native_reported_jvm_arguments(
+        result.get("jvmArgs") if isinstance(result, dict) else None
+    )
     metric = result.get("primaryMetric")
     if (
         result.get("benchmark") != expected_benchmark
@@ -3486,7 +4223,8 @@ def validate_jmh_native_json(
         or result.get("measurementIterations")
         != expected_measurement_iterations
         or result.get("measurementTime") != canonical_measurement_time
-        or result.get("jvmArgs") != effective_jvm_arguments
+        or actual_reported_jvm_arguments
+        != expected_reported_jvm_arguments
         or result.get("params") is not None
         or not isinstance(metric, dict)
         or metric.get("scoreUnit") != "ns/op"
@@ -3527,6 +4265,7 @@ def validate_jmh_native_json(
         "warmupTime": canonical_warmup_time,
         "measurementIterations": expected_measurement_iterations,
         "measurementTime": canonical_measurement_time,
+        "reportedJvmArguments": expected_reported_jvm_arguments,
         "effectiveJvmArguments": effective_jvm_arguments,
         "logicalOperationsPerInvocation": logical_operations_per_invocation,
         "rawScoreNsPerInvocation": float(score),

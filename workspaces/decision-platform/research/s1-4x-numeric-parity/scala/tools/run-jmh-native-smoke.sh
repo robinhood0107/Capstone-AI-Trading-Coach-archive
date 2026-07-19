@@ -64,6 +64,11 @@ case "$MODE" in
   smoke | qualification | full) ;;
   *) usage ;;
 esac
+if [[ "$MODE" != "qualification" \
+  && -n "${S1_4X_JDK_MODULES_GATE_SNAPSHOT+x}" ]]; then
+  printf 'JDK modules parent gate is qualification-only\n' >&2
+  exit 69
+fi
 [[ "$CASE_ID" =~ ^[a-z0-9][a-z0-9._/-]{0,191}$ ]] || usage
 [[ "$OUTPUT_DIR" == /* && ! -e "$OUTPUT_DIR" && ! -L "$OUTPUT_DIR" ]] || usage
 if [[ "$MODE" == "smoke" ]]; then
@@ -308,6 +313,18 @@ case "$family" in
 esac
 
 mkdir -p "$OUTPUT_DIR/fork-evidence"
+jmh_tmpdir="$OUTPUT_DIR/jmh-tmp"
+mkdir -m 700 -- "$jmh_tmpdir"
+[[ -d "$jmh_tmpdir" && ! -L "$jmh_tmpdir" \
+  && "$(realpath -- "$jmh_tmpdir")" == "$jmh_tmpdir" \
+  && "$(stat -Lc '%u:%a' -- "$jmh_tmpdir")" == "$(id -u):700" ]] || {
+  printf 'output-bound JMH temp directory is unsafe\n' >&2
+  exit 69
+}
+export S1_4X_JMH_TMPDIR="$jmh_tmpdir"
+export TMPDIR="$jmh_tmpdir"
+export TEMP="$jmh_tmpdir"
+export TMP="$jmh_tmpdir"
 list_file="$OUTPUT_DIR/jmh-list.txt"
 "$SCALA_ROOT/tools/compile-benchmarks.sh" \
   --profile "$PROFILE" \
@@ -330,7 +347,7 @@ mapfile -t profile_options < <(
     "$SCALA_ROOT/compiler-profiles.v1.json"
 )
 mapfile -t benchmark_sources < <(
-  python3 "$SCALA_ROOT/tools/source_input_manifest.py" \
+  python3 -E -s -S "$SCALA_ROOT/tools/source_input_manifest.py" \
     --scala-root "$SCALA_ROOT" \
     --manifest "$SCALA_ROOT/source-inputs.v1.json" \
     --policy "$S1_ROOT/contract/scala-source-policy.v1.json" \
@@ -380,6 +397,7 @@ command=(
   --jvm system
   --coursier-validate-checksums
   "${profile_options[@]}"
+  --java-prop "java.io.tmpdir=$jmh_tmpdir"
   --jmh --jmh-version 1.37 --
   -bm avgt -tu ns -t 1
   -jvm "$JAVA_EXEC"
@@ -403,17 +421,11 @@ export S1_4X_EFFECTIVE_JVM_EVIDENCE_DIR="$OUTPUT_DIR/fork-evidence"
 export S1_4X_MEASUREMENT_READY_MARKER="$OUTPUT_DIR/measurement-ready.v1.json"
 "${command[@]}" >"$OUTPUT_DIR/jmh.stdout" 2>"$OUTPUT_DIR/jmh.stderr"
 verify_fixture_root_identity
-python3 "$SCALA_ROOT/tools/precompile_jmh_generated_java.py" verify \
-  --workspace "$S1_4X_SCALA_WORKSPACE" \
-  --coursier-cache "$COURSIER_CACHE" \
-  --evidence-dir "$OUTPUT_DIR" \
-  --jmh-stdout "$OUTPUT_DIR/jmh.stdout" \
-  --javac-binary "$JAVAC_EXECUTABLE" \
-  --javac-exec "$JAVAC_EXEC" >/dev/null
 
-python3 - "$OUTPUT_DIR/fork-evidence" "$OUTPUT_DIR/fork-evidence.normalized.json" "$forks" <<'PY'
+python3 -E -s -S - "$OUTPUT_DIR/fork-evidence" "$OUTPUT_DIR/fork-evidence.normalized.json" "$forks" <<'PY'
 import hashlib
 import json
+import stat
 import sys
 from pathlib import Path
 
@@ -424,6 +436,16 @@ def unique_object(pairs):
             raise SystemExit(f"DUPLICATE_JSON_KEY:{key}")
         value[key] = item
     return value
+
+def canonical(value):
+    payload = json.dumps(
+        value,
+        allow_nan=False,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
 
 root = Path(sys.argv[1])
 output = Path(sys.argv[2])
@@ -446,6 +468,47 @@ for index, path in enumerate(paths, start=1):
     )
     if raw.get("schemaVersion") != "s1.4x-scala-jvm-fork-raw-evidence-v1":
         raise SystemExit("JVM_FORK_RAW_SCHEMA_MISMATCH")
+    argument_files = raw.get("inputArgumentFiles")
+    if not isinstance(argument_files, list):
+        raise SystemExit("JVM_FORK_ARGUMENT_FILE_IDENTITY_INVALID")
+    for witness in argument_files:
+        identity = (
+            witness.pop("fileIdentity", None)
+            if isinstance(witness, dict)
+            else None
+        )
+        if (
+            not isinstance(witness, dict)
+            or set(witness)
+            != {
+                "argumentIndex",
+                "argumentPrefix",
+                "pathId",
+                "sha256",
+            }
+            or not isinstance(identity, dict)
+            or set(identity)
+            != {
+                "device",
+                "inode",
+                "mode",
+                "linkCount",
+                "size",
+                "mtimeNs",
+                "ctimeNs",
+            }
+            or any(type(value) is not int for value in identity.values())
+            or identity["device"] < 0
+            or identity["inode"] <= 0
+            or not stat.S_ISREG(identity["mode"])
+            or identity["linkCount"] != 1
+            or identity["size"] < 0
+            or identity["size"] > 1024 * 1024
+            or identity["mtimeNs"] <= 0
+            or identity["ctimeNs"] <= 0
+        ):
+            raise SystemExit("JVM_FORK_ARGUMENT_FILE_IDENTITY_INVALID")
+        witness["fileIdentitySha256"] = canonical(identity)
     process_id = raw.pop("forkProcessId", None)
     start_time = raw.pop("runtimeStartTimeEpochMillis", None)
     if (
@@ -474,9 +537,18 @@ with output.open("x", encoding="utf-8", newline="\n") as stream:
     )
 PY
 
+python3 -E -s -S "$SCALA_ROOT/tools/precompile_jmh_generated_java.py" verify \
+  --workspace "$S1_4X_SCALA_WORKSPACE" \
+  --coursier-cache "$COURSIER_CACHE" \
+  --evidence-dir "$OUTPUT_DIR" \
+  --jmh-stdout "$OUTPUT_DIR/jmh.stdout" \
+  --fork-evidence "$OUTPUT_DIR/fork-evidence.normalized.json" \
+  --javac-binary "$JAVAC_EXECUTABLE" \
+  --javac-exec "$JAVAC_EXEC" >/dev/null
+
 if [[ "$MODE" == "smoke" ]]; then
   JVM_ALLOWLIST="$OUTPUT_DIR/scala-jvm-argument-allowlist.v1.json"
-  python3 "$SCALA_ROOT/tools/t3_evidence.py" create-jvm-allowlist \
+  python3 -E -s -S "$SCALA_ROOT/tools/t3_evidence.py" create-jvm-allowlist \
     --fork-evidence "$OUTPUT_DIR/fork-evidence.normalized.json" \
     --benchmark-plan "$PLAN" \
     --capability-smoke-plan "$S1_ROOT/contract/capability-smoke-plan.v1.json" \
@@ -484,12 +556,12 @@ if [[ "$MODE" == "smoke" ]]; then
     --java-executable-sha256 "$java_sha" \
     --output "$JVM_ALLOWLIST"
 fi
-python3 "$SCALA_ROOT/tools/t3_evidence.py" validate-effective-jvm \
+python3 -E -s -S "$SCALA_ROOT/tools/t3_evidence.py" validate-effective-jvm \
   --fork-evidence "$OUTPUT_DIR/fork-evidence.normalized.json" \
   --expected-forks "$forks" \
   --jvm-allowlist "$JVM_ALLOWLIST" \
   --output "$OUTPUT_DIR/scala-effective-jvm-args-result.v1.json"
-python3 "$SCALA_ROOT/tools/t3_evidence.py" validate-native-jmh \
+python3 -E -s -S "$SCALA_ROOT/tools/t3_evidence.py" validate-native-jmh \
   --native "$native_json" \
   --expected-benchmark "$benchmark" \
   --expected-forks "$forks" \
@@ -501,7 +573,7 @@ python3 "$SCALA_ROOT/tools/t3_evidence.py" validate-native-jmh \
   --effective-jvm-arguments "$OUTPUT_DIR/scala-effective-jvm-args-result.v1.json" \
   --output "$OUTPUT_DIR/scala-jmh-native-validation.v1.json"
 
-python3 - \
+python3 -E -s -S - \
   "$PLAN" "$SCALA_ROOT/source-inputs.v1.json" \
   "$native_json" "$OUTPUT_DIR/scala-effective-jvm-args-result.v1.json" \
   "$OUTPUT_DIR/scala-jmh-native-validation.v1.json" \
@@ -760,6 +832,8 @@ for item in runtime_argv:
         portable.append("EVIDENCE_ROOT")
     elif item.startswith(f"{output_root}/"):
         portable.append(f"EVIDENCE_ROOT/{item.removeprefix(f'{output_root}/')}")
+    elif item == f"java.io.tmpdir={output_root}/jmh-tmp":
+        portable.append("java.io.tmpdir=EVIDENCE_ROOT/jmh-tmp")
     elif item == str(scala_workspace):
         portable.append("SCALA_WORKSPACE")
     else:

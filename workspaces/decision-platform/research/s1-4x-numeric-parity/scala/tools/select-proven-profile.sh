@@ -65,7 +65,7 @@ fi
 "$SCALA_ROOT/tools/test-source-input-manifest.sh" >/dev/null
 
 command=(
-  python3 "$SCALA_ROOT/tools/t3_evidence.py" select-profile
+  python3 -E -s -S "$SCALA_ROOT/tools/t3_evidence.py" select-profile
   --plan "$PLAN"
   --qualification "$QUALIFICATION"
   --qualification-artifact-root "$(dirname -- "$QUALIFICATION")"

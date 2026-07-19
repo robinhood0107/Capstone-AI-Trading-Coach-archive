@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import json
 import os
 import re
 import subprocess
@@ -14,6 +15,7 @@ from typing import Any
 
 from t3_evidence import SCALA_PROFILES
 from t3_evidence import canonical_sha256
+from t3_evidence import jmh_precompile
 from t3_evidence import sha256_file
 from t3_evidence import strict_json
 from t3_evidence import strict_json_value
@@ -175,7 +177,37 @@ def main() -> int:
         output_dir = arguments.output_dir
         if output_dir.exists() or output_dir.is_symlink():
             raise QualificationError("OUTPUT_DIRECTORY_MUST_BE_NEW")
+        if (
+            jmh_precompile.JDK_MODULES_GATE_SNAPSHOT_VARIABLE
+            in os.environ
+        ):
+            raise QualificationError(
+                "QUALIFICATION_JDK_MODULES_GATE_PRESEEDED"
+            )
         output_dir.mkdir(parents=True)
+        java_home_value = os.environ.get("JAVA_HOME")
+        if not java_home_value:
+            raise QualificationError("JAVA_HOME_REQUIRED")
+        jdk_modules_path = Path(java_home_value) / "lib/modules"
+        try:
+            jdk_modules_snapshot = (
+                jmh_precompile._snapshot_regular_file(
+                    jdk_modules_path,
+                    label="QUALIFICATION_JDK_MODULES",
+                    retain_payload=False,
+                )
+            )
+        except jmh_precompile.PrecompileError as error:
+            raise QualificationError(
+                "QUALIFICATION_JDK_MODULES_INVALID"
+            ) from error
+        if (
+            jdk_modules_snapshot.sha256
+            != toolchain_lock.get("jdk", {}).get("jdkModulesSha256")
+        ):
+            raise QualificationError(
+                "QUALIFICATION_JDK_MODULES_HASH_MISMATCH"
+            )
         scala_cli_pin = os.environ.get("S1_4X_SCALA_CLI_EXEC_PATH")
         if not scala_cli_pin:
             raise QualificationError("SCALA_CLI_PINNED_FD_PATH_REQUIRED")
@@ -242,6 +274,17 @@ def main() -> int:
         ):
             raise QualificationError("JAVAC_PINNED_FD_IDENTITY_MISMATCH")
         environment = os.environ.copy()
+        environment[
+            jmh_precompile.JDK_MODULES_GATE_SNAPSHOT_VARIABLE
+        ] = json.dumps(
+            jmh_precompile._regular_file_gate_value(
+                jdk_modules_snapshot
+            ),
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
         oracle_root = arguments.scala_root.parent / "oracle"
         blocks = []
         all_effective_hashes = []
@@ -437,6 +480,16 @@ def main() -> int:
                     "measurements": measurements,
                 }
             )
+
+        try:
+            jmh_precompile._verify_regular_file_snapshot(
+                jdk_modules_snapshot,
+                label="QUALIFICATION_JDK_MODULES",
+            )
+        except jmh_precompile.PrecompileError as error:
+            raise QualificationError(
+                "QUALIFICATION_JDK_MODULES_POST_GATE_DRIFT"
+            ) from error
 
         result = {
             "schemaVersion": "s1.4x-scala-profile-qualification-v1",

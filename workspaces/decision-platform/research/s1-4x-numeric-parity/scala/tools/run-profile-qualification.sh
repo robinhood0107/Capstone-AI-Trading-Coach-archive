@@ -88,7 +88,14 @@ export S1_4X_SCALA_JAVAC_PINNED_FD_PATH="/proc/$$/fd/$javac_pin_fd"
 
 # Frozen plan의 profileOrderBlocks와 hostValidityBeforeEachProfileBlock=true를 Python
 # orchestrator가 다시 검증하고 한 번에 JMH process 하나만 실행한다.
-python3 "$SCALA_ROOT/tools/run_profile_qualification.py" \
+# Parent gate와 모든 child가 ambient sitecustomize/PYTHONPATH를 상속하지 않게
+# Python 계열 환경을 비우고 site/user-site를 로드하지 않는 exact argv로 시작한다.
+while IFS= read -r environment_name; do
+  if [[ "$environment_name" == PYTHON* ]]; then
+    unset "$environment_name"
+  fi
+done < <(compgen -e)
+python3 -E -s -S "$SCALA_ROOT/tools/run_profile_qualification.py" \
   --plan "$PLAN" \
   --scala-root "$SCALA_ROOT" \
   --correctness-root "$CORRECTNESS_ROOT" \

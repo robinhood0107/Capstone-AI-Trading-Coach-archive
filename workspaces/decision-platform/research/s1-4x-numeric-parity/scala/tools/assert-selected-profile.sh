@@ -28,7 +28,7 @@ SUBJECT_COMMIT="${S1_4X_BENCHMARK_SUBJECT_COMMIT:?set exact benchmark subject co
   --correctness-root "$CORRECTNESS_ROOT" \
   --output "$SELECTED_RESULT" >/dev/null
 
-python3 - \
+python3 -E -s -S - \
   "$SELECTED_RESULT" \
   "$SCALA_ROOT/compiler-profiles.v1.json" \
   "$SCALA_ROOT/selected-profile.scala" \
