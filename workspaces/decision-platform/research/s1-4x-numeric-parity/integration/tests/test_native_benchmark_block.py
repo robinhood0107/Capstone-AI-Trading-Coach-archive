@@ -760,6 +760,23 @@ class NativeBenchmarkBlockTests(TestCase):
         }
         for constant, digest in frozen_tool_digests.items():
             self.enterContext(patch.object(native_block_module, constant, digest))
+        self.enterContext(
+            patch.object(
+                native_block_module,
+                "FROZEN_GHC_910_COMPILER_ELF_SHA256",
+                hashlib.sha256(actual_compiler_elf.read_bytes()).hexdigest(),
+            )
+        )
+        self.enterContext(
+            patch.object(
+                native_block_module,
+                "FROZEN_GHC_910_AUXILIARY_ELF_SHA256",
+                {
+                    name: hashlib.sha256(path.read_bytes()).hexdigest()
+                    for name, path in auxiliary_elves.items()
+                },
+            )
+        )
         for candidate_root in ("src", "app", "test", "benchmark"):
             (haskell_root / candidate_root).mkdir()
         candidate_sources = {
