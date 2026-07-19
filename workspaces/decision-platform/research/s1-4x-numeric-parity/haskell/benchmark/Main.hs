@@ -7,7 +7,7 @@ import           Data.Aeson (FromJSON (parseJSON), Value, eitherDecodeFileStrict
                              withObject, (.:), (.=))
 import           Data.Binary.Get (getDoublele, runGet)
 import           Data.List (find)
-import           Data.Maybe (fromMaybe)
+import           Data.Maybe (fromMaybe, listToMaybe)
 import           Data.Text (Text)
 import           System.Directory (canonicalizePath, doesDirectoryExist, doesFileExist,
                                    pathIsSymbolicLink)
@@ -220,27 +220,30 @@ main = do
   defaultMain
     [ env
         (setupBenchmarkEnvironment fixtureRoot qualificationPath selectedCases)
-        ( \ ~preparedCases ->
-            bgroup "" (benchmarkPreparedCases selectedCases preparedCases)
+        ( \preparedCases ->
+            bgroup
+              ""
+              (zipWith (benchmarkPreparedCase preparedCases) [0 ..] selectedCases)
         )
     ]
 
-benchmarkPreparedCases :: [BenchmarkCase] -> [PreparedCase] -> [Benchmark]
-benchmarkPreparedCases [] _ = []
-benchmarkPreparedCases
-  (benchmarkCase : benchmarkCases)
-  preparedCases =
-    let ~(preparedCase, remainingPreparedCases) =
-          unconsPreparedCases preparedCases
-     in benchmark benchmarkCase preparedCase
-          : benchmarkPreparedCases benchmarkCases remainingPreparedCases
+benchmarkPreparedCase ::
+  [PreparedCase] ->
+  Int ->
+  BenchmarkCase ->
+  Benchmark
+benchmarkPreparedCase preparedCases index benchmarkCase =
+  -- 중첩 env가 prepared list 조회와 closure 실패를 timing 밖 IO setup으로 지연한다.
+  env
+    (preparedCaseAt index preparedCases)
+    (benchmark benchmarkCase)
 
-unconsPreparedCases :: [PreparedCase] -> (PreparedCase, [PreparedCase])
-unconsPreparedCases preparedCases =
-  case preparedCases of
-    preparedCase : remainingPreparedCases ->
-      (preparedCase, remainingPreparedCases)
-    [] -> error "prepared benchmark case closure mismatch"
+preparedCaseAt :: Int -> [PreparedCase] -> IO PreparedCase
+preparedCaseAt index preparedCases =
+  maybe
+    (fail "prepared benchmark case closure mismatch")
+    pure
+    (listToMaybe (drop index preparedCases))
 
 -- | Full rotation에서만 설정되는 출력 경로에 실제 Criterion process identity를 기록한다.
 -- Profile qualification은 이 경계를 설정하지 않으므로 기존 4x2x7 argv와 실행을 바꾸지 않는다.
