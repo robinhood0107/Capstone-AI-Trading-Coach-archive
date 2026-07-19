@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
+import os
 import subprocess
+import sys
 import unittest
 from pathlib import Path
 
@@ -76,21 +79,36 @@ class PortableToolPathTests(unittest.TestCase):
         self.assertIn('${S1_4X_HLINT_BIN:?', lint)
 
     def test_legacy_aliases_do_not_satisfy_the_readiness_contract(self) -> None:
-        result = subprocess.run(
-            ["bash", str(TOOLS_ROOT / "assert-toolchain.sh")],
-            check=False,
-            capture_output=True,
-            text=True,
-            env={
-                "PATH": "/usr/bin:/bin",
-                "S1_4X_GHCUP_BIN": "/legacy-must-not-run/ghcup",
-                "S1_4X_GHC_BIN": "/legacy-must-not-run/ghc",
-                "S1_4X_GHC_914_BIN": "/legacy-must-not-run/ghc-9.14.1",
-                "S1_4X_STACK_BIN": "/legacy-must-not-run/stack",
-                "S1_4X_HLINT_BIN": "/legacy-must-not-run/hlint",
-                "S1_4X_STYLISH_HASKELL_BIN": "/legacy-must-not-run/stylish-haskell",
-            },
-        )
+        python = Path(sys.executable).resolve(strict=True)
+        descriptor = os.open(python, os.O_RDONLY)
+        try:
+            result = subprocess.run(
+                ["bash", str(TOOLS_ROOT / "assert-toolchain.sh")],
+                check=False,
+                capture_output=True,
+                text=True,
+                env={
+                    "PATH": "/usr/bin:/bin",
+                    "S1_4X_BENCHMARK_PYTHON_BIN": str(python),
+                    "S1_4X_BENCHMARK_PYTHON_SHA256": hashlib.sha256(
+                        python.read_bytes()
+                    ).hexdigest(),
+                    "S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH": (
+                        f"/proc/self/fd/{descriptor}"
+                    ),
+                    "S1_4X_GHCUP_BIN": "/legacy-must-not-run/ghcup",
+                    "S1_4X_GHC_BIN": "/legacy-must-not-run/ghc",
+                    "S1_4X_GHC_914_BIN": "/legacy-must-not-run/ghc-9.14.1",
+                    "S1_4X_STACK_BIN": "/legacy-must-not-run/stack",
+                    "S1_4X_HLINT_BIN": "/legacy-must-not-run/hlint",
+                    "S1_4X_STYLISH_HASKELL_BIN": (
+                        "/legacy-must-not-run/stylish-haskell"
+                    ),
+                },
+                pass_fds=(descriptor,),
+            )
+        finally:
+            os.close(descriptor)
 
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("S1_4X_AUTHORITATIVE_GHC_BIN", result.stderr)
@@ -98,7 +116,8 @@ class PortableToolPathTests(unittest.TestCase):
     def test_format_gate_scopes_python_module_discovery_to_haskell_root(self) -> None:
         formatter = (TOOLS_ROOT / "check-format.sh").read_text(encoding="utf-8")
         self.assertIn(
-            'PYTHONPATH="$HASKELL_ROOT" python3 -m unittest -v',
+            'PYTHONPATH="$HASKELL_ROOT" '
+            '"$S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH" -m unittest -v',
             formatter,
         )
 

@@ -251,7 +251,7 @@ class BenchmarkWrapperContractTests(unittest.TestCase):
         self.assertIn('S1_4X_CACHE_ROOT="$CACHE_ROOT"', source)
         self.assertNotIn('RUNTIME_HOME="${HOME:', source)
 
-    def test_wrapper_helper_stack_ghc_chain_inherits_pinned_fds(self) -> None:
+    def test_wrapper_rejects_script_alias_as_benchmark_python(self) -> None:
         def write_executable(path: Path, source: str) -> None:
             path.write_text(source, encoding="utf-8")
             path.chmod(0o755)
@@ -472,15 +472,12 @@ class BenchmarkWrapperContractTests(unittest.TestCase):
                         ]
                     ),
                 )
-                self.assertEqual(
-                    completed.returncode,
-                    0,
+                self.assertEqual(completed.returncode, 69)
+                self.assertIn(
+                    "benchmark Python pinned FD execution failed",
                     completed.stderr.decode("utf-8", errors="replace"),
                 )
-                self.assertEqual(
-                    marker.read_text(encoding="utf-8"),
-                    f"/proc/self/fd/{descriptors[2]}",
-                )
+                self.assertFalse(marker.exists())
             finally:
                 os.close(benchmark_python_descriptor)
                 for descriptor in descriptors + evidence_descriptors:

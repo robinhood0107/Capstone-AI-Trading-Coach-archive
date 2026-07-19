@@ -314,6 +314,13 @@ class ProfileSelectionContractTests(unittest.TestCase):
                     env={
                         "LC_ALL": "C",
                         "PATH": "/usr/bin:/bin",
+                        "S1_4X_BENCHMARK_PYTHON_BIN": str(python_source),
+                        "S1_4X_BENCHMARK_PYTHON_SHA256": (
+                            helper.sha256_file(python_source)
+                        ),
+                        "S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH": str(
+                            python_fd_path
+                        ),
                         "TZ": "UTC",
                     },
                     check=False,
@@ -442,7 +449,7 @@ class ProfileSelectionContractTests(unittest.TestCase):
                 qualification,
             )
         self.assertIn(
-            '"$BENCHMARK_PYTHON_PINNED_FD_PATH" '
+            '"$S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH" '
             '"$HASKELL_ROOT/tools/profile_workflow.py"',
             qualification,
         )
