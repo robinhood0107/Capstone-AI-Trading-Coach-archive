@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import subprocess
 import tempfile
 import unittest
@@ -43,6 +44,20 @@ FORBIDDEN_HOST_TOKENS = (
 )
 
 
+def _is_generated_stack_path(path: Path) -> bool:
+    """기존과 output-bound 단일-component Stack 산출물 경계를 함께 제외한다."""
+
+    return any(
+        part == ".stack-work"
+        or re.fullmatch(
+            r"\.stack-work-s1-4x-stack-root(?:-[a-z0-9]+)*",
+            part,
+        )
+        is not None
+        for part in path.parts
+    )
+
+
 class PortableToolPathTests(unittest.TestCase):
     def test_generated_stack_work_paths_cover_flat_output_bound_layout(
         self,
@@ -70,7 +85,7 @@ class PortableToolPathTests(unittest.TestCase):
             if (
                 not path.is_file()
                 or path.is_symlink()
-                or ".stack-work" in path.parts
+                or _is_generated_stack_path(path)
                 or "__pycache__" in path.parts
                 or path.suffix not in TEXT_SUFFIXES
             ):
