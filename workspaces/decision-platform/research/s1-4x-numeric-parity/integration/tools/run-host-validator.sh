@@ -13,8 +13,20 @@ export GIT_OPTIONAL_LOCKS=0
 export GIT_TERMINAL_PROMPT=0
 readonly GIT_BIN=/usr/bin/git
 readonly UV_BIN="${S1_4X_UV_BIN:?S1_4X_UV_BIN is required}"
+readonly DOCKER_BIN="${S1_4X_DOCKER_BIN:?S1_4X_DOCKER_BIN is required}"
+readonly DOCKER_SHA256="${S1_4X_DOCKER_SHA256:?S1_4X_DOCKER_SHA256 is required}"
 if [[ ! "$UV_BIN" =~ ^/proc/self/fd/[0-9]+$ ]]; then
   echo "UV executable must be inherited through a sealed fd" >&2
+  exit 69
+fi
+if [[ ! "$DOCKER_BIN" =~ ^/proc/self/fd/([3-9]|[1-9][0-9]+)$ ]]; then
+  echo "Docker executable must be inherited through a sealed fd" >&2
+  exit 69
+fi
+if [[ ! "$DOCKER_SHA256" =~ ^[0-9a-f]{64}$ ]] \
+  || [[ "$(/usr/bin/sha256sum "$DOCKER_BIN" | /usr/bin/awk '{print $1}')" \
+    != "$DOCKER_SHA256" ]]; then
+  echo "Docker executable SHA-256 mismatch" >&2
   exit 69
 fi
 
@@ -25,6 +37,8 @@ ORACLE="$S1_4X/oracle"
 exec "$UV_BIN" run --frozen --no-config --project "$ORACLE" \
   python "$ORACLE/validate_environment.py" \
   --home "$HOME" \
+  --docker-bin "$DOCKER_BIN" \
+  --docker-sha256 "$DOCKER_SHA256" \
   --cpu-set 0 \
   --min-home-free-bytes 32212254720 \
   --min-available-memory-bytes 4294967296 \

@@ -67,7 +67,7 @@ BOUNDARY_IDS = (
     "haskell",
 )
 RUNTIME_DEPENDENCY_ROLES_BY_BOUNDARY = {
-    "hostValidator": ("uv",),
+    "hostValidator": ("uv", "docker"),
     "python-numpy-s1-4": ("uv", "benchmarkPython"),
     "python-numpy-s1-4r": ("uv", "benchmarkPython"),
     "python-jax-eager-s1-4r": ("uv", "benchmarkPython"),
@@ -450,7 +450,7 @@ def _strict_command_manifest(
         ][boundary_id]
         if (
             not isinstance(dependencies, dict)
-            or tuple(dependencies) != expected_roles
+            or set(dependencies) != set(expected_roles)
         ):
             raise ContractError("INVALID_COMMAND_MANIFEST_COMMANDS")
         for role, identity in dependencies.items():
@@ -475,7 +475,7 @@ def _strict_command_manifest(
         evidence = allowed_evidence[boundary_id]
         if (
             not isinstance(evidence, dict)
-            or tuple(evidence) != expected_roles
+            or set(evidence) != set(expected_roles)
         ):
             raise ContractError("INVALID_COMMAND_MANIFEST_EVIDENCE")
         for role, identity in evidence.items():
@@ -870,6 +870,14 @@ def _benchmark_environment(
                 "S1_4X_UV_SHA256": runtime_dependencies["uv"].binding[
                     "sha256"
                 ],
+            }
+        )
+    if boundary_id == "hostValidator":
+        docker = runtime_dependencies["docker"]
+        environment.update(
+            {
+                "S1_4X_DOCKER_BIN": proc_path["docker"],
+                "S1_4X_DOCKER_SHA256": docker.binding["sha256"],
             }
         )
     if "benchmarkPython" in runtime_dependencies:
@@ -2001,34 +2009,36 @@ def execute_schedule(
             boundary_id: {
                 dependency_id: executable_stack.enter_context(
                     _pin_executable(
-                        identity,
+                        manifest["allowedExecutables"][
+                            "runtimeDependenciesByBoundary"
+                        ][boundary_id][dependency_id],
                         role=(
                             "runtimeDependency:"
                             f"{boundary_id}:{dependency_id}"
                         ),
                     )
                 )
-                for dependency_id, identity in dependencies.items()
+                for dependency_id in dependency_ids
             }
-            for boundary_id, dependencies in manifest[
-                "allowedExecutables"
-            ]["runtimeDependenciesByBoundary"].items()
+            for boundary_id, dependency_ids
+            in RUNTIME_DEPENDENCY_ROLES_BY_BOUNDARY.items()
         }
         runtime_evidence = {
             boundary_id: {
                 evidence_id: executable_stack.enter_context(
                     _pin_evidence(
-                        identity,
+                        manifest["allowedEvidenceByBoundary"][
+                            boundary_id
+                        ][evidence_id],
                         role=(
                             f"runtimeEvidence:{boundary_id}:{evidence_id}"
                         ),
                     )
                 )
-                for evidence_id, identity in evidence.items()
+                for evidence_id in evidence_ids
             }
-            for boundary_id, evidence in manifest[
-                "allowedEvidenceByBoundary"
-            ].items()
+            for boundary_id, evidence_ids
+            in RUNTIME_EVIDENCE_ROLES_BY_BOUNDARY.items()
         }
         environments = {
             boundary_id: _benchmark_environment(
@@ -2079,7 +2089,10 @@ def execute_schedule(
                     inherited_executables=host_inherited,
                     cwd=repo_root,
                     timeout_seconds=min(
-                        plan["environmentValidity"]["maxQuietWaitSeconds"],
+                        (
+                            plan["environmentValidity"]["maxQuietWaitSeconds"]
+                            + 60
+                        ),
                         max(1, int(remaining_total)),
                     ),
                     stdout_path=output_directory / "host-validator.stdout",

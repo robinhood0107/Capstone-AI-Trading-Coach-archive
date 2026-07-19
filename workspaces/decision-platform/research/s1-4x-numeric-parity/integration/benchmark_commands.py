@@ -49,7 +49,7 @@ BOUNDARY_IDS = (
     "haskell",
 )
 RUNTIME_DEPENDENCY_ROLES_BY_BOUNDARY = {
-    "hostValidator": ("uv",),
+    "hostValidator": ("uv", "docker"),
     "python-numpy-s1-4": ("uv", "benchmarkPython"),
     "python-numpy-s1-4r": ("uv", "benchmarkPython"),
     "python-jax-eager-s1-4r": ("uv", "benchmarkPython"),
@@ -303,7 +303,7 @@ def validate_manifest(value: Any) -> dict[str, Any]:
         ]
         if (
             not isinstance(dependencies, dict)
-            or tuple(dependencies) != expected_roles
+            or set(dependencies) != set(expected_roles)
         ):
             raise CommandManifestError("MANIFEST_COMMANDS_INVALID")
         for role, identity in dependencies.items():
@@ -323,7 +323,7 @@ def validate_manifest(value: Any) -> dict[str, Any]:
         evidence = evidence_by_boundary[boundary_id]
         if (
             not isinstance(evidence, dict)
-            or tuple(evidence) != expected_roles
+            or set(evidence) != set(expected_roles)
         ):
             raise CommandManifestError("MANIFEST_EVIDENCE_INVALID")
         for role, identity in evidence.items():

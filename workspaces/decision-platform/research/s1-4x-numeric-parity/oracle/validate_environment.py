@@ -4,16 +4,23 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import hashlib
 import os
 import platform
+import re
 import shutil
+import stat
 import subprocess
 import time
 from collections.abc import Mapping, Sequence
+from contextlib import suppress
 from pathlib import Path
 from typing import Any, Protocol
 
 from oracle_common import OracleContractError, atomic_write_json, sha256_bytes
+
+SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+SELF_FD_PATTERN = re.compile(r"^/proc/self/fd/([3-9]|[1-9][0-9]+)$")
 
 
 @dataclasses.dataclass(frozen=True)
@@ -83,6 +90,113 @@ class EnvironmentAdapter(Protocol):
 class LocalEnvironmentAdapter:
     """Linux/WSL host를 stdlib와 bounded Docker subprocess만으로 읽는다."""
 
+    def __init__(
+        self,
+        *,
+        docker_bin: Path | str = "docker",
+        docker_sha256: str | None = None,
+    ) -> None:
+        self._docker_command = str(docker_bin)
+        self._docker_sha256: str | None = None
+        self._docker_pass_fds: tuple[int, ...] = ()
+        self._owned_docker_fd: int | None = None
+        if self._docker_command == "docker" and docker_sha256 is None:
+            return
+        if (
+            not Path(self._docker_command).is_absolute()
+            or docker_sha256 is None
+            or SHA256_PATTERN.fullmatch(docker_sha256) is None
+        ):
+            raise OracleContractError(
+                "explicit Docker executable requires an absolute path and SHA-256"
+            )
+        descriptor_match = SELF_FD_PATTERN.fullmatch(self._docker_command)
+        if descriptor_match is not None:
+            descriptor = int(descriptor_match.group(1))
+            try:
+                descriptor_stat = os.fstat(descriptor)
+            except OSError as exc:
+                raise OracleContractError("Docker executable FD is not live") from exc
+            if (
+                not stat.S_ISREG(descriptor_stat.st_mode)
+                or descriptor_stat.st_mode & 0o111 == 0
+            ):
+                raise OracleContractError(
+                    "Docker executable FD is not an executable regular file"
+                )
+            actual_sha256 = self._sha256_descriptor(
+                descriptor,
+                expected_size=descriptor_stat.st_size,
+            )
+            self._docker_pass_fds = (descriptor,)
+        else:
+            flags = os.O_RDONLY | os.O_CLOEXEC
+            if hasattr(os, "O_NOFOLLOW"):
+                flags |= os.O_NOFOLLOW
+            try:
+                descriptor = os.open(self._docker_command, flags)
+                descriptor_stat = os.fstat(descriptor)
+            except OSError as exc:
+                raise OracleContractError(
+                    "Docker executable path is unavailable or unsafe"
+                ) from exc
+            if (
+                not stat.S_ISREG(descriptor_stat.st_mode)
+                or descriptor_stat.st_mode & 0o111 == 0
+            ):
+                os.close(descriptor)
+                raise OracleContractError(
+                    "Docker executable path is not an executable regular file"
+                )
+            try:
+                actual_sha256 = self._sha256_descriptor(
+                    descriptor,
+                    expected_size=descriptor_stat.st_size,
+                )
+            except BaseException:
+                os.close(descriptor)
+                raise
+            self._owned_docker_fd = descriptor
+            self._docker_command = f"/proc/self/fd/{descriptor}"
+            self._docker_pass_fds = (descriptor,)
+        if actual_sha256 != docker_sha256:
+            self.close()
+            raise OracleContractError("Docker executable SHA-256 mismatch")
+        self._docker_sha256 = actual_sha256
+
+    @staticmethod
+    def _sha256_descriptor(descriptor: int, *, expected_size: int) -> str:
+        digest = hashlib.sha256()
+        offset = 0
+        while offset < expected_size:
+            try:
+                chunk = os.pread(
+                    descriptor,
+                    min(1024 * 1024, expected_size - offset),
+                    offset,
+                )
+            except OSError as exc:
+                raise OracleContractError(
+                    "Docker executable could not be hashed"
+                ) from exc
+            if not chunk:
+                raise OracleContractError("Docker executable changed during hashing")
+            digest.update(chunk)
+            offset += len(chunk)
+        return digest.hexdigest()
+
+    def close(self) -> None:
+        """Adapter가 직접 연 Docker descriptor만 닫는다."""
+
+        if self._owned_docker_fd is not None:
+            os.close(self._owned_docker_fd)
+            self._owned_docker_fd = None
+            self._docker_pass_fds = ()
+
+    def __del__(self) -> None:
+        with suppress(OSError):
+            self.close()
+
     def home_free_bytes(self, home: Path) -> int:
         return shutil.disk_usage(home).free
 
@@ -95,7 +209,11 @@ class LocalEnvironmentAdapter:
         raise OracleContractError("/proc/meminfo has no MemAvailable")
 
     def logical_cpu_count(self) -> int:
-        return len(os.sched_getaffinity(0))
+        # Parent runner가 먼저 CPU 0에 pin되어도 host 분모는 pin 이전 값이어야 한다.
+        logical_cpu_count = os.cpu_count()
+        if logical_cpu_count is None or logical_cpu_count <= 0:
+            raise OracleContractError("logical CPU count is unavailable")
+        return logical_cpu_count
 
     def normalized_affinity(self) -> frozenset[int]:
         return frozenset(os.sched_getaffinity(0))
@@ -108,11 +226,12 @@ class LocalEnvironmentAdapter:
 
     def running_containers(self) -> list[str]:
         completed = subprocess.run(
-            ["docker", "ps", "-q"],
+            [self._docker_command, "ps", "-q"],
             check=False,
             capture_output=True,
             text=True,
             timeout=10,
+            pass_fds=self._docker_pass_fds,
         )
         if completed.returncode != 0:
             raise OracleContractError(
@@ -567,6 +686,8 @@ def _parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
         )
     )
     parser.add_argument("--home", required=True, type=Path)
+    parser.add_argument("--docker-bin", default="docker")
+    parser.add_argument("--docker-sha256")
     parser.add_argument("--cpu-set", required=True, type=_parse_cpu_set)
     parser.add_argument("--min-home-free-bytes", type=int, default=32_212_254_720)
     parser.add_argument("--min-available-memory-bytes", type=int, default=4_294_967_296)
@@ -624,9 +745,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     """CLI entrypoint이며 앞 check 실패 뒤 마지막 성공도 aggregate 실패로 보존한다."""
 
     arguments = _parse_arguments(argv)
+    adapter: LocalEnvironmentAdapter | None = None
     try:
         policy = _policy_from_arguments(arguments)
-        report = validate_environment(arguments.home.resolve(), policy=policy)
+        adapter = LocalEnvironmentAdapter(
+            docker_bin=arguments.docker_bin,
+            docker_sha256=arguments.docker_sha256,
+        )
+        report = validate_environment(
+            arguments.home.resolve(),
+            policy=policy,
+            adapter=adapter,
+        )
     except OracleContractError as exc:
         report = {
             "schemaVersion": "s1.4x-host-validity-v1",
@@ -645,6 +775,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             "failureCount": 1,
             "status": "FAIL",
         }
+    finally:
+        if adapter is not None:
+            adapter.close()
     atomic_write_json(arguments.output, report)
     return 0 if report["status"] == "PASS" else 1
 
