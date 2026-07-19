@@ -1,15 +1,25 @@
 module S14X.ContractSpec (tests) where
 
+import           Control.Exception (finally)
 import           Data.ByteString (ByteString)
 import           Data.Foldable (traverse_)
+import           Data.Maybe (isJust)
 import           Data.Version (showVersion)
+import           System.Directory (createDirectory, getTemporaryDirectory, removeDirectoryRecursive,
+                                   renameFile)
 import           System.Info (compilerName, fullCompilerVersion)
+import           System.Posix.IO (OpenMode (ReadOnly), closeFd, defaultFileFlags, openFd)
+import           System.Posix.Process (getProcessID)
+import           System.Posix.Types (Fd (Fd))
 import           Test.Tasty (TestTree, testGroup)
 import           Test.Tasty.HUnit (assertBool, assertFailure, testCase, (@?=))
 
+import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BS8
 import qualified Data.Text as Text
 
+import           S14X.Contract.PinnedFd (parsePinnedFdPath, pinnedRegularFileMatchesSha256,
+                                         validPinnedRegularFilePath)
 import           S14X.Contract.Process (encodeResultBatch, implementationLabel, parseRequest,
                                         runRequest, sha256Hex)
 import           S14X.Contract.Types (RequestBatch (RequestBatch), ResultBatch (ResultBatch),
@@ -26,7 +36,8 @@ tests =
       testCase "canonical request executes in order" canonicalRequest,
       testCase "result implementation follows the active compiler" compilerIdentity,
       testCase "recursive result encoding normalizes negative zero" negativeZero,
-      testCase "pure SHA-256 has known answers" shaKnownAnswers
+      testCase "pure SHA-256 has known answers" shaKnownAnswers,
+      testCase "marker FD survives pathname swap and rejects a closed FD" markerPinnedFd
     ]
 
 duplicateKeys :: IO ()
@@ -102,6 +113,60 @@ shaKnownAnswers :: IO ()
 shaKnownAnswers = do
   sha256Hex "" @?= "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
   sha256Hex "abc" @?= "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+
+markerPinnedFd :: IO ()
+markerPinnedFd = do
+  root <- getTemporaryDirectory
+  processId <- getProcessID
+  let directory = root <> "/s1-4x-marker-fd-" <> show processId
+      source = directory <> "/marker.py"
+      renamed = directory <> "/marker.opened.py"
+      original = "original marker bytes"
+      replacement = "replacement marker bytes"
+  createDirectory directory
+  markerPinnedFdAction source renamed original replacement
+    `finally` removeDirectoryRecursive directory
+
+markerPinnedFdAction :: FilePath -> FilePath -> ByteString -> ByteString -> IO ()
+markerPinnedFdAction source renamed original replacement = do
+  BS.writeFile source original
+  descriptor <- openFd source ReadOnly Nothing defaultFileFlags
+  let pinnedPath = pinnedFdPath descriptor
+  assertBool
+    "marker path must use a canonical inherited descriptor"
+    (isJust (parsePinnedFdPath pinnedPath))
+  parsePinnedFdPath "/proc/self/fd/2" @?= Nothing
+  parsePinnedFdPath "/proc/self/fd/03" @?= Nothing
+  parsePinnedFdPath "/proc/self/fd/not-a-number" @?= Nothing
+  validPinnedRegularFilePath pinnedPath >>= (@?= True)
+  pinnedRegularFileMatchesSha256 pinnedPath (sha256Hex original)
+    >>= (@?= True)
+
+  renameFile source renamed
+  BS.writeFile source replacement
+  BS.readFile pinnedPath >>= (@?= original)
+  pinnedRegularFileMatchesSha256 pinnedPath (sha256Hex original)
+    >>= (@?= True)
+
+  closeFd descriptor
+  validPinnedRegularFilePath pinnedPath >>= (@?= False)
+  pinnedRegularFileMatchesSha256 pinnedPath (sha256Hex original)
+    >>= (@?= False)
+
+  replacementDescriptor <- openFd source ReadOnly Nothing defaultFileFlags
+  let replacementPinnedPath = pinnedFdPath replacementDescriptor
+  pinnedRegularFileMatchesSha256
+    replacementPinnedPath
+    (sha256Hex original)
+    >>= (@?= False)
+  pinnedRegularFileMatchesSha256
+    replacementPinnedPath
+    (sha256Hex replacement)
+    >>= (@?= True)
+  closeFd replacementDescriptor
+
+pinnedFdPath :: Fd -> FilePath
+pinnedFdPath (Fd descriptor) = "/proc/self/fd/" <> show descriptor
 
 duplicateRequest :: ByteString
 duplicateRequest =
