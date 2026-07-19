@@ -1,0 +1,161 @@
+{
+  "schemaVersion": "s1.4x-scala-compiler-profiles-v1",
+  "scalaVersion": "3.8.4",
+  "jdkRelease": "25",
+  "projectPackage": "ai.trading.coach.s14x",
+  "baseOptionGroups": [
+    [
+      "-source:3.8"
+    ],
+    [
+      "-release:25"
+    ],
+    [
+      "-encoding",
+      "UTF-8"
+    ],
+    [
+      "-deprecation"
+    ],
+    [
+      "-feature"
+    ],
+    [
+      "-unchecked"
+    ],
+    [
+      "-Wunused:all"
+    ],
+    [
+      "-Wvalue-discard"
+    ],
+    [
+      "-Wnonunit-statement"
+    ],
+    [
+      "-Wenum-comment-discard"
+    ],
+    [
+      "-Wimplausible-patterns"
+    ],
+    [
+      "-WunstableInlineAccessors"
+    ],
+    [
+      "-Wtostring-interpolated"
+    ],
+    [
+      "-Wrecurse-with-default"
+    ],
+    [
+      "-Wwrong-arrow"
+    ],
+    [
+      "-Winfer-union"
+    ],
+    [
+      "-Wshadow:all"
+    ],
+    [
+      "-language:strictEquality"
+    ],
+    [
+      "-language:noAutoTupling"
+    ],
+    [
+      "-Werror"
+    ]
+  ],
+  "profiles": {
+    "A": {
+      "profileName": "baseline",
+      "additionalOptions": [],
+      "scalaCliArguments": []
+    },
+    "B": {
+      "profileName": "opt",
+      "additionalOptions": [
+        "-opt"
+      ],
+      "scalaCliArguments": [
+        "--scalac-option=-opt"
+      ]
+    },
+    "C": {
+      "profileName": "opt-own-source-inline",
+      "additionalOptions": [
+        "-opt",
+        "-opt-inline:ai.trading.coach.s14x.**"
+      ],
+      "scalaCliArguments": [
+        "--scalac-option=-opt",
+        "--scalac-option=-opt-inline:ai.trading.coach.s14x.**"
+      ]
+    }
+  },
+  "warningNegativeFixtures": [
+    {
+      "fixtureId": "unused-import",
+      "path": "tools/fixtures/compiler-warning-unused-import.scala",
+      "requiredOptions": [
+        "-Wunused:all",
+        "-Werror"
+      ],
+      "expectedExitCode": 1,
+      "expectedDiagnosticPattern": "(?i)unused import",
+      "forbiddenDiagnosticPattern": "(?i)(syntax error|not found:|internal compiler error|exception|out ?of ?memory|killed|fatal error|stack overflow)"
+    },
+    {
+      "fixtureId": "value-discard",
+      "path": "tools/fixtures/compiler-warning-value-discard.scala",
+      "requiredOptions": [
+        "-Wvalue-discard",
+        "-Werror"
+      ],
+      "expectedExitCode": 1,
+      "expectedDiagnosticPattern": "(?i)discarded (?:non-Unit )?value",
+      "forbiddenDiagnosticPattern": "(?i)(syntax error|not found:|internal compiler error|exception|out ?of ?memory|killed|fatal error|stack overflow)"
+    },
+    {
+      "fixtureId": "nonunit-statement",
+      "path": "tools/fixtures/compiler-warning-nonunit-statement.scala",
+      "requiredOptions": [
+        "-Wnonunit-statement",
+        "-Werror"
+      ],
+      "expectedExitCode": 1,
+      "expectedDiagnosticPattern": "(?i)pure expression does nothing in statement position",
+      "forbiddenDiagnosticPattern": "(?i)(syntax error|not found:|internal compiler error|exception|out ?of ?memory|killed|fatal error|stack overflow)"
+    },
+    {
+      "fixtureId": "strict-equality",
+      "path": "tools/fixtures/compiler-strict-equality.scala",
+      "requiredOptions": [
+        "-language:strictEquality",
+        "-Werror"
+      ],
+      "expectedExitCode": 1,
+      "expectedDiagnosticPattern": "(?i)(cannot be compared with (?:==|!=)|strict equality)",
+      "forbiddenDiagnosticPattern": "(?i)(syntax error|not found:|internal compiler error|exception|out ?of ?memory|killed|fatal error|stack overflow)"
+    }
+  ],
+  "diagnosticOnlyOptions": [
+    {
+      "option": "-Wsafe-init",
+      "expectedDiagnosticPattern": "(?i)(safe initialization|initialization)"
+    },
+    {
+      "option": "-Wopt:all",
+      "expectedDiagnosticPattern": "(?i)(optimizer|inlin)"
+    }
+  ],
+  "forbiddenOptions": [
+    "-Wall",
+    "-Wnumeric-widen",
+    "-Yexplicit-nulls",
+    "-language:experimental",
+    "-Xtarget:llvm",
+    "-ffast-math"
+  ],
+  "fallbackProfile": "A"
+}

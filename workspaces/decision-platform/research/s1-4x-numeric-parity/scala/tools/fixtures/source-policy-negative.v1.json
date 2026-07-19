@@ -1,0 +1,137 @@
+{
+  "schemaVersion": "s1.4x-scala-source-policy-negative-matrix-v1",
+  "fixtures": [
+    {
+      "fixtureId": "qualified-predef-require",
+      "file": "qualified-predef-require.scala",
+      "expectedSymbol": "scala.Predef.require",
+      "expectedDisposition": "SEMANTIC_REJECT"
+    },
+    {
+      "fixtureId": "renamed-predef-require",
+      "file": "renamed-predef-require.scala",
+      "expectedSymbol": "scala.Predef.require",
+      "expectedDisposition": "SEMANTIC_REJECT"
+    },
+    {
+      "fixtureId": "wildcard-predef-assert",
+      "file": "wildcard-predef-assert.scala",
+      "expectedSymbol": "scala.Predef.assert",
+      "expectedDisposition": "SEMANTIC_REJECT"
+    },
+    {
+      "fixtureId": "type-alias-map-apply",
+      "file": "type-alias-map-apply.scala",
+      "expectedSymbol": "scala.collection.MapOps.apply",
+      "expectedDisposition": "SEMANTIC_REJECT"
+    },
+    {
+      "fixtureId": "type-alias-option-get",
+      "file": "type-alias-option-get.scala",
+      "expectedSymbol": "scala.Option.get",
+      "expectedDisposition": "SEMANTIC_REJECT"
+    },
+    {
+      "fixtureId": "renamed-mutable-collection",
+      "file": "renamed-mutable-collection.scala",
+      "expectedSymbol": "scala.collection.mutable",
+      "expectedDisposition": "SEMANTIC_REJECT"
+    },
+    {
+      "fixtureId": "wildcard-mutable-collection",
+      "file": "wildcard-mutable-collection.scala",
+      "expectedSymbol": "scala.collection.mutable",
+      "expectedDisposition": "SEMANTIC_REJECT"
+    },
+    {
+      "fixtureId": "renamed-array-update",
+      "file": "renamed-array-update.scala",
+      "expectedSymbol": "scala.Array.update",
+      "expectedDisposition": "SEMANTIC_REJECT"
+    },
+    {
+      "fixtureId": "renamed-integer-parse",
+      "file": "renamed-integer-parse.scala",
+      "expectedSymbol": "java.lang.Integer.parseInt",
+      "expectedDisposition": "SEMANTIC_REJECT"
+    },
+    {
+      "fixtureId": "renamed-math-fma",
+      "file": "renamed-math-fma.scala",
+      "expectedSymbol": "java.lang.Math.fma",
+      "expectedDisposition": "SEMANTIC_REJECT"
+    },
+    {
+      "fixtureId": "renamed-float-type",
+      "file": "renamed-float-type.scala",
+      "expectedSymbol": "scala.Float",
+      "expectedDisposition": "SEMANTIC_REJECT"
+    },
+    {
+      "fixtureId": "unresolved-call",
+      "file": "unresolved-call.scala",
+      "expectedSymbol": "UNRESOLVED",
+      "expectedDisposition": "COMPILE_REJECT"
+    },
+    {
+      "fixtureId": "missing-public-result-type",
+      "file": "missing-public-result-type.scala",
+      "expectedSymbol": "ExplicitResultTypes",
+      "expectedDisposition": "SEMANTIC_REJECT"
+    },
+    {
+      "fixtureId": "qualified-given-conversion",
+      "file": "qualified-given-conversion.scala",
+      "expectedSymbol": "scala.Conversion",
+      "expectedDisposition": "SEMANTIC_REJECT"
+    },
+    {
+      "fixtureId": "renamed-given-conversion",
+      "file": "renamed-given-conversion.scala",
+      "expectedSymbol": "scala.Conversion",
+      "expectedDisposition": "SEMANTIC_REJECT"
+    },
+    {
+      "fixtureId": "runtime-checked-annotation",
+      "file": "runtime-checked-annotation.scala",
+      "expectedSymbol": "scala.annotation.internal.RuntimeChecked",
+      "expectedDisposition": "SEMANTIC_REJECT"
+    },
+    {
+      "fixtureId": "experimental-language-import",
+      "file": "experimental-language-import.scala",
+      "expectedSymbol": "scala.language.experimental",
+      "expectedDisposition": "SEMANTIC_REJECT"
+    },
+    {
+      "fixtureId": "disable-syntax-null",
+      "file": "disable-syntax-null.scala",
+      "expectedSymbol": "DisableSyntax.null",
+      "expectedDisposition": "SYNTAX_REJECT"
+    },
+    {
+      "fixtureId": "disable-syntax-return",
+      "file": "disable-syntax-return.scala",
+      "expectedSymbol": "DisableSyntax.return",
+      "expectedDisposition": "SYNTAX_REJECT"
+    },
+    {
+      "fixtureId": "disable-syntax-as-instance-of",
+      "file": "disable-syntax-as-instance-of.scala",
+      "expectedSymbol": "DisableSyntax.asInstanceOf",
+      "expectedDisposition": "SYNTAX_REJECT"
+    },
+    {
+      "fixtureId": "disable-syntax-is-instance-of",
+      "file": "disable-syntax-is-instance-of.scala",
+      "expectedSymbol": "DisableSyntax.isInstanceOf",
+      "expectedDisposition": "SYNTAX_REJECT"
+    },
+    {
+      "fixtureId": "disable-syntax-throw",
+      "file": "disable-syntax-throw.scala",
+      "expectedSymbol": "DisableSyntax.throw",
+      "expectedDisposition": "SYNTAX_REJECT"
+    }
+  ]
+}

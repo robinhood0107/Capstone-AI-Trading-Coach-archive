@@ -1,0 +1,142 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCALA_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+S1_ROOT="$(cd -- "$SCALA_ROOT/.." && pwd -P)"
+RUNNER_PATH="$(readlink -f -- "${BASH_SOURCE[0]}")"
+SCALA_CLI="${S1_4X_SCALA_CLI_BIN:?set exact Scala CLI 1.15.0 binary path from readiness packet}"
+PROFILE="A"
+OUTPUT_DIR=""
+ORIGINAL_ARGUMENTS=("$@")
+
+usage() {
+  printf 'usage: %s --output-dir <absolute-path> [--profile A|B|C]\n' "$0" >&2
+  exit 64
+}
+
+while (($# > 0)); do
+  case "$1" in
+    --output-dir)
+      (($# >= 2)) || usage
+      OUTPUT_DIR="$2"
+      shift 2
+      ;;
+    --profile)
+      (($# >= 2)) || usage
+      PROFILE="$2"
+      shift 2
+      ;;
+    *)
+      usage
+      ;;
+  esac
+done
+
+[[ "$OUTPUT_DIR" == /* ]] || usage
+case "$PROFILE" in
+  A | B | C) ;;
+  *) usage ;;
+esac
+
+for name in \
+  scala-property-report.v1.json \
+  scala-registry-report.v1.json \
+  scala-property-execution-evidence.v1.json; do
+  [[ ! -e "$OUTPUT_DIR/$name" ]] || {
+    printf 'property evidence output already exists: %s\n' "$OUTPUT_DIR/$name" >&2
+    exit 1
+  }
+done
+
+CACHE_ROOT="${S1_4X_CACHE_ROOT:-$HOME/.cache/s1-4x}"
+mkdir -p "$CACHE_ROOT/tmp" "$CACHE_ROOT/coursier" "$OUTPUT_DIR"
+export TMPDIR="$CACHE_ROOT/tmp"
+export TEMP="$TMPDIR"
+export TMP="$TMPDIR"
+export COURSIER_CACHE="$CACHE_ROOT/coursier"
+
+PROFILE_CONFIG="$SCALA_ROOT/compiler-profiles.v1.json"
+"$SCALA_ROOT/tools/assert-compiler-profiles.sh" >/dev/null
+jq -e --arg profile "$PROFILE" \
+  '.schemaVersion == "s1.4x-scala-compiler-profiles-v1" and
+   (.profiles[$profile] != null)' "$PROFILE_CONFIG" >/dev/null
+mapfile -t profile_options < <(
+  jq -er --arg profile "$PROFILE" \
+    '.profiles[$profile].scalaCliArguments[]' "$PROFILE_CONFIG"
+)
+mapfile -t property_sources < <(
+  python3 "$SCALA_ROOT/tools/source_input_manifest.py" \
+    --scala-root "$SCALA_ROOT" \
+    --manifest "$SCALA_ROOT/source-inputs.v1.json" \
+    --policy "$S1_ROOT/contract/scala-source-policy.v1.json" \
+    --role configuration \
+    --role main \
+    --role test
+)
+[[ "${#property_sources[@]}" -gt 2 ]] || {
+  printf 'property source manifest closure is empty\n' >&2
+  exit 1
+}
+mapfile -t test_dependencies < <(
+  sed -n 's#^//> using test\.dep \([^[:space:]]\+\)$#\1#p' \
+    "$SCALA_ROOT/project.scala"
+)
+test_dependency_directive_count="$(
+  grep -c '^//> using test\.dep ' "$SCALA_ROOT/project.scala"
+)"
+[[ "${#test_dependencies[@]}" -gt 0 \
+  && "${#test_dependencies[@]}" -eq "$test_dependency_directive_count" ]] || {
+  printf 'test dependency directive closure is invalid\n' >&2
+  exit 1
+}
+test_dependency_arguments=()
+for dependency in "${test_dependencies[@]}"; do
+  [[ "$dependency" =~ ^[A-Za-z0-9_.-]+:{1,3}[A-Za-z0-9_.-]+:[A-Za-z0-9_.+-]+$ ]] ||
+    {
+      printf 'test dependency coordinate is invalid\n' >&2
+      exit 1
+    }
+  test_dependency_arguments+=("--dependency" "$dependency")
+done
+
+command_prefix=(
+  "$SCALA_CLI" --power run
+  "${property_sources[@]}"
+  --test
+  --server=false
+  --jvm system
+  --coursier-validate-checksums
+  "${test_dependency_arguments[@]}"
+  --main-class ai.trading.coach.s14x.shell.PropertyEvidenceMain
+  "${profile_options[@]}"
+)
+runner_arguments=(
+  --output-dir "$OUTPUT_DIR"
+  --s1-root "$S1_ROOT"
+  --profile "$PROFILE"
+  --runner-path "$RUNNER_PATH"
+  --scala-cli-sha256 "$(sha256sum "$SCALA_CLI" | awk '{print $1}')"
+)
+command_argv_sha="$(
+  python3 - "$RUNNER_PATH" "${ORIGINAL_ARGUMENTS[@]}" <<'PY'
+import hashlib
+import json
+import sys
+
+payload = json.dumps(
+    sys.argv[1:],
+    allow_nan=False,
+    ensure_ascii=False,
+    separators=(",", ":"),
+    sort_keys=True,
+).encode("utf-8")
+print(hashlib.sha256(payload).hexdigest())
+PY
+)"
+
+"${command_prefix[@]}" -- \
+  "${runner_arguments[@]}" \
+  --command-argv-sha256 "$command_argv_sha"
+
+printf 'SCALA_PROPERTY_EVIDENCE_PASS profile=%s outputDir=%s commandArgvSha256=%s\n' \
+  "$PROFILE" "$OUTPUT_DIR" "$command_argv_sha"

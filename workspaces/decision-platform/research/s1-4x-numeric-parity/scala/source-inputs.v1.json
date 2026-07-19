@@ -1,0 +1,131 @@
+{
+  "schemaVersion": "s1.4x-source-input-manifest-v1",
+  "language": "scala",
+  "files": {
+    "benchmarks/scala/ai/trading/coach/s14x/benchmark/BenchmarkInvocation.scala": {
+      "role": "benchmark",
+      "sha256": "03ec06d95537a9503602b457665030a1df2c2b45d426474f856f341b12e12658"
+    },
+    "benchmarks/scala/ai/trading/coach/s14x/benchmark/BenchmarkSetupProbeMain.scala": {
+      "role": "benchmark",
+      "sha256": "d839a6afd4d9815178e14adf81683da7480046bb1c602f920faac38785fe9454"
+    },
+    "benchmarks/scala/ai/trading/coach/s14x/benchmark/JvmForkEvidence.scala": {
+      "role": "benchmark",
+      "sha256": "c678db335e35f25dc7a23b029ec1c81155e2c2fc591aa9933187f3c829d8a7e4"
+    },
+    "benchmarks/scala/s1_4x/benchmarks/classical_path_risk/ClassicalPathRiskBenchmark.scala": {
+      "role": "benchmark",
+      "sha256": "5c44f2dd517c68814c778eb1503f7f03eae89e4f37877e1e74e3c21685b15886"
+    },
+    "benchmarks/scala/s1_4x/benchmarks/coverage_batch/CoverageBatchBenchmark.scala": {
+      "role": "benchmark",
+      "sha256": "1f9a5ebd6fe91bc7cf2576eec13ff67a4d82b29b881eef2f4af64e7cdc16a79c"
+    },
+    "benchmarks/scala/s1_4x/benchmarks/intraday_realized/IntradayRealizedBenchmark.scala": {
+      "role": "benchmark",
+      "sha256": "4bf16aefa15f6eea2758ae4d0469c729078c7e912a03a9246e57a6c1b4bb8fcf"
+    },
+    "benchmarks/scala/s1_4x/benchmarks/path_transform/PathTransformBenchmark.scala": {
+      "role": "benchmark",
+      "sha256": "f3981eff3ad5c50e6b420d6036eba57ba32f173f7e66113583a1dbedd831d7c7"
+    },
+    "benchmarks/scala/s1_4x/benchmarks/probabilistic_scalar/ProbabilisticScalarBenchmark.scala": {
+      "role": "benchmark",
+      "sha256": "00e38ca61873d1b343c94114f02842a62f20f37db3b1a88331aca1f2958ece7a"
+    },
+    "benchmarks/scala/s1_4x/benchmarks/serial_sharpe/SerialSharpeBenchmark.scala": {
+      "role": "benchmark",
+      "sha256": "78c5eaa06a341c31f5d5dff00a69be27cfd97f81f819d4084af8299513334cd7"
+    },
+    "project.scala": {
+      "role": "configuration",
+      "sha256": "9b5fed6695823c3d4297d71570e97ba39a618e7a55e1accec5fb2c4dd862030b"
+    },
+    "selected-profile.scala": {
+      "role": "configuration",
+      "sha256": "42e5f772f82bfbaee73ab134a1dc3ddca4e2d8ebcd1076f77ddbc0c26e739d07"
+    },
+    "src/main/scala/ai/trading/coach/s14x/core/AdvancedRisk.scala": {
+      "role": "main",
+      "sha256": "042df59cd846fb8f7de59fd6e8bdacc925d4371bc12f961d42bfda7010579b7c"
+    },
+    "src/main/scala/ai/trading/coach/s14x/core/Models.scala": {
+      "role": "main",
+      "sha256": "c01501bd9769a7cb596bcf41292f362c28d537dbedd89028951da5544fc9b0da"
+    },
+    "src/main/scala/ai/trading/coach/s14x/core/NumericPrimitives.scala": {
+      "role": "main",
+      "sha256": "86c5dff855377188c7fe11eb9708b2c2443ce42f1ef0402764677334507a31bf"
+    },
+    "src/main/scala/ai/trading/coach/s14x/core/ProductionMetrics.scala": {
+      "role": "main",
+      "sha256": "bd8a187fa436a44820c1c67c6fa269ee62eaa4cd4e32a1b23e7f552846a3593d"
+    },
+    "src/main/scala/ai/trading/coach/s14x/core/StableError.scala": {
+      "role": "main",
+      "sha256": "51a4d832422265650e888ee675983adf8fbe647da9797b9221a5aaec86a43a7a"
+    },
+    "src/main/scala/ai/trading/coach/s14x/core/Validation.scala": {
+      "role": "main",
+      "sha256": "c583d0aab4f272116e110634edd82867b9b7f2c33253421ae3683747af834437"
+    },
+    "src/main/scala/ai/trading/coach/s14x/shell/BinaryArrayReader.scala": {
+      "role": "main",
+      "sha256": "570b9da6917c64d3c00956af54d3e44645a3b2cc524aa341f256af1af372c3d2"
+    },
+    "src/main/scala/ai/trading/coach/s14x/shell/CandidateRunner.scala": {
+      "role": "main",
+      "sha256": "7ecc9d5dec0660f7ec3aed08894c2ec127074d95d1197528cf1f453037aed164"
+    },
+    "src/main/scala/ai/trading/coach/s14x/shell/ContractDecoder.scala": {
+      "role": "main",
+      "sha256": "2c9b739f444014b3255c423162cafebac87a0d2cff4f1635f993d37384e29865"
+    },
+    "src/main/scala/ai/trading/coach/s14x/shell/JsonSupport.scala": {
+      "role": "main",
+      "sha256": "cd7c99a6cfcbabb447523c3fff5cafe4cb6f31fc98841439addff9b6a64b72e1"
+    },
+    "src/main/scala/ai/trading/coach/s14x/shell/Main.scala": {
+      "role": "main",
+      "sha256": "9814a1c81edd587e53752c3c2574297aeec099579a0093954282ea294c2a2184"
+    },
+    "src/test/scala/ai/trading/coach/s14x/core/AdvancedRiskSuite.scala": {
+      "role": "test",
+      "sha256": "bf4df7054977eb08de261b33b571dfd1b20bfd909e8c89f6447f692c5763a42d"
+    },
+    "src/test/scala/ai/trading/coach/s14x/core/FrozenPropertyPlan.scala": {
+      "role": "test",
+      "sha256": "7d322e6ab70536c02e2ef1fe50de5c6cccd359f642a342ca6209799fd5d449b5"
+    },
+    "src/test/scala/ai/trading/coach/s14x/core/NumericPropertiesSuite.scala": {
+      "role": "test",
+      "sha256": "d5b1bf1504fdb0ff6e61289047dd9cade7aaa5860d451f6d65af65bbfd801dce"
+    },
+    "src/test/scala/ai/trading/coach/s14x/core/ProductionMetricsSuite.scala": {
+      "role": "test",
+      "sha256": "d94a1bd1f5344b58412775cd54df1533ed1ec87caa7746dde53be056a1fef4fa"
+    },
+    "src/test/scala/ai/trading/coach/s14x/shell/ContractShellSuite.scala": {
+      "role": "test",
+      "sha256": "42c938b50d76b620518de066c723cc602e41b407f0044b3b9884fea6f57315f6"
+    },
+    "src/test/scala/ai/trading/coach/s14x/shell/PropertyEvidenceClosureSuite.scala": {
+      "role": "test",
+      "sha256": "1aeee3abfacdeb6d127e66bc2c6905318d1da7fefda6f5b3c064662e8e7d1f02"
+    },
+    "src/test/scala/ai/trading/coach/s14x/shell/PropertyEvidenceMain.scala": {
+      "role": "test",
+      "sha256": "8bb38fc2ec164632b0e5d6ac45e396a6055caff0a97014e869d88ce91f0908e7"
+    }
+  },
+  "inputSets": {
+    "tracked": "files",
+    "manifest": "files",
+    "format": "files",
+    "compile": "files",
+    "lint": "files",
+    "profileRun": "files"
+  },
+  "canonicalManifestSha256": "1acea632f117b642fd932626107da3a557c1c4187fb6f14d8dc1af1c123fca79"
+}

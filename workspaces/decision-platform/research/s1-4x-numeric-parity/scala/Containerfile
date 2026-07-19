@@ -1,0 +1,21 @@
+ARG S1_4X_SCALA_BASE_IMAGE
+FROM ${S1_4X_SCALA_BASE_IMAGE}
+
+ARG S1_4X_SCALA_BASE_IMAGE
+ARG S1_4X_BASE_IMAGE_ID
+ARG S1_4X_CANDIDATE_SHA256
+ARG S1_4X_CONTAINERFILE_SHA256
+ARG S1_4X_FIXTURE_TREE_SHA256
+LABEL org.opencontainers.image.s1-4x.candidate-sha256="${S1_4X_CANDIDATE_SHA256}" \
+      org.opencontainers.image.s1-4x.base-reference="${S1_4X_SCALA_BASE_IMAGE}" \
+      org.opencontainers.image.s1-4x.base-image-id="${S1_4X_BASE_IMAGE_ID}" \
+      org.opencontainers.image.s1-4x.containerfile-sha256="${S1_4X_CONTAINERFILE_SHA256}" \
+      org.opencontainers.image.s1-4x.fixture-tree-sha256="${S1_4X_FIXTURE_TREE_SHA256}"
+COPY --chown=65532:65532 candidate.jar /opt/s1-4x/candidate.jar
+COPY --chown=65532:65532 fixture-bundle/ /opt/s1-4x/fixtures/
+RUN test "$(sha256sum /opt/s1-4x/candidate.jar | cut -d' ' -f1)" = \
+    "${S1_4X_CANDIDATE_SHA256}"
+
+USER 65532:65532
+WORKDIR /opt/s1-4x
+ENTRYPOINT ["/opt/java/openjdk/bin/java", "-cp", "/opt/s1-4x/candidate.jar", "ai.trading.coach.s14x.shell.Main"]

@@ -1,0 +1,6 @@
+{
+  "schemaVersion": "s1.4x-scala-lint-exceptions-v1",
+  "mutationAllowlist": [],
+  "partialApiAllowlist": [],
+  "suppressionAllowlist": []
+}
