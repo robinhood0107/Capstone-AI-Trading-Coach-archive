@@ -6,6 +6,7 @@ import ast
 import importlib.util
 import os
 import re
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -36,6 +37,77 @@ def load_helper():
 
 
 class CorrectnessProfileContractTests(unittest.TestCase):
+    def test_oracle_comparator_executes_only_pinned_module_bytes_with_source_semantics(
+        self,
+    ) -> None:
+        helper = load_helper()
+        with tempfile.TemporaryDirectory() as temporary:
+            numeric_root = Path(temporary).resolve() / "numeric"
+            oracle_root = numeric_root / "oracle"
+            schema_root = numeric_root / "contract"
+            oracle_root.mkdir(parents=True)
+            schema_root.mkdir()
+            compare_source = oracle_root / "compare_results.py"
+            common_source = oracle_root / "oracle_common.py"
+            schema_source = schema_root / "schema.txt"
+            output = numeric_root / "comparison.txt"
+            common_source.write_text(
+                "PINNED_VALUE = 'pinned-common'\n",
+                encoding="utf-8",
+            )
+            compare_source.write_text(
+                "from pathlib import Path\n"
+                "import sys\n"
+                "from oracle_common import PINNED_VALUE\n"
+                "schema = Path(__file__).resolve().parent.parent "
+                "/ 'contract' / 'schema.txt'\n"
+                "Path(sys.argv[1]).write_text(\n"
+                "    '|'.join((PINNED_VALUE, schema.read_text(), __file__)),\n"
+                "    encoding='utf-8',\n"
+                ")\n",
+                encoding="utf-8",
+            )
+            schema_source.write_text("schema-ok", encoding="utf-8")
+            comparator = helper._pin_oracle_comparator(numeric_root)
+
+            # Pin 이후 pathname을 바꿔도 child는 retained FD bytes만 실행해야 한다.
+            compare_source.write_text(
+                "raise SystemExit(91)\n",
+                encoding="utf-8",
+            )
+            common_source.write_text(
+                "PINNED_VALUE = 'poisoned-common'\n",
+                encoding="utf-8",
+            )
+            command = helper._oracle_compare_command(
+                python_path=Path(sys.executable),
+                comparator=comparator,
+                arguments=[str(output)],
+            )
+            completed = subprocess.run(
+                command,
+                env={
+                    "LC_ALL": "C.UTF-8",
+                    "PATH": "/usr/bin:/bin",
+                    "PYTHONPATH": str(numeric_root / "hostile-python-path"),
+                },
+                check=False,
+                capture_output=True,
+                pass_fds=(
+                    comparator.compare_script.descriptor,
+                    comparator.common_module.descriptor,
+                ),
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertEqual(
+                output.read_text(encoding="utf-8"),
+                f"pinned-common|schema-ok|{compare_source}",
+            )
+            self.assertEqual(command[1:3], ["-I", "-c"])
+            self.assertEqual(command[4], str(comparator.compare_script.fd_path))
+            self.assertEqual(command[5], str(comparator.common_module.fd_path))
+
     def test_sealed_child_environment_preserves_exact_ghcup_prefix(self) -> None:
         helper = load_helper()
         with tempfile.TemporaryDirectory() as temporary:
