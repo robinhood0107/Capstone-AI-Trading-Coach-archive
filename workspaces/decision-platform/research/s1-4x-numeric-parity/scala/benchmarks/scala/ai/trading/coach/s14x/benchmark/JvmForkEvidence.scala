@@ -104,70 +104,88 @@ object JvmForkEvidence:
     bean.getInputArguments.asScala.foreach(values.add)
     values
 
-  private def unixNumber(attributes: java.util.Map[String, Object], name: String): Long =
-    attributes.get(name) match
-      case number: Number => number.longValue
-      case _              => throw IllegalStateException("JMH_COMPILE_COMMAND_FILE_UNSAFE")
+  private def unixNumber(
+      attributes: java.util.Map[String, Object],
+      name: String
+  ): Option[Long] =
+    Option(attributes.get(name)).collect { case number: Number =>
+      number.longValue
+    }
 
-  private def unixTime(attributes: java.util.Map[String, Object], name: String): Long =
-    attributes.get(name) match
-      case value: FileTime => value.to(TimeUnit.NANOSECONDS)
-      case _               => throw IllegalStateException("JMH_COMPILE_COMMAND_FILE_UNSAFE")
+  private def unixTime(
+      attributes: java.util.Map[String, Object],
+      name: String
+  ): Option[Long] =
+    Option(attributes.get(name)).collect { case value: FileTime =>
+      value.to(TimeUnit.NANOSECONDS)
+    }
 
-  private def unixIdentity(path: Path, noFollowLinks: Boolean): UnixFileIdentity =
-    val options: Array[LinkOption] =
-      if noFollowLinks then Array(LinkOption.NOFOLLOW_LINKS)
-      else Array.empty[LinkOption]
+  private def unixIdentity(path: Path, noFollowLinks: Boolean): Option[UnixFileIdentity] =
     val attributes =
-      Files.readAttributes(
-        path,
-        "unix:dev,ino,mode,nlink,size,lastModifiedTime,ctime",
-        options*
-      )
-    val mode = unixNumber(attributes, "mode")
-    // Linux S_IFMT/S_IFREG 확인으로 symlink와 특수 파일을 같은 stat 결과에서 배제한다.
-    if (mode & 0xf000L) != 0x8000L then
-      throw IllegalStateException("JMH_COMPILE_COMMAND_FILE_UNSAFE")
-    UnixFileIdentity(
-      device = unixNumber(attributes, "dev"),
-      inode = unixNumber(attributes, "ino"),
+      if noFollowLinks then
+        Files.readAttributes(
+          path,
+          "unix:dev,ino,mode,nlink,size,lastModifiedTime,ctime",
+          LinkOption.NOFOLLOW_LINKS
+        )
+      else
+        Files.readAttributes(
+          path,
+          "unix:dev,ino,mode,nlink,size,lastModifiedTime,ctime"
+        )
+    for
+      mode <- unixNumber(attributes, "mode")
+      // Linux S_IFMT/S_IFREG 확인으로 symlink와 특수 파일을 같은 stat 결과에서 배제한다.
+      if (mode & 0xf000L) == 0x8000L
+      device <- unixNumber(attributes, "dev")
+      inode <- unixNumber(attributes, "ino")
+      linkCount <- unixNumber(attributes, "nlink")
+      size <- unixNumber(attributes, "size")
+      mtimeNanos <- unixTime(attributes, "lastModifiedTime")
+      ctimeNanos <- unixTime(attributes, "ctime")
+    yield UnixFileIdentity(
+      device = device,
+      inode = inode,
       mode = mode,
-      linkCount = unixNumber(attributes, "nlink"),
-      size = unixNumber(attributes, "size"),
-      mtimeNanos = unixTime(attributes, "lastModifiedTime"),
-      ctimeNanos = unixTime(attributes, "ctime")
+      linkCount = linkCount,
+      size = size,
+      mtimeNanos = mtimeNanos,
+      ctimeNanos = ctimeNanos
     )
 
-  private def channelBytes(channel: FileChannel): Array[Byte] =
+  private def channelBytes(channel: FileChannel): Option[Array[Byte]] =
     channel.position(0L)
     val openedSize = channel.size
-    if openedSize < 0L || openedSize > MaxCompileCommandBytes then
-      throw IllegalStateException("JMH_COMPILE_COMMAND_FILE_UNSAFE")
-    val buffer = ByteBuffer.allocate(openedSize.toInt)
-    while buffer.hasRemaining do
-      if channel.read(buffer) < 0 then
-        throw IllegalStateException("JMH_COMPILE_COMMAND_FILE_UNSAFE")
-    val eofProbe = ByteBuffer.allocate(1)
-    if channel.read(eofProbe) != -1 || channel.size != openedSize then
-      throw IllegalStateException("JMH_COMPILE_COMMAND_FILE_UNSAFE")
-    buffer.array()
+    if openedSize < 0L || openedSize > MaxCompileCommandBytes then None
+    else
+      val buffer = ByteBuffer.allocate(openedSize.toInt)
+      def fillBuffer(): Boolean =
+        if !buffer.hasRemaining then true
+        else if channel.read(buffer) < 0 then false
+        else fillBuffer()
+      if !fillBuffer() then None
+      else
+        val eofProbe = ByteBuffer.allocate(1)
+        Option.when(channel.read(eofProbe) == -1 && channel.size == openedSize)(
+          buffer.array()
+        )
 
-  private def liveFileDescriptors(): Set[Int] =
-    if !Files.isDirectory(ProcessFdDirectory) then
-      throw IllegalStateException("JMH_COMPILE_COMMAND_FILE_UNSAFE")
-    val stream = Files.list(ProcessFdDirectory)
-    val observed =
-      try
-        stream.iterator.asScala.flatMap { entry =>
-          entry.getFileName.toString.toIntOption
-        }.toSet
-      finally stream.close()
-    // 디렉터리 열거 자체의 fd는 close 뒤 사라지므로 현재 살아 있는 항목만 남긴다.
-    observed.filter { descriptor =>
-      Files.exists(
-        ProcessFdDirectory.resolve(descriptor.toString),
-        LinkOption.NOFOLLOW_LINKS
-      )
+  private def liveFileDescriptors(): Option[Set[Int]] =
+    Option.when(Files.isDirectory(ProcessFdDirectory)) {
+      val stream = Files.list(ProcessFdDirectory)
+      val observed =
+        try
+          stream.iterator.asScala.flatMap { entry =>
+            entry.getFileName.toString.toIntOption
+          }.toSet
+        finally stream.close()
+      // 디렉터리 열거 자체의 fd는 close 뒤 사라지므로 현재 살아 있는 항목만 남긴다.
+      observed.filter { descriptor =>
+        Files.exists(
+          ProcessFdDirectory.resolve(descriptor.toString),
+          LinkOption.NOFOLLOW_LINKS
+        )
+      }
     }
 
   private def descriptorReferencesLockedChannel(descriptorPath: Path): Boolean =
@@ -175,64 +193,96 @@ object JvmForkEvidence:
       val probe =
         FileChannel.open(descriptorPath, StandardOpenOption.READ, StandardOpenOption.WRITE)
       try
-        val acquired = probe.tryLock(0L, Long.MaxValue, false)
-        if acquired == null then false
-        else
+        Option(probe.tryLock(0L, Long.MaxValue, false)).fold(false) { acquired =>
           acquired.release()
           false
+        }
       catch case _: OverlappingFileLockException => true
       finally probe.close()
     catch
       // JMH가 동시에 닫은 unrelated fd나 재사용된 proc entry는 후보가 아니다.
       case NonFatal(_) => false
 
-  private def stableSingleLinkBytes(path: Path): (Array[Byte], UnixFileIdentity) =
-    val before = unixIdentity(path, noFollowLinks = true)
-    val descriptorsBefore = liveFileDescriptors()
-    val channel =
-      FileChannel.open(
-        path,
-        StandardOpenOption.READ,
-        StandardOpenOption.WRITE,
-        LinkOption.NOFOLLOW_LINKS
-      )
-    val lock = channel.tryLock(0L, Long.MaxValue, false)
-    if lock == null then
-      channel.close()
-      throw IllegalStateException("JMH_COMPILE_COMMAND_FILE_UNSAFE")
-    try
-      val descriptorsAfter = liveFileDescriptors()
-      val candidates =
-        (descriptorsAfter -- descriptorsBefore).toVector
-          .map(descriptor => ProcessFdDirectory.resolve(descriptor.toString))
-          .filter(descriptorReferencesLockedChannel)
-      if candidates.size != 1 then throw IllegalStateException("JMH_COMPILE_COMMAND_FILE_UNSAFE")
-      val descriptorPath = candidates.head
-      val handleBefore = unixIdentity(descriptorPath, noFollowLinks = false)
-      val firstBytes = channelBytes(channel)
-      val middle = unixIdentity(path, noFollowLinks = true)
-      val handleMiddle = unixIdentity(descriptorPath, noFollowLinks = false)
-      val secondBytes = channelBytes(channel)
-      val after = unixIdentity(path, noFollowLinks = true)
-      val handleAfter = unixIdentity(descriptorPath, noFollowLinks = false)
-      val stable =
-        before == middle &&
-          middle == after &&
-          before == handleBefore &&
-          handleBefore == handleMiddle &&
-          handleMiddle == handleAfter &&
-          before.linkCount == 1L &&
-          before.size == firstBytes.length.toLong &&
-          firstBytes.length == secondBytes.length &&
-          java.util.Arrays.equals(firstBytes, secondBytes)
-      if !stable then throw IllegalStateException("JMH_COMPILE_COMMAND_FILE_UNSAFE")
-      firstBytes -> before
-    finally
-      lock.release()
-      channel.close()
+  private def stableSingleLinkBytes(
+      path: Path
+  ): Option[(Array[Byte], UnixFileIdentity)] =
+    for
+      before <- unixIdentity(path, noFollowLinks = true)
+      descriptorsBefore <- liveFileDescriptors()
+      stableBytes <- {
+        val channel =
+          FileChannel.open(
+            path,
+            StandardOpenOption.READ,
+            StandardOpenOption.WRITE,
+            LinkOption.NOFOLLOW_LINKS
+          )
+        try
+          Option(channel.tryLock(0L, Long.MaxValue, false)).flatMap { lock =>
+            try
+              for
+                descriptorsAfter <- liveFileDescriptors()
+                descriptorPath <- (
+                  (descriptorsAfter -- descriptorsBefore).toVector
+                    .map(descriptor => ProcessFdDirectory.resolve(descriptor.toString))
+                    .filter(descriptorReferencesLockedChannel)
+                ) match
+                  case Vector(candidate) => Some(candidate)
+                  case _                 => None
+                handleBefore <- unixIdentity(descriptorPath, noFollowLinks = false)
+                firstBytes <- channelBytes(channel)
+                middle <- unixIdentity(path, noFollowLinks = true)
+                handleMiddle <- unixIdentity(descriptorPath, noFollowLinks = false)
+                secondBytes <- channelBytes(channel)
+                after <- unixIdentity(path, noFollowLinks = true)
+                handleAfter <- unixIdentity(descriptorPath, noFollowLinks = false)
+                stable =
+                  before == middle &&
+                    middle == after &&
+                    before == handleBefore &&
+                    handleBefore == handleMiddle &&
+                    handleMiddle == handleAfter &&
+                    before.linkCount == 1L &&
+                    before.size == firstBytes.length.toLong &&
+                    firstBytes.length == secondBytes.length &&
+                    java.util.Arrays.equals(firstBytes, secondBytes)
+                if stable
+              yield firstBytes -> before
+            finally lock.release()
+          }
+        finally channel.close()
+      }
+    yield stableBytes
 
-  private def argumentFiles(bean: RuntimeMXBean): ArrayNode =
-    val values = Mapper.createArrayNode()
+  private def compileCommandFile(
+      argument: String,
+      index: Int,
+      tmpDirectory: Path
+  ): Option[ObjectNode] =
+    val path = Path.of(argument.stripPrefix(CompileCommandPrefix))
+    val safePath =
+      path.isAbsolute &&
+        Option(path.getParent).contains(tmpDirectory) &&
+        !Files.isSymbolicLink(path)
+    Option.when(safePath)(path).flatMap(stableSingleLinkBytes).map { case (bytes, fileIdentity) =>
+      val identity = Mapper.createObjectNode()
+      identity.put("argumentIndex", index)
+      identity.put("argumentPrefix", CompileCommandPrefix)
+      identity.put("pathId", "JMH_COMPILE_COMMAND_FILE")
+      identity.put("sha256", sha256(bytes))
+      val file = Mapper.createObjectNode()
+      file.put("device", fileIdentity.device)
+      file.put("inode", fileIdentity.inode)
+      file.put("mode", fileIdentity.mode)
+      file.put("linkCount", fileIdentity.linkCount)
+      file.put("size", fileIdentity.size)
+      file.put("mtimeNs", fileIdentity.mtimeNanos)
+      file.put("ctimeNs", fileIdentity.ctimeNanos)
+      identity.set[ObjectNode]("fileIdentity", file)
+      identity
+    }
+
+  private def argumentFiles(bean: RuntimeMXBean): Option[ArrayNode] =
     val evidenceDirectory =
       Path.of(sys.env.getOrElse(EvidenceDirectoryVariable, ""))
     val tmpDirectory = Path.of(sys.env.getOrElse(JmhTmpDirectoryVariable, ""))
@@ -248,60 +298,49 @@ object JvmForkEvidence:
         !Files.isSymbolicLink(tmpDirectory) &&
         evidenceDirectory.toRealPath().equals(evidenceDirectory) &&
         tmpDirectory.toRealPath().equals(tmpDirectory) &&
-        evidenceDirectory.getParent != null &&
-        tmpDirectory.equals(evidenceDirectory.getParent.resolve("jmh-tmp"))
-    if !safeTmpDirectory then throw IllegalStateException("JMH_TMP_DIRECTORY_UNSAFE")
-    bean.getInputArguments.asScala.zipWithIndex.foreach { case (argument, index) =>
-      if argument.startsWith(CompileCommandPrefix) then
-        val path = Path.of(argument.stripPrefix(CompileCommandPrefix))
-        if (
-            !path.isAbsolute ||
-            !tmpDirectory.equals(path.getParent) ||
-            Files.isSymbolicLink(path)
-          )
-        then throw IllegalStateException("JMH_COMPILE_COMMAND_FILE_UNSAFE")
-        val (bytes, fileIdentity) = stableSingleLinkBytes(path)
-        val identity = Mapper.createObjectNode()
-        identity.put("argumentIndex", index)
-        identity.put("argumentPrefix", CompileCommandPrefix)
-        identity.put("pathId", "JMH_COMPILE_COMMAND_FILE")
-        identity.put("sha256", sha256(bytes))
-        val file = Mapper.createObjectNode()
-        file.put("device", fileIdentity.device)
-        file.put("inode", fileIdentity.inode)
-        file.put("mode", fileIdentity.mode)
-        file.put("linkCount", fileIdentity.linkCount)
-        file.put("size", fileIdentity.size)
-        file.put("mtimeNs", fileIdentity.mtimeNanos)
-        file.put("ctimeNs", fileIdentity.ctimeNanos)
-        identity.set[ObjectNode]("fileIdentity", file)
-        values.add(identity): Unit
-    }
-    values
+        Option(evidenceDirectory.getParent).exists(parent =>
+          tmpDirectory.equals(parent.resolve("jmh-tmp"))
+        )
+    if !safeTmpDirectory then None
+    else
+      bean.getInputArguments.asScala.zipWithIndex.foldLeft(
+        Some(Mapper.createArrayNode()): Option[ArrayNode]
+      ) { case (collected, (argument, index)) =>
+        if argument.startsWith(CompileCommandPrefix) then
+          for
+            values <- collected
+            identity <- compileCommandFile(argument, index, tmpDirectory)
+          yield
+            values.add(identity): Unit
+            values
+        else collected
+      }
 
-  private def payload(bean: RuntimeMXBean, javaExecutable: Path): ObjectNode =
-    val value = Mapper.createObjectNode()
-    value.put("schemaVersion", "s1.4x-scala-jvm-fork-raw-evidence-v1")
-    value.put("forkProcessId", bean.getPid)
-    value.put("runtimeStartTimeEpochMillis", bean.getStartTime)
-    value.put("javaExecutablePathId", "TEMURIN_25_0_3_9_LTS/bin/java")
-    value.put("javaExecutableSha256", fileSha256(javaExecutable))
-    value.put("runtimeVersion", System.getProperty("java.runtime.version"))
-    value.put("vendor", System.getProperty("java.vendor"))
-    value.put("javaHomePathId", "TEMURIN_25_0_3_9_LTS")
-    value.set[ArrayNode]("inputArguments", arguments(bean))
-    value.set[ArrayNode]("inputArgumentFiles", argumentFiles(bean))
-    val properties = stableProperties
-    val ambient = ambientJvmOptions
-    value.set[ObjectNode]("stableSystemProperties", objectNode(properties))
-    value.set[ObjectNode]("ambientJvmOptionVariables", objectNode(ambient))
-    value.put("systemPropertiesSha256", sha256(canonicalPairs(properties)))
-    value.put("environmentAllowlistSha256", environmentHash)
-    value.put(
-      "runtimeClasspathSha256",
-      sha256(Option(System.getProperty("java.class.path")).getOrElse(""))
-    )
-    value
+  private def payload(bean: RuntimeMXBean, javaExecutable: Path): Option[ObjectNode] =
+    argumentFiles(bean).map { inputArgumentFiles =>
+      val value = Mapper.createObjectNode()
+      value.put("schemaVersion", "s1.4x-scala-jvm-fork-raw-evidence-v1")
+      value.put("forkProcessId", bean.getPid)
+      value.put("runtimeStartTimeEpochMillis", bean.getStartTime)
+      value.put("javaExecutablePathId", "TEMURIN_25_0_3_9_LTS/bin/java")
+      value.put("javaExecutableSha256", fileSha256(javaExecutable))
+      value.put("runtimeVersion", System.getProperty("java.runtime.version"))
+      value.put("vendor", System.getProperty("java.vendor"))
+      value.put("javaHomePathId", "TEMURIN_25_0_3_9_LTS")
+      value.set[ArrayNode]("inputArguments", arguments(bean))
+      value.set[ArrayNode]("inputArgumentFiles", inputArgumentFiles)
+      val properties = stableProperties
+      val ambient = ambientJvmOptions
+      value.set[ObjectNode]("stableSystemProperties", objectNode(properties))
+      value.set[ObjectNode]("ambientJvmOptionVariables", objectNode(ambient))
+      value.put("systemPropertiesSha256", sha256(canonicalPairs(properties)))
+      value.put("environmentAllowlistSha256", environmentHash)
+      value.put(
+        "runtimeClasspathSha256",
+        sha256(Option(System.getProperty("java.class.path")).getOrElse(""))
+      )
+      value
+    }
 
   private def measurementReadyPayload(
       plan: Path,
@@ -335,14 +374,16 @@ object JvmForkEvidence:
             !Files.isSymbolicLink(javaExecutable)
         if safeDirectory && safeJava then
           val output = directory.resolve(s"jvm-fork-${bean.getPid}.json")
-          Files.writeString(
-            output,
-            Mapper.writeValueAsString(payload(bean, javaExecutable)) + "\n",
-            StandardCharsets.UTF_8,
-            StandardOpenOption.CREATE_NEW,
-            StandardOpenOption.WRITE
-          )
-          true
+          payload(bean, javaExecutable).exists { value =>
+            Files.writeString(
+              output,
+              Mapper.writeValueAsString(value) + "\n",
+              StandardCharsets.UTF_8,
+              StandardOpenOption.CREATE_NEW,
+              StandardOpenOption.WRITE
+            )
+            true
+          }
         else false
       }
     catch case NonFatal(_) => false
