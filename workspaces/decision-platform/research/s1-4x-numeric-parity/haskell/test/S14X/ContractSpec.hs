@@ -130,7 +130,7 @@ markerPinnedFd = do
 markerPinnedFdAction :: FilePath -> FilePath -> ByteString -> ByteString -> IO ()
 markerPinnedFdAction source renamed original replacement = do
   BS.writeFile source original
-  descriptor <- openFd source ReadOnly Nothing defaultFileFlags
+  descriptor <- openFd source ReadOnly defaultFileFlags
   let pinnedPath = pinnedFdPath descriptor
   assertBool
     "marker path must use a canonical inherited descriptor"
@@ -153,7 +153,7 @@ markerPinnedFdAction source renamed original replacement = do
   pinnedRegularFileMatchesSha256 pinnedPath (sha256Hex original)
     >>= (@?= False)
 
-  replacementDescriptor <- openFd source ReadOnly Nothing defaultFileFlags
+  replacementDescriptor <- openFd source ReadOnly defaultFileFlags
   let replacementPinnedPath = pinnedFdPath replacementDescriptor
   pinnedRegularFileMatchesSha256
     replacementPinnedPath

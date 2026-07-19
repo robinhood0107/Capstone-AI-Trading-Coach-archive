@@ -4,12 +4,12 @@ module S14X.PropertyCases
   )
 where
 
-import           Data.List (foldl')
 import           Data.Text (Text)
 import           Test.QuickCheck (Gen, Property, choose, counterexample, elements, forAll, vectorOf,
                                   (===))
 
 import qualified Data.ByteString.Char8 as BS8
+import qualified Data.List as List
 import qualified Data.Text as Text
 import qualified Data.Vector.Unboxed as U
 
@@ -168,8 +168,8 @@ varHf7ObservationRange =
         [] -> counterexample "quantile generator returned an empty sample" False
         first : remaining ->
           let values = U.fromList samples
-              sampleMinimum = foldl' min first remaining
-              sampleMaximum = foldl' max first remaining
+              sampleMinimum = List.foldl' min first remaining
+              sampleMaximum = List.foldl' max first remaining
            in case historicalVar values confidence of
                 Left stableError -> counterexample (show stableError) False
                 Right value ->
