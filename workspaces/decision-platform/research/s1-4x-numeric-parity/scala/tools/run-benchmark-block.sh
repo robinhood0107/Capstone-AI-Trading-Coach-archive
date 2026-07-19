@@ -53,6 +53,7 @@ SELECTED_PROFILE="${S1_4X_SCALA_SELECTED_PROFILE_RESULT:?S1_4X_SCALA_SELECTED_PR
 PROFILE_QUALIFICATION="${S1_4X_SCALA_QUALIFICATION_RESULT:?S1_4X_SCALA_QUALIFICATION_RESULT is required}"
 CORRECTNESS_ROOT="${S1_4X_SCALA_CORRECTNESS_ROOT:?S1_4X_SCALA_CORRECTNESS_ROOT is required}"
 JVM_ALLOWLIST="${S1_4X_SCALA_JVM_ALLOWLIST_RESULT:?S1_4X_SCALA_JVM_ALLOWLIST_RESULT is required}"
+LARGE_FIXTURE_ROOT="${S1_4X_LARGE_FIXTURE_ROOT:?S1_4X_LARGE_FIXTURE_ROOT is required}"
 CACHE_ROOT="${S1_4X_CACHE_ROOT:?S1_4X_CACHE_ROOT is required}"
 RUNTIME_HOME="${HOME:?HOME is required}"
 JAVA_RUNTIME_HOME="${JAVA_HOME:?JAVA_HOME is required}"
@@ -143,12 +144,26 @@ verify_directory "runtime home" "$RUNTIME_HOME"
 verify_directory "Java home" "$JAVA_RUNTIME_HOME"
 verify_directory "cache root" "$CACHE_ROOT"
 verify_directory "correctness root" "$CORRECTNESS_ROOT"
+verify_directory "large fixture root" "$LARGE_FIXTURE_ROOT"
+LARGE_FIXTURE_ROOT_IDENTITY="$(
+  /usr/bin/stat -Lc '%d:%i:%f:%h:%u:%g:%s:%y:%z' -- "$LARGE_FIXTURE_ROOT"
+)"
+verify_large_fixture_root_identity() {
+  verify_directory "large fixture root" "$LARGE_FIXTURE_ROOT"
+  if [[ "$(
+    /usr/bin/stat -Lc '%d:%i:%f:%h:%u:%g:%s:%y:%z' -- "$LARGE_FIXTURE_ROOT"
+  )" != "$LARGE_FIXTURE_ROOT_IDENTITY" ]]; then
+    printf 'large fixture root identity drift\n' >&2
+    exit 69
+  fi
+}
 if [[ "$(/usr/bin/sha256sum "$SCALAFMT_ARCHIVE" | /usr/bin/awk '{print $1}')" \
   != "$SCALAFMT_ARCHIVE_SHA256" ]]; then
   printf 'Scalafmt archive SHA-256 mismatch\n' >&2
   exit 69
 fi
 
+verify_large_fixture_root_identity
 exec /usr/bin/env -i \
   PATH="$JAVA_RUNTIME_HOME/bin:/usr/bin:/bin" \
   LANG="C.UTF-8" \
@@ -173,6 +188,7 @@ exec /usr/bin/env -i \
   S1_4X_SCALA_QUALIFICATION_RESULT="$PROFILE_QUALIFICATION" \
   S1_4X_SCALA_CORRECTNESS_ROOT="$CORRECTNESS_ROOT" \
   S1_4X_SCALA_JVM_ALLOWLIST_RESULT="$JVM_ALLOWLIST" \
+  S1_4X_LARGE_FIXTURE_ROOT="$LARGE_FIXTURE_ROOT" \
   S1_4X_BENCHMARK_SUBJECT_COMMIT="${20}" \
   "$BENCHMARK_PYTHON_EXEC" "$HELPER" \
   --repo-root "$REPO_ROOT" \
