@@ -4,12 +4,15 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -40,18 +43,625 @@ THREAD_ENVIRONMENT = {
     "XLA_FLAGS": "--xla_cpu_multi_thread_eigen=false intra_op_parallelism_threads=1",
     "S1_4X_THREAD_COUNT": "1",
 }
+PINNED_TOOL_SHA256 = {
+    "S1_4X_GHCUP": (
+        "9ed5da5449b48043a0d17e767c05d2ef585e25a639bb934329496c6d2fad9cf8"
+    ),
+    "S1_4X_STACK": (
+        "923dbd137756652c67b376e2447c655b87fcc373f4d104b5073bca913471ecbe"
+    ),
+    "S1_4X_AUTHORITATIVE_GHC": (
+        "d0c0dd79a1bcc5dce3c9e73613c1be51f61b78d5ef7c0970ffe9f142a90a5e2c"
+    ),
+    "S1_4X_LATEST_GHC": (
+        "ecfd54b4161699f574d2b163bdc817c54df08a08a310323e43b41ab5fc413ef1"
+    ),
+    "S1_4X_HLINT": (
+        "3ff3fb4b571876d668ddf4ad0245769c19a640283fabb0c2629038aa34197f62"
+    ),
+    "S1_4X_STYLISH": (
+        "385dc27bc2d0fb654e76ecadfb57bc0b7e1c58afe74f19923e20b696e6fe0d7b"
+    ),
+}
+
+
+@dataclass(frozen=True)
+class RegularFileSnapshot:
+    """한 secure FD에서 얻은 bytes와 그 bytes의 digest."""
+
+    path: Path
+    payload: bytes
+    sha256: str
+    mode: int
+
+
+@dataclass(frozen=True)
+class JsonSnapshot:
+    """한 secure FD의 JSON bytes, digest, strict parse 결과."""
+
+    path: Path
+    payload: bytes
+    sha256: str
+    document: Any
+
+
+@dataclass(frozen=True)
+class PinnedExecutable:
+    """Shared runtime이 연 FD와 원래 provenance path를 분리해 보존한다."""
+
+    label: str
+    source_path: Path
+    fd_path: Path
+    descriptor: int
+    sha256: str
+    mode: int
+    identity: tuple[int, int, int, int, int, int]
+
+
+@dataclass(frozen=True)
+class PinnedRegularFile:
+    """Repo source bytes를 sealed FD로 복제해 pathname 교체와 수정을 차단한다."""
+
+    label: str
+    source_path: Path
+    fd_path: Path
+    descriptor: int
+    sha256: str
+    mode: int
+    identity: tuple[int, int, int, int, int, int]
+
+
+@dataclass(frozen=True)
+class PinnedJsonEvidence:
+    """Source pathname을 재개방하지 않고 전달된 FD bytes만 parse/hash한다."""
+
+    label: str
+    source_path: Path
+    fd_path: Path
+    descriptor: int
+    payload: bytes
+    sha256: str
+    document: Any
+    identity: tuple[int, int, int, int, int, int]
+
+
+def _source_path_layout(value: str, *, label: str) -> Path:
+    """원래 pathname은 provenance/layout만 검사하고 filesystem에는 접근하지 않는다."""
+
+    if (
+        type(value) is not str
+        or not value.startswith("/")
+        or "\0" in value
+        or "\n" in value
+        or ":" in value
+        or "|" in value
+        or "//" in value
+        or "/./" in value
+        or "/../" in value
+        or value.endswith("/.")
+        or value.endswith("/..")
+    ):
+        raise BlockError(f"{label}_SOURCE_PATH_LAYOUT_INVALID")
+    path = Path(value)
+    if not path.is_absolute() or any(part in {".", ".."} for part in path.parts):
+        raise BlockError(f"{label}_SOURCE_PATH_LAYOUT_INVALID")
+    return path
+
+
+def _pinned_descriptor(path: Path, *, label: str) -> int:
+    """현재 process의 inherited FD path만 허용하고 pathname open을 금지한다."""
+
+    matched = re.fullmatch(r"/proc/self/fd/([0-9]+)", str(path))
+    if matched is None:
+        raise BlockError(f"{label}_PINNED_FD_PATH_INVALID")
+    descriptor = int(matched.group(1))
+    if descriptor < 3:
+        raise BlockError(f"{label}_PINNED_FD_PATH_INVALID")
+    return descriptor
+
+
+def _read_pinned_fd(
+    *,
+    fd_path: Path,
+    label: str,
+    max_bytes: int,
+    executable: bool,
+    capture_payload: bool,
+) -> tuple[
+    int,
+    bytes,
+    str,
+    int,
+    tuple[int, int, int, int, int, int],
+]:
+    """Inherited descriptor를 pread해 parse/hash/exec identity를 같은 FD에 묶는다."""
+
+    if type(max_bytes) is not int or max_bytes <= 0:
+        raise BlockError(f"{label}_PINNED_FD_INPUT_INVALID")
+    descriptor = _pinned_descriptor(fd_path, label=label)
+    try:
+        before = os.fstat(descriptor)
+    except OSError as exc:
+        raise BlockError(f"{label}_PINNED_FD_NOT_INHERITED") from exc
+    if (
+        not stat.S_ISREG(before.st_mode)
+        or before.st_size < 0
+        or before.st_size > max_bytes
+        or (executable and before.st_mode & 0o111 == 0)
+    ):
+        raise BlockError(f"{label}_PINNED_FD_OBJECT_INVALID")
+    digest = hashlib.sha256()
+    chunks: list[bytes] = []
+    offset = 0
+    while offset < before.st_size:
+        try:
+            chunk = os.pread(
+                descriptor,
+                min(1024 * 1024, before.st_size - offset),
+                offset,
+            )
+        except OSError as exc:
+            raise BlockError(f"{label}_PINNED_FD_READ_FAILED") from exc
+        if not chunk:
+            raise BlockError(f"{label}_PINNED_FD_TRUNCATED")
+        digest.update(chunk)
+        if capture_payload:
+            chunks.append(chunk)
+        offset += len(chunk)
+    try:
+        after = os.fstat(descriptor)
+    except OSError as exc:
+        raise BlockError(f"{label}_PINNED_FD_NOT_INHERITED") from exc
+    identity_fields = (
+        "st_dev",
+        "st_ino",
+        "st_size",
+        "st_mtime_ns",
+        "st_ctime_ns",
+        "st_nlink",
+    )
+    if any(
+        getattr(before, field) != getattr(after, field)
+        for field in identity_fields
+    ):
+        raise BlockError(f"{label}_PINNED_FD_CHANGED_DURING_READ")
+    identity = tuple(getattr(before, field) for field in identity_fields)
+    return (
+        descriptor,
+        b"".join(chunks),
+        digest.hexdigest(),
+        before.st_mode,
+        identity,
+    )
+
+
+def pinned_executable_environment(
+    prefix: str,
+    *,
+    label: str,
+    required_sha256: str | None = None,
+) -> PinnedExecutable:
+    """Shared v3 executable triple을 검증하되 원래 pathname은 재개방하지 않는다."""
+
+    if re.fullmatch(r"S1_4X_[A-Z0-9_]+", prefix) is None:
+        raise BlockError(f"{label}_ENVIRONMENT_PREFIX_INVALID")
+    source_path = _source_path_layout(
+        _required_environment(f"{prefix}_BIN"),
+        label=label,
+    )
+    fd_path = Path(_required_environment(f"{prefix}_PINNED_FD_PATH"))
+    expected_sha256 = _required_environment(f"{prefix}_SHA256")
+    if (
+        SHA256_PATTERN.fullmatch(expected_sha256) is None
+        or (
+            required_sha256 is not None
+            and expected_sha256 != required_sha256
+        )
+    ):
+        raise BlockError(f"{label}_EXPECTED_SHA256_INVALID")
+    descriptor, _, actual_sha256, mode, identity = _read_pinned_fd(
+        fd_path=fd_path,
+        label=label,
+        max_bytes=1024 * 1024 * 1024,
+        executable=True,
+        capture_payload=False,
+    )
+    if actual_sha256 != expected_sha256:
+        raise BlockError(f"{label}_SHA256_MISMATCH")
+    return PinnedExecutable(
+        label=label,
+        source_path=source_path,
+        fd_path=fd_path,
+        descriptor=descriptor,
+        sha256=actual_sha256,
+        mode=mode,
+        identity=identity,
+    )
+
+
+def load_pinned_toolchain() -> tuple[PinnedExecutable, ...]:
+    """Shared v3의 여섯 tool FD를 repo lock SHA와 함께 검증한다."""
+
+    return tuple(
+        pinned_executable_environment(
+            prefix,
+            label=label,
+            required_sha256=PINNED_TOOL_SHA256[prefix],
+        )
+        for prefix, label in (
+            ("S1_4X_GHCUP", "GHCUP"),
+            ("S1_4X_STACK", "STACK"),
+            ("S1_4X_AUTHORITATIVE_GHC", "AUTHORITATIVE_GHC"),
+            ("S1_4X_LATEST_GHC", "LATEST_GHC"),
+            ("S1_4X_HLINT", "HLINT"),
+            ("S1_4X_STYLISH", "STYLISH"),
+        )
+    )
+
+
+def pinned_json_environment_evidence(
+    prefix: str,
+    *,
+    label: str,
+    max_bytes: int,
+) -> PinnedJsonEvidence:
+    """Shared v3 evidence triple의 전달 FD bytes를 strict parse/hash한다."""
+
+    fd_path = Path(_required_environment(prefix))
+    source_path = _source_path_layout(
+        _required_environment(f"{prefix}_SOURCE_PATH"),
+        label=label,
+    )
+    expected_sha256 = _required_environment(f"{prefix}_SHA256")
+    if SHA256_PATTERN.fullmatch(expected_sha256) is None:
+        raise BlockError(f"{label}_EXPECTED_SHA256_INVALID")
+    descriptor, payload, actual_sha256, _, identity = _read_pinned_fd(
+        fd_path=fd_path,
+        label=label,
+        max_bytes=max_bytes,
+        executable=False,
+        capture_payload=True,
+    )
+    if actual_sha256 != expected_sha256:
+        raise BlockError(f"{label}_SHA256_MISMATCH")
+    try:
+        text = payload.decode("utf-8")
+    except UnicodeError as exc:
+        raise BlockError(f"INVALID_JSON:{label}") from exc
+    return PinnedJsonEvidence(
+        label=label,
+        source_path=source_path,
+        fd_path=fd_path,
+        descriptor=descriptor,
+        payload=payload,
+        sha256=actual_sha256,
+        document=_strict_json_decode(text, label=label),
+        identity=identity,
+    )
+
+
+def _canonical_json_bytes(value: Any) -> bytes:
+    return (
+        json.dumps(
+            value,
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        + b"\n"
+    )
+
+
+def load_pinned_profile_evidence() -> dict[str, PinnedJsonEvidence]:
+    """Correctness/qualification 세 object를 shared runtime FD에서만 읽는다."""
+
+    return {
+        "baseline": pinned_json_environment_evidence(
+            "S1_4X_HASKELL_BASELINE_CORRECTNESS",
+            label="BASELINE_CORRECTNESS",
+            max_bytes=4 * 1024 * 1024,
+        ),
+        "optimized": pinned_json_environment_evidence(
+            "S1_4X_HASKELL_OPTIMIZED_CORRECTNESS",
+            label="OPTIMIZED_CORRECTNESS",
+            max_bytes=4 * 1024 * 1024,
+        ),
+        "qualification": pinned_json_environment_evidence(
+            "S1_4X_HASKELL_QUALIFICATION_ARTIFACT",
+            label="PROFILE_QUALIFICATION_ARTIFACT",
+            max_bytes=64 * 1024 * 1024,
+        ),
+    }
+
+
+def validate_profile_evidence_closure(
+    *,
+    profile: Mapping[str, Any],
+    evidence: Mapping[str, PinnedJsonEvidence],
+    benchmark_subject_commit: str,
+) -> dict[str, str]:
+    """Final profile이 same-FD correctness/qualification bytes를 선택했음을 고정한다."""
+
+    if (
+        set(evidence) != {"baseline", "optimized", "qualification"}
+        or COMMIT_PATTERN.fullmatch(benchmark_subject_commit) is None
+        or profile.get("schemaVersion")
+        != "s1.4x-haskell-selected-profile-v1"
+    ):
+        raise BlockError("PINNED_PROFILE_EVIDENCE_CLOSURE_INVALID")
+    for snapshot in evidence.values():
+        if snapshot.payload != _canonical_json_bytes(snapshot.document):
+            raise BlockError("PINNED_PROFILE_EVIDENCE_NOT_CANONICAL")
+    expected_profiles = {
+        "baseline": "baseline-o0-fasm",
+        "optimized": "optimized-o2-fasm",
+    }
+    for name, expected_profile_id in expected_profiles.items():
+        document = evidence[name].document
+        if (
+            not isinstance(document, dict)
+            or document.get("schemaVersion")
+            != "s1.4x-haskell-full-correctness-v1"
+            or document.get("status") != "PASS"
+            or document.get("profileId") != expected_profile_id
+            or document.get("candidateSourceCommit")
+            != benchmark_subject_commit
+            or document.get("sourceTreeSha256")
+            != profile.get("sourceTreeSha256")
+            or document.get("compilerSha256")
+            != profile.get("compilerSha256")
+            or document.get("mismatchCount") != 0
+        ):
+            raise BlockError(
+                f"PINNED_{name.upper()}_CORRECTNESS_INVALID"
+            )
+    qualification = evidence["qualification"].document
+    selection = (
+        qualification.get("selection")
+        if isinstance(qualification, dict)
+        else None
+    )
+    if (
+        not isinstance(qualification, dict)
+        or qualification.get("schemaVersion")
+        != "s1.4x-haskell-profile-qualification-v1"
+        or qualification.get("status") != "PASS"
+        or qualification.get("candidateSourceCommit")
+        != benchmark_subject_commit
+        or qualification.get("sourceTreeSha256")
+        != profile.get("sourceTreeSha256")
+        or qualification.get("planSha256")
+        != profile.get("qualificationPlanSha256")
+        or not isinstance(selection, dict)
+        or selection.get("profileId") != profile.get("profileId")
+        or selection.get("selectedBy") != profile.get("selectedBy")
+        or evidence["qualification"].sha256
+        != profile.get("qualificationArtifactSha256")
+    ):
+        raise BlockError("PINNED_PROFILE_QUALIFICATION_INVALID")
+    selected_name = (
+        "optimized"
+        if profile.get("profileId") == "optimized-o2-fasm"
+        else "baseline"
+    )
+    if (
+        profile.get("profileId") not in expected_profiles.values()
+        or evidence[selected_name].sha256
+        != profile.get("fullCorrectnessSha256")
+    ):
+        raise BlockError("PINNED_SELECTED_CORRECTNESS_INVALID")
+    return {
+        "baselineCorrectnessSha256": evidence["baseline"].sha256,
+        "baselineCorrectnessSourcePath": str(
+            evidence["baseline"].source_path
+        ),
+        "optimizedCorrectnessSha256": evidence["optimized"].sha256,
+        "optimizedCorrectnessSourcePath": str(
+            evidence["optimized"].source_path
+        ),
+        "qualificationArtifactSha256": evidence["qualification"].sha256,
+        "qualificationArtifactSourcePath": str(
+            evidence["qualification"].source_path
+        ),
+    }
+
+
+def read_regular_file_snapshot(
+    path: Path,
+    *,
+    label: str,
+    max_bytes: int,
+    executable: bool = False,
+) -> RegularFileSnapshot:
+    """모든 parent를 openat/O_NOFOLLOW로 통과해 한 FD snapshot만 읽는다."""
+
+    if (
+        not path.is_absolute()
+        or type(label) is not str
+        or re.fullmatch(r"[A-Z][A-Z0-9_]*", label) is None
+        or type(max_bytes) is not int
+        or max_bytes <= 0
+    ):
+        raise BlockError(f"{label}_SNAPSHOT_INPUT_INVALID")
+    components = path.parts[1:]
+    if not components or any(component in {"", ".", ".."} for component in components):
+        raise BlockError(f"{label}_PATH_COMPONENT_INVALID")
+    directory_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    directory_descriptor = os.open("/", directory_flags)
+    try:
+        for component in components[:-1]:
+            try:
+                next_descriptor = os.open(
+                    component,
+                    directory_flags,
+                    dir_fd=directory_descriptor,
+                )
+            except OSError as exc:
+                raise BlockError(f"{label}_PATH_COMPONENT_INVALID") from exc
+            os.close(directory_descriptor)
+            directory_descriptor = next_descriptor
+        try:
+            descriptor = os.open(
+                components[-1],
+                os.O_RDONLY
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=directory_descriptor,
+            )
+        except OSError as exc:
+            raise BlockError(f"{label}_FILE_INVALID") from exc
+        try:
+            before = os.fstat(descriptor)
+            if not stat.S_ISREG(before.st_mode) or before.st_size > max_bytes:
+                raise BlockError(f"{label}_FILE_INVALID")
+            if before.st_nlink != 1:
+                raise BlockError(f"{label}_HARDLINK_FORBIDDEN")
+            if executable and before.st_mode & 0o111 == 0:
+                raise BlockError(f"{label}_NOT_EXECUTABLE")
+            chunks: list[bytes] = []
+            while chunk := os.read(descriptor, 1024 * 1024):
+                chunks.append(chunk)
+            after = os.fstat(descriptor)
+            current = os.stat(
+                components[-1],
+                dir_fd=directory_descriptor,
+                follow_symlinks=False,
+            )
+            identity = (
+                "st_dev",
+                "st_ino",
+                "st_size",
+                "st_mtime_ns",
+                "st_ctime_ns",
+                "st_nlink",
+            )
+            if any(
+                getattr(before, field) != getattr(after, field)
+                or getattr(before, field) != getattr(current, field)
+                for field in identity
+            ):
+                raise BlockError(f"{label}_CHANGED_DURING_READ")
+        finally:
+            os.close(descriptor)
+    finally:
+        os.close(directory_descriptor)
+    payload = b"".join(chunks)
+    return RegularFileSnapshot(
+        path=path,
+        payload=payload,
+        sha256=hashlib.sha256(payload).hexdigest(),
+        mode=before.st_mode,
+    )
+
+
+def pin_regular_file(
+    path: Path,
+    *,
+    label: str,
+    max_bytes: int,
+) -> PinnedRegularFile:
+    """Secure source snapshot을 immutable memfd로 복제하고 실행 종료까지 연다."""
+
+    snapshot = read_regular_file_snapshot(
+        path,
+        label=label,
+        max_bytes=max_bytes,
+    )
+    if not hasattr(os, "memfd_create"):
+        raise BlockError(f"{label}_MEMFD_UNAVAILABLE")
+    descriptor = os.memfd_create(
+        f"s1-4x-{label.lower()}",
+        flags=(
+            getattr(os, "MFD_CLOEXEC", 0)
+            | getattr(os, "MFD_ALLOW_SEALING", 0)
+        ),
+    )
+    try:
+        offset = 0
+        while offset < len(snapshot.payload):
+            written = os.write(descriptor, snapshot.payload[offset:])
+            if written <= 0:
+                raise BlockError(f"{label}_MEMFD_WRITE_FAILED")
+            offset += written
+        os.fchmod(descriptor, stat.S_IMODE(snapshot.mode))
+        seals = (
+            fcntl.F_SEAL_SEAL
+            | fcntl.F_SEAL_SHRINK
+            | fcntl.F_SEAL_GROW
+            | fcntl.F_SEAL_WRITE
+        )
+        fcntl.fcntl(descriptor, fcntl.F_ADD_SEALS, seals)
+        if fcntl.fcntl(descriptor, fcntl.F_GET_SEALS) != seals:
+            raise BlockError(f"{label}_MEMFD_SEAL_FAILED")
+        fd_path = Path(f"/proc/self/fd/{descriptor}")
+        (
+            pinned_descriptor,
+            payload,
+            sha256,
+            mode,
+            identity,
+        ) = _read_pinned_fd(
+            fd_path=fd_path,
+            label=label,
+            max_bytes=max_bytes,
+            executable=False,
+            capture_payload=True,
+        )
+        if payload != snapshot.payload or sha256 != snapshot.sha256:
+            raise BlockError(f"{label}_MEMFD_SNAPSHOT_MISMATCH")
+        return PinnedRegularFile(
+            label=label,
+            source_path=path,
+            fd_path=fd_path,
+            descriptor=pinned_descriptor,
+            sha256=sha256,
+            mode=mode,
+            identity=identity,
+        )
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def read_json_snapshot(
+    path: Path,
+    *,
+    label: str,
+    max_bytes: int,
+) -> JsonSnapshot:
+    """Strict JSON parse와 SHA가 반드시 같은 secure FD bytes를 소비하게 한다."""
+
+    snapshot = read_regular_file_snapshot(
+        path,
+        label=label,
+        max_bytes=max_bytes,
+    )
+    try:
+        text = snapshot.payload.decode("utf-8")
+    except UnicodeError as exc:
+        raise BlockError(f"INVALID_JSON:{label}") from exc
+    return JsonSnapshot(
+        path=path,
+        payload=snapshot.payload,
+        sha256=snapshot.sha256,
+        document=_strict_json_decode(text, label=label),
+    )
 
 
 def sha256_file(path: Path) -> str:
     """Regular non-symlink file의 bytes를 SHA-256으로 고정한다."""
 
-    if path.is_symlink() or not path.is_file():
-        raise BlockError(f"UNSAFE_OR_MISSING_FILE:{path}")
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+    return read_regular_file_snapshot(
+        path,
+        label="HASH_INPUT",
+        max_bytes=1024 * 1024 * 1024,
+    ).sha256
 
 
 def canonical_sha256(value: Any) -> str:
@@ -96,17 +706,21 @@ def _strict_json_decode(payload: str, *, label: str) -> Any:
 def strict_json_load(path: Path) -> Any:
     """Regular JSON file을 strict decoder로 읽는다."""
 
-    try:
-        return _strict_json_decode(path.read_text(encoding="utf-8"), label=str(path))
-    except (OSError, UnicodeError) as exc:
-        raise BlockError(f"INVALID_JSON:{path}") from exc
+    return read_json_snapshot(
+        path,
+        label="JSON_EVIDENCE",
+        max_bytes=512 * 1024 * 1024,
+    ).document
 
 
 def build_stack_benchmark_command(
     *,
     ghcup_bin: Path,
     stack_bin: Path,
+    tool_path: str,
     stack_yaml: Path,
+    stack_root: Path,
+    work_dir: Path,
     profile_options: Sequence[str],
     time_limit_seconds: int,
     native_report: Path,
@@ -122,6 +736,14 @@ def build_stack_benchmark_command(
         or time_limit_seconds != 5
         or not criterion_prefix
         or any(character.isspace() for character in criterion_prefix)
+        or not stack_root.is_absolute()
+        or work_dir.is_absolute()
+        or work_dir
+        != Path(".stack-work") / "s1-4x" / stack_root.name
+        or type(tool_path) is not str
+        or not tool_path.startswith(f"{stack_root}/tool-bin:")
+        or tool_path.endswith(":")
+        or any(not entry.startswith("/") for entry in tool_path.split(":"))
     ):
         raise BlockError("INVALID_CRITERION_COMMAND_INPUT")
     criterion_arguments = (
@@ -138,7 +760,13 @@ def build_stack_benchmark_command(
         "--stack",
         "3.11.1",
         "--",
+        "/usr/bin/env",
+        f"PATH={tool_path}",
         str(stack_bin),
+        "--stack-root",
+        str(stack_root),
+        "--work-dir",
+        str(work_dir),
         "--stack-yaml",
         str(stack_yaml),
         "--no-terminal",
@@ -146,10 +774,142 @@ def build_stack_benchmark_command(
         "never",
         "--system-ghc",
         "--no-install-ghc",
+        "--hpack-force",
         "bench",
         f"--ghc-options={' '.join(profile_options)}",
         f"--benchmark-arguments={criterion_arguments}",
     ]
+
+
+def prepare_authoritative_ghc_shim(
+    *,
+    stack_root: Path,
+    authoritative_ghc: PinnedExecutable,
+) -> tuple[str, Path]:
+    """Output-bound PATH에 scoring GHC FD와 Stack 필수 보조 실행기를 노출한다."""
+
+    if (
+        not stack_root.is_absolute()
+        or not stack_root.is_dir()
+        or stack_root.is_symlink()
+        or authoritative_ghc.label != "AUTHORITATIVE_GHC"
+        or authoritative_ghc.source_path.parent == Path("/")
+    ):
+        raise BlockError("AUTHORITATIVE_GHC_TOOL_SHIM_INPUT_INVALID")
+    tool_bin = stack_root / "tool-bin"
+    if tool_bin.exists() or tool_bin.is_symlink():
+        raise BlockError("AUTHORITATIVE_GHC_TOOL_SHIM_ALREADY_EXISTS")
+    tool_bin.mkdir(mode=0o700)
+    ghc_shim = tool_bin / "ghc"
+    ghc_shim.symlink_to(str(authoritative_ghc.fd_path))
+    auxiliary_names = ("ghc-pkg", "runghc", "haddock")
+    for name in auxiliary_names:
+        source = authoritative_ghc.source_path.parent / name
+        try:
+            target = source.resolve(strict=True)
+        except OSError as exc:
+            raise BlockError(
+                f"AUTHORITATIVE_GHC_AUXILIARY_INVALID:{name}"
+            ) from exc
+        if (
+            target.parent != authoritative_ghc.source_path.parent
+            or not target.is_file()
+            or target.is_symlink()
+            or not os.access(target, os.X_OK)
+        ):
+            raise BlockError(f"AUTHORITATIVE_GHC_AUXILIARY_INVALID:{name}")
+        (tool_bin / name).symlink_to(str(target))
+    if (
+        os.readlink(ghc_shim) != str(authoritative_ghc.fd_path)
+        or sorted(path.name for path in tool_bin.iterdir())
+        != ["ghc", "ghc-pkg", "haddock", "runghc"]
+    ):
+        raise BlockError("AUTHORITATIVE_GHC_TOOL_SHIM_INVALID")
+    # Stack은 선택된 ghc의 sibling 경로에서 보조 실행기를 찾으므로 같은 shim closure에 고정한다.
+    tool_path = (
+        f"{tool_bin}:{authoritative_ghc.source_path.parent}:/usr/bin:/bin"
+    )
+    return tool_path, ghc_shim
+
+
+def run_pinned_subprocess(
+    command: Sequence[str],
+    *,
+    cwd: Path,
+    environment: Mapping[str, str],
+    pinned_executables: Sequence[PinnedExecutable],
+    capture_output: bool,
+    pinned_files: Sequence[PinnedRegularFile] = (),
+    timeout: int | None = None,
+) -> subprocess.CompletedProcess[bytes]:
+    """검증한 executable과 sealed source FD를 모든 nested process에 상속한다."""
+
+    pinned_objects = (*pinned_executables, *pinned_files)
+    descriptors = tuple(
+        sorted({pinned.descriptor for pinned in pinned_objects})
+    )
+    if (
+        not command
+        or not cwd.is_absolute()
+        or not cwd.is_dir()
+        or not descriptors
+        or str(command[0])
+        not in {str(executable.fd_path) for executable in pinned_executables}
+        or any(
+            _pinned_descriptor(pinned.fd_path, label=pinned.label)
+            != pinned.descriptor
+            for pinned in pinned_objects
+        )
+    ):
+        raise BlockError("PINNED_SUBPROCESS_INPUT_INVALID")
+    for pinned in pinned_objects:
+        try:
+            current = os.fstat(pinned.descriptor)
+        except OSError as exc:
+            raise BlockError(
+                f"{pinned.label}_PINNED_FD_NOT_INHERITED"
+            ) from exc
+        if (
+            not stat.S_ISREG(current.st_mode)
+            or current.st_mode != pinned.mode
+            or (
+                current.st_dev,
+                current.st_ino,
+                current.st_size,
+                current.st_mtime_ns,
+                current.st_ctime_ns,
+                current.st_nlink,
+            )
+            != pinned.identity
+        ):
+            raise BlockError(
+                f"{pinned.label}_PINNED_FD_OBJECT_CHANGED"
+            )
+    required_seals = (
+        fcntl.F_SEAL_SEAL
+        | fcntl.F_SEAL_SHRINK
+        | fcntl.F_SEAL_GROW
+        | fcntl.F_SEAL_WRITE
+    )
+    for pinned_file in pinned_files:
+        if (
+            fcntl.fcntl(
+                pinned_file.descriptor,
+                fcntl.F_GET_SEALS,
+            )
+            != required_seals
+        ):
+            raise BlockError(f"{pinned_file.label}_PINNED_FD_NOT_SEALED")
+    return subprocess.run(
+        list(command),
+        cwd=cwd,
+        env=dict(environment),
+        check=False,
+        stdin=subprocess.DEVNULL,
+        capture_output=capture_output,
+        pass_fds=descriptors,
+        timeout=timeout,
+    )
 
 
 def _require_absolute_regular(path: Path, *, label: str) -> Path:
@@ -185,11 +945,15 @@ def validate_runtime_identity(
     path: Path,
     *,
     selector_id: str,
-) -> tuple[Path, str]:
+) -> tuple[Path, str, str]:
     """Benchmark process가 self-report한 executable exact-object를 검증한다."""
 
-    _require_absolute_regular(path, label="BENCHMARK_RUNTIME_IDENTITY")
-    document = strict_json_load(path)
+    identity_snapshot = read_json_snapshot(
+        path,
+        label="BENCHMARK_RUNTIME_IDENTITY",
+        max_bytes=1024 * 1024,
+    )
+    document = identity_snapshot.document
     expected_fields = {
         "schemaVersion",
         "boundaryId",
@@ -208,39 +972,21 @@ def validate_runtime_identity(
         or document.get("status") != "PASS"
     ):
         raise BlockError("BENCHMARK_RUNTIME_IDENTITY_INVALID")
-    executed = _require_absolute_regular(
-        Path(str(document["executedBenchmarkPath"])),
+    executed = Path(str(document["executedBenchmarkPath"]))
+    executable_snapshot = read_regular_file_snapshot(
+        executed,
         label="EXECUTED_BENCHMARK",
+        max_bytes=512 * 1024 * 1024,
+        executable=True,
     )
     expected_sha256 = document["executedBenchmarkSha256"]
     if (
         not isinstance(expected_sha256, str)
         or SHA256_PATTERN.fullmatch(expected_sha256) is None
-        or sha256_file(executed) != expected_sha256
+        or executable_snapshot.sha256 != expected_sha256
     ):
         raise BlockError("EXECUTED_BENCHMARK_SHA256_MISMATCH")
-    return executed, expected_sha256
-
-
-def _verified_environment_executable(
-    path_name: str,
-    sha_name: str,
-    *,
-    label: str,
-) -> tuple[Path, str]:
-    path = _require_absolute_regular(
-        Path(_required_environment(path_name)),
-        label=label,
-    )
-    if not os.access(path, os.X_OK):
-        raise BlockError(f"{label}_NOT_EXECUTABLE")
-    expected_sha256 = _required_environment(sha_name)
-    if SHA256_PATTERN.fullmatch(expected_sha256) is None:
-        raise BlockError(f"{label}_EXPECTED_SHA256_INVALID")
-    actual_sha256 = sha256_file(path)
-    if actual_sha256 != expected_sha256:
-        raise BlockError(f"{label}_SHA256_MISMATCH")
-    return path, actual_sha256
+    return executed, expected_sha256, identity_snapshot.sha256
 
 
 def _import_repo_modules(
@@ -442,7 +1188,9 @@ def _profile_and_source_evidence(
     haskell_root: Path,
     plan_path: Path,
     haskell_evidence: Any,
-) -> tuple[dict[str, Any], Path, Path]:
+    pinned_profile_evidence: Mapping[str, PinnedJsonEvidence],
+    benchmark_subject_commit: str,
+) -> tuple[dict[str, Any], Path, Path, dict[str, str]]:
     profile_path = _require_absolute_regular(
         haskell_root / "selected-profile.v1.json",
         label="SELECTED_PROFILE",
@@ -451,23 +1199,72 @@ def _profile_and_source_evidence(
         haskell_root / "source-inputs.v1.json",
         label="SOURCE_INPUT_MANIFEST",
     )
-    plan = strict_json_load(plan_path)
-    profile = strict_json_load(profile_path)
+    plan_snapshot = read_json_snapshot(
+        plan_path,
+        label="BENCHMARK_PLAN",
+        max_bytes=16 * 1024 * 1024,
+    )
+    profile_snapshot = read_json_snapshot(
+        profile_path,
+        label="SELECTED_PROFILE",
+        max_bytes=4 * 1024 * 1024,
+    )
+    manifest_snapshot = read_json_snapshot(
+        manifest_path,
+        label="SOURCE_INPUT_MANIFEST",
+        max_bytes=16 * 1024 * 1024,
+    )
+    plan = plan_snapshot.document
+    profile = profile_snapshot.document
     if profile.get("schemaVersion") != "s1.4x-haskell-selected-profile-v1":
         raise BlockError("FINAL_SELECTED_PROFILE_REQUIRED")
-    haskell_evidence.validate_selected_profile_document(
+    source_tree_sha256 = haskell_evidence.benchmark_source_tree_sha256(
+        haskell_root
+    )
+    validated_profile = haskell_evidence.validate_selected_profile_document(
         profile,
         expected_compiler_sha256=haskell_evidence.AUTHORITATIVE_GHC_SHA256,
-        expected_source_tree_sha256=haskell_evidence.benchmark_source_tree_sha256(
-            haskell_root
-        ),
-        expected_qualification_plan_sha256=sha256_file(plan_path),
+        expected_source_tree_sha256=source_tree_sha256,
+        expected_qualification_plan_sha256=plan_snapshot.sha256,
         expected_selector_config_sha256=canonical_sha256(
             plan["haskellProfileQualification"]
         ),
     )
-    haskell_evidence.validate_source_manifest(haskell_root, manifest_path)
-    return profile, profile_path, manifest_path
+    validated_manifest = haskell_evidence.validate_source_manifest(
+        haskell_root,
+        manifest_path,
+    )
+    if (
+        profile_snapshot.payload
+        != haskell_evidence.canonical_json_bytes(
+            validated_profile,
+            trailing_newline=True,
+        )
+        or manifest_snapshot.document != validated_manifest
+        or manifest_snapshot.payload
+        != haskell_evidence.canonical_json_bytes(
+            validated_manifest,
+            trailing_newline=True,
+        )
+    ):
+        raise BlockError("PROFILE_SOURCE_EVIDENCE_NOT_CANONICAL")
+    pinned_closure = validate_profile_evidence_closure(
+        profile=profile,
+        evidence=pinned_profile_evidence,
+        benchmark_subject_commit=benchmark_subject_commit,
+    )
+    return (
+        profile,
+        profile_path,
+        manifest_path,
+        {
+            "selectedProfileSha256": profile_snapshot.sha256,
+            "sourceInputManifestSha256": manifest_snapshot.sha256,
+            "qualificationPlanSha256": plan_snapshot.sha256,
+            "sourceTreeSha256": source_tree_sha256,
+            **pinned_closure,
+        },
+    )
 
 
 def _verify_subject_commit(repo_root: Path, expected: str) -> None:
@@ -482,25 +1279,28 @@ def _verify_subject_commit(repo_root: Path, expected: str) -> None:
     )
     if completed.returncode != 0 or completed.stdout.strip() != expected:
         raise BlockError("BENCHMARK_SUBJECT_COMMIT_MISMATCH")
-
-
-def _run_toolchain_assertion(haskell_root: Path) -> None:
-    completed = subprocess.run(
-        [str(haskell_root / "tools/assert-toolchain.sh")],
-        cwd=haskell_root,
+    status = subprocess.run(
+        [
+            "/usr/bin/git",
+            "-C",
+            str(repo_root),
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=all",
+        ],
         check=False,
-        stdin=subprocess.DEVNULL,
-        timeout=120,
+        capture_output=True,
+        timeout=10,
     )
-    if completed.returncode != 0:
-        raise BlockError(f"TOOLCHAIN_ASSERTION_FAILED:{completed.returncode}")
+    if status.returncode != 0 or status.stdout:
+        raise BlockError("BENCHMARK_SUBJECT_WORKTREE_NOT_CLEAN")
 
 
-def _find_benchmark_artifact(haskell_root: Path) -> Path:
+def _find_benchmark_artifact(work_dir: Path) -> Path:
     candidates = sorted(
         (
             path
-            for path in (haskell_root / ".stack-work/dist").glob(
+            for path in (work_dir / "dist").glob(
                 "*/ghc-9.10.3/build/"
                 "s1-4x-haskell-benchmark/s1-4x-haskell-benchmark"
             )
@@ -511,6 +1311,15 @@ def _find_benchmark_artifact(haskell_root: Path) -> Path:
     if len(candidates) != 1:
         raise BlockError(f"BENCHMARK_ARTIFACT_COUNT_INVALID:{len(candidates)}")
     return candidates[0].resolve(strict=True)
+
+
+def _benchmark_stack_root(cache_root: Path, block_dir: Path) -> Path:
+    """Block output identity에만 결속된 일회용 benchmark Stack root를 만든다."""
+
+    if not cache_root.is_absolute() or not block_dir.is_absolute():
+        raise BlockError("BENCHMARK_STACK_ROOT_INPUT_INVALID")
+    suffix = hashlib.sha256(os.fsencode(str(block_dir))).hexdigest()[:24]
+    return cache_root / f"stack-root-benchmark-{suffix}"
 
 
 def _iso_now() -> str:
@@ -538,21 +1347,36 @@ def _run_shared_json_command(
     command: Sequence[str],
     *,
     label: str,
+    cwd: Path,
+    environment: Mapping[str, str],
+    pinned_executables: Sequence[PinnedExecutable],
+    pinned_files: Sequence[PinnedRegularFile],
     timeout: int = 300,
 ) -> dict[str, Any]:
-    completed = subprocess.run(
-        list(command),
-        check=False,
-        stdin=subprocess.DEVNULL,
+    if (
+        len(command) < 2
+        or str(command[1])
+        not in {str(pinned.fd_path) for pinned in pinned_files}
+    ):
+        raise BlockError(f"{label}_PINNED_ARGV_INVALID")
+    completed = run_pinned_subprocess(
+        command,
+        cwd=cwd,
+        environment=environment,
+        pinned_executables=pinned_executables,
         capture_output=True,
-        text=True,
+        pinned_files=pinned_files,
         timeout=timeout,
     )
     if completed.returncode != 0:
         raise BlockError(f"{label}_FAILED:{completed.returncode}")
     if completed.stderr:
         raise BlockError(f"{label}_UNEXPECTED_STDERR")
-    document = _strict_json_decode(completed.stdout, label=label)
+    try:
+        standard_output = completed.stdout.decode("utf-8")
+    except UnicodeError as exc:
+        raise BlockError(f"{label}_OUTPUT_NOT_UTF8") from exc
+    document = _strict_json_decode(standard_output, label=label)
     if not isinstance(document, dict):
         raise BlockError(f"{label}_OUTPUT_INVALID")
     return document
@@ -635,9 +1459,34 @@ def run_block(arguments: argparse.Namespace) -> dict[str, Any]:
     )
     if any(path.exists() or path.is_symlink() for path in output_paths):
         raise BlockError("BENCHMARK_OUTPUT_ALREADY_EXISTS")
+    cache_root = _require_absolute_directory(
+        Path(_required_environment("S1_4X_CACHE_ROOT")),
+        label="CACHE_ROOT",
+    )
+    stack_root = _benchmark_stack_root(cache_root, block_dir)
+    if stack_root.exists() or stack_root.is_symlink():
+        raise BlockError("BENCHMARK_STACK_ROOT_ALREADY_EXISTS")
+    stack_root.mkdir(mode=0o700)
+    work_dir = Path(".stack-work") / "s1-4x" / stack_root.name
+    work_directory = haskell_root / work_dir
+    if work_directory.exists() or work_directory.is_symlink():
+        raise BlockError("BENCHMARK_STACK_WORK_DIRECTORY_ALREADY_EXISTS")
+    pinned_executables = load_pinned_toolchain()
+    (
+        ghcup,
+        stack,
+        authoritative_ghc,
+        latest_ghc,
+        hlint,
+        stylish,
+    ) = pinned_executables
+    tool_path, ghc_shim = prepare_authoritative_ghc_shim(
+        stack_root=stack_root,
+        authoritative_ghc=authoritative_ghc,
+    )
+    pinned_profile_evidence = load_pinned_profile_evidence()
 
     _verify_subject_commit(repo_root, arguments.benchmark_subject_commit)
-    _run_toolchain_assertion(haskell_root)
     haskell_evidence, report_validator, gate = _import_repo_modules(
         haskell_root=haskell_root,
         numeric_root=numeric_root,
@@ -666,10 +1515,17 @@ def run_block(arguments: argparse.Namespace) -> dict[str, Any]:
         benchmark_subject_commit=arguments.benchmark_subject_commit,
         block_dir=block_dir,
     )
-    profile, profile_path, source_manifest_path = _profile_and_source_evidence(
+    (
+        profile,
+        profile_path,
+        source_manifest_path,
+        profile_source_closure,
+    ) = _profile_and_source_evidence(
         haskell_root=haskell_root,
         plan_path=plan_path,
         haskell_evidence=haskell_evidence,
+        pinned_profile_evidence=pinned_profile_evidence,
+        benchmark_subject_commit=arguments.benchmark_subject_commit,
     )
     toolchain_lock_path = _require_absolute_regular(
         haskell_root / "toolchain-lock.v1.json",
@@ -684,53 +1540,48 @@ def run_block(arguments: argparse.Namespace) -> dict[str, Any]:
         label="STACK_YAML",
     )
 
-    ghcup_bin, ghcup_sha256 = _verified_environment_executable(
-        "S1_4X_GHCUP_BIN",
-        "S1_4X_GHCUP_SHA256",
-        label="GHCUP",
-    )
-    stack_bin, stack_sha256 = _verified_environment_executable(
-        "S1_4X_STACK_BIN",
-        "S1_4X_STACK_SHA256",
-        label="STACK",
-    )
-    authoritative_ghc, authoritative_ghc_sha256 = _verified_environment_executable(
-        "S1_4X_AUTHORITATIVE_GHC_BIN",
-        "S1_4X_AUTHORITATIVE_GHC_SHA256",
-        label="AUTHORITATIVE_GHC",
-    )
-    marker_python, marker_python_sha256 = _verified_environment_executable(
-        "S1_4X_BENCHMARK_PYTHON_BIN",
-        "S1_4X_BENCHMARK_PYTHON_SHA256",
+    marker_python = pinned_executable_environment(
+        "S1_4X_BENCHMARK_PYTHON",
         label="MARKER_PYTHON",
     )
-    if Path(sys.executable).resolve(strict=True) != marker_python:
-        raise BlockError("HELPER_PYTHON_IDENTITY_MISMATCH")
-    marker_script = _require_absolute_regular(
+    marker_script = pin_regular_file(
         numeric_root / "benchmarks/run_rotated_blocks.py",
         label="MARKER_SCRIPT",
+        max_bytes=16 * 1024 * 1024,
     )
-    marker_script_sha256 = sha256_file(marker_script)
     marker_argv = [
-        str(marker_python),
-        str(marker_script),
+        str(marker_python.fd_path),
+        str(marker_script.fd_path),
         "mark-measurement-entered",
         "--qualification",
         str(qualification_path),
     ]
-    ledger_script = _require_absolute_regular(
+    ledger_script = pin_regular_file(
         integration_root / "benchmark_input_ledger.py",
         label="BENCHMARK_INPUT_LEDGER_SCRIPT",
+        max_bytes=16 * 1024 * 1024,
     )
-    native_script = _require_absolute_regular(
+    native_script = pin_regular_file(
         integration_root / "native_benchmark_block.py",
         label="NATIVE_BENCHMARK_BLOCK_SCRIPT",
+        max_bytes=16 * 1024 * 1024,
+    )
+    runtime_executables = (*pinned_executables, marker_python)
+    environment = dict(os.environ)
+    environment.update(THREAD_ENVIRONMENT)
+    environment.update(
+        {
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "PYTHONHASHSEED": "0",
+            "PYTHONNOUSERSITE": "1",
+            "PYTHONPATH": f"{numeric_root / 'benchmarks'}:{integration_root}",
+        }
     )
 
     ledger_result = _run_shared_json_command(
         [
-            str(marker_python),
-            str(ledger_script),
+            str(marker_python.fd_path),
+            str(ledger_script.fd_path),
             "--repo-root",
             str(repo_root),
             "--plan",
@@ -743,6 +1594,10 @@ def run_block(arguments: argparse.Namespace) -> dict[str, Any]:
             str(input_ledger_path),
         ],
         label="BENCHMARK_INPUT_LEDGER",
+        cwd=repo_root,
+        environment=environment,
+        pinned_executables=runtime_executables,
+        pinned_files=(ledger_script,),
     )
     if ledger_result != {
         "boundaryId": "haskell",
@@ -754,16 +1609,17 @@ def run_block(arguments: argparse.Namespace) -> dict[str, Any]:
     receipt_path.parent.mkdir(mode=0o700)
 
     command = build_stack_benchmark_command(
-        ghcup_bin=ghcup_bin,
-        stack_bin=stack_bin,
+        ghcup_bin=ghcup.fd_path,
+        stack_bin=stack.fd_path,
+        tool_path=tool_path,
         stack_yaml=stack_yaml_path,
+        stack_root=stack_root,
+        work_dir=work_dir,
         profile_options=profile["ghcOptions"],
         time_limit_seconds=plan["execution"]["criterionTimeLimitSeconds"],
         native_report=raw_path,
         criterion_prefix=selector["criterionPrefix"],
     )
-    environment = dict(os.environ)
-    environment.update(THREAD_ENVIRONMENT)
     environment.update(
         {
             "S1_4X_BENCHMARK_PLAN": str(plan_path),
@@ -773,19 +1629,22 @@ def run_block(arguments: argparse.Namespace) -> dict[str, Any]:
             "S1_4X_BENCHMARK_QUALIFICATION": str(qualification_path),
             "S1_4X_BENCHMARK_SELECTOR_ID": arguments.selector,
             "S1_4X_BENCHMARK_RUNTIME_IDENTITY": str(runtime_identity_path),
-            "S1_4X_BENCHMARK_MARKER_PYTHON": str(marker_python),
-            "S1_4X_BENCHMARK_MARKER_PYTHON_SHA256": marker_python_sha256,
-            "S1_4X_BENCHMARK_MARKER_SCRIPT": str(marker_script),
-            "S1_4X_BENCHMARK_MARKER_SCRIPT_SHA256": marker_script_sha256,
+            "S1_4X_BENCHMARK_MARKER_PYTHON": str(
+                marker_python.fd_path
+            ),
+            "S1_4X_BENCHMARK_MARKER_PYTHON_SHA256": marker_python.sha256,
+            "S1_4X_BENCHMARK_MARKER_SCRIPT": str(marker_script.fd_path),
+            "S1_4X_BENCHMARK_MARKER_SCRIPT_SHA256": marker_script.sha256,
         }
     )
     started_at = _iso_now()
-    completed = subprocess.run(
+    completed = run_pinned_subprocess(
         command,
         cwd=haskell_root,
-        env=environment,
-        check=False,
-        stdin=subprocess.DEVNULL,
+        environment=environment,
+        pinned_executables=runtime_executables,
+        capture_output=False,
+        pinned_files=(marker_script,),
     )
     finished_at = _iso_now()
     if completed.returncode != 0:
@@ -795,16 +1654,23 @@ def run_block(arguments: argparse.Namespace) -> dict[str, Any]:
         pre_run=qualification,
     )
     if (
-        sha256_file(marker_python) != marker_python_sha256
-        or sha256_file(marker_script) != marker_script_sha256
+        pinned_executable_environment(
+            "S1_4X_BENCHMARK_PYTHON",
+            label="MARKER_PYTHON",
+        )
+        != marker_python
     ):
         raise BlockError("MARKER_IDENTITY_CHANGED_DURING_RUN")
     _require_absolute_regular(raw_path, label="CRITERION_FAMILY_RAW")
-    executed_benchmark, executed_benchmark_sha256 = validate_runtime_identity(
+    (
+        executed_benchmark,
+        executed_benchmark_sha256,
+        runtime_identity_sha256,
+    ) = validate_runtime_identity(
         runtime_identity_path,
         selector_id=arguments.selector,
     )
-    artifact = _find_benchmark_artifact(haskell_root)
+    artifact = _find_benchmark_artifact(work_directory)
     if (
         artifact != executed_benchmark
         or sha256_file(artifact) != executed_benchmark_sha256
@@ -841,30 +1707,92 @@ def run_block(arguments: argparse.Namespace) -> dict[str, Any]:
             "candidateProvenance": {
                 "kind": "haskell",
                 "selectedProfilePath": str(profile_path),
-                "selectedProfileSha256": sha256_file(profile_path),
+                "selectedProfileSha256": profile_source_closure[
+                    "selectedProfileSha256"
+                ],
                 "selectedProfileId": profile["profileId"],
                 "sourceInputManifestPath": str(source_manifest_path),
-                "sourceInputManifestSha256": sha256_file(source_manifest_path),
+                "sourceInputManifestSha256": profile_source_closure[
+                    "sourceInputManifestSha256"
+                ],
                 "effectiveCompilerFlagsSha256": profile["optionsSha256"],
                 "runtimeIdentityPath": str(runtime_identity_path),
-                "runtimeIdentitySha256": sha256_file(runtime_identity_path),
+                "runtimeIdentitySha256": runtime_identity_sha256,
                 "executedBenchmarkPath": str(executed_benchmark),
                 "executedBenchmarkSha256": executed_benchmark_sha256,
-                "authoritativeGhcPath": str(authoritative_ghc),
-                "authoritativeGhcSha256": authoritative_ghc_sha256,
-                "markerPythonPath": str(marker_python),
-                "markerPythonSha256": marker_python_sha256,
-                "markerScriptPath": str(marker_script),
-                "markerScriptSha256": marker_script_sha256,
+                "authoritativeGhcPath": str(
+                    authoritative_ghc.source_path
+                ),
+                "authoritativeGhcPinnedFdPath": str(
+                    authoritative_ghc.fd_path
+                ),
+                "authoritativeGhcSha256": authoritative_ghc.sha256,
+                "authoritativeGhcShimPath": str(ghc_shim),
+                "scoringCompilerExecutionBinding": "pinned-fd-path",
+                "toolchainInstallClosurePath": str(
+                    authoritative_ghc.source_path.parent
+                ),
+                "toolchainInstallClosurePolicy": (
+                    "ghc-pkg-and-distribution-auxiliaries-only"
+                ),
+                "markerPythonPath": str(marker_python.source_path),
+                "markerPythonPinnedFdPath": str(marker_python.fd_path),
+                "markerPythonSha256": marker_python.sha256,
+                "markerScriptPath": str(marker_script.source_path),
+                "markerScriptPinnedFdPath": str(marker_script.fd_path),
+                "markerScriptSha256": marker_script.sha256,
                 "markerArgv": marker_argv,
                 "markerArgvSha256": canonical_sha256(marker_argv),
-                "ghcupPath": str(ghcup_bin),
-                "ghcupSha256": ghcup_sha256,
-                "stackPath": str(stack_bin),
-                "stackSha256": stack_sha256,
+                "inputLedgerScriptPath": str(ledger_script.source_path),
+                "inputLedgerScriptPinnedFdPath": str(
+                    ledger_script.fd_path
+                ),
+                "inputLedgerScriptSha256": ledger_script.sha256,
+                "nativeBlockScriptPath": str(native_script.source_path),
+                "nativeBlockScriptPinnedFdPath": str(
+                    native_script.fd_path
+                ),
+                "nativeBlockScriptSha256": native_script.sha256,
+                "ghcupPath": str(ghcup.source_path),
+                "ghcupPinnedFdPath": str(ghcup.fd_path),
+                "ghcupSha256": ghcup.sha256,
+                "stackPath": str(stack.source_path),
+                "stackPinnedFdPath": str(stack.fd_path),
+                "stackSha256": stack.sha256,
+                "latestGhcPath": str(latest_ghc.source_path),
+                "latestGhcPinnedFdPath": str(latest_ghc.fd_path),
+                "latestGhcSha256": latest_ghc.sha256,
+                "hlintPath": str(hlint.source_path),
+                "hlintPinnedFdPath": str(hlint.fd_path),
+                "hlintSha256": hlint.sha256,
+                "stylishPath": str(stylish.source_path),
+                "stylishPinnedFdPath": str(stylish.fd_path),
+                "stylishSha256": stylish.sha256,
                 "stackYamlPath": str(stack_yaml_path),
                 "stackYamlSha256": sha256_file(stack_yaml_path),
+                "stackRootPath": str(stack_root),
+                "stackWorkDirectory": str(work_dir),
+                "stackWorkDirectoryAbsolute": str(work_directory),
+                "toolPath": tool_path,
                 "selectedGhcOptions": profile["ghcOptions"],
+                "baselineCorrectnessSourcePath": profile_source_closure[
+                    "baselineCorrectnessSourcePath"
+                ],
+                "baselineCorrectnessSha256": profile_source_closure[
+                    "baselineCorrectnessSha256"
+                ],
+                "optimizedCorrectnessSourcePath": profile_source_closure[
+                    "optimizedCorrectnessSourcePath"
+                ],
+                "optimizedCorrectnessSha256": profile_source_closure[
+                    "optimizedCorrectnessSha256"
+                ],
+                "qualificationArtifactSourcePath": profile_source_closure[
+                    "qualificationArtifactSourcePath"
+                ],
+                "qualificationArtifactSha256": profile_source_closure[
+                    "qualificationArtifactSha256"
+                ],
                 "toolchainLockPath": str(toolchain_lock_path),
                 "toolchainLockSha256": sha256_file(toolchain_lock_path),
                 "mergedToolchainProvenancePath": str(merged_provenance_path),
@@ -879,8 +1807,8 @@ def run_block(arguments: argparse.Namespace) -> dict[str, Any]:
 
     producer_result = _run_shared_json_command(
         [
-            str(marker_python),
-            str(native_script),
+            str(marker_python.fd_path),
+            str(native_script.fd_path),
             "produce-haskell-native",
             "--repo-root",
             str(repo_root),
@@ -914,6 +1842,10 @@ def run_block(arguments: argparse.Namespace) -> dict[str, Any]:
             finished_at,
         ],
         label="HASKELL_NATIVE_PRODUCER",
+        cwd=repo_root,
+        environment=environment,
+        pinned_executables=runtime_executables,
+        pinned_files=(native_script, marker_script, ledger_script),
     )
     if (
         set(producer_result)
@@ -943,8 +1875,8 @@ def run_block(arguments: argparse.Namespace) -> dict[str, Any]:
 
     block_result = _run_shared_json_command(
         [
-            str(marker_python),
-            str(native_script),
+            str(marker_python.fd_path),
+            str(native_script.fd_path),
             "--repo-root",
             str(repo_root),
             "--plan",
@@ -969,6 +1901,10 @@ def run_block(arguments: argparse.Namespace) -> dict[str, Any]:
             arguments.benchmark_subject_commit,
         ],
         label="NATIVE_BENCHMARK_BLOCK",
+        cwd=repo_root,
+        environment=environment,
+        pinned_executables=runtime_executables,
+        pinned_files=(native_script, marker_script, ledger_script),
     )
     if (
         set(block_result)
@@ -986,6 +1922,21 @@ def run_block(arguments: argparse.Namespace) -> dict[str, Any]:
         expected_boundary_id="haskell",
         expected_selector_id=arguments.selector,
     )
+    final_pinned_profile_evidence = load_pinned_profile_evidence()
+    if final_pinned_profile_evidence != pinned_profile_evidence:
+        raise BlockError("PINNED_PROFILE_EVIDENCE_CHANGED_DURING_BLOCK")
+    _, _, _, final_profile_source_closure = _profile_and_source_evidence(
+        haskell_root=haskell_root,
+        plan_path=plan_path,
+        haskell_evidence=haskell_evidence,
+        pinned_profile_evidence=final_pinned_profile_evidence,
+        benchmark_subject_commit=arguments.benchmark_subject_commit,
+    )
+    if final_profile_source_closure != profile_source_closure:
+        raise BlockError("PROFILE_SOURCE_CLOSURE_CHANGED_DURING_BLOCK")
+    if load_pinned_toolchain() != pinned_executables:
+        raise BlockError("PINNED_TOOLCHAIN_CHANGED_DURING_BLOCK")
+    _verify_subject_commit(repo_root, arguments.benchmark_subject_commit)
     return {
         "status": "PASS",
         "selectorId": arguments.selector,

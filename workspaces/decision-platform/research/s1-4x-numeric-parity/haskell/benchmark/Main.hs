@@ -26,6 +26,7 @@ import qualified Data.Vector.Unboxed as U
 import           S14X.Contract.AtomicOutput (PublishResult (Published), exclusiveAtomicWrite)
 import           S14X.Contract.BenchmarkValidation (BenchmarkResultShape (ConditionalCoverageBatch, IndependenceBatch, LikelihoodBatch, ScalarBatch, VectorBatch),
                                                     validateBenchmarkResults)
+import           S14X.Contract.PinnedFd (pinnedRegularFileMatchesSha256, validPinnedRegularFilePath)
 import           S14X.Contract.Process (sha256Hex)
 import           S14X.Core.AdvancedRisk (christoffersenConditionalCoverageTest,
                                          christoffersenIndependenceTest, deflatedSharpeRatio,
@@ -315,13 +316,21 @@ markMeasurementEntered path = do
 
 verifiedMarkerInput :: String -> String -> IO FilePath
 verifiedMarkerInput pathVariable shaVariable = do
-  path <- requiredConfiguredPath pathVariable
+  path <- requiredPinnedFdPath pathVariable
   expectedSha256 <- requiredConfiguredValue shaVariable
-  payload <- BS.readFile path
-  unless
-    (TextEncoding.decodeUtf8 (sha256Hex payload) == Text.pack expectedSha256)
-    (fail "benchmark marker input SHA-256 mismatch")
+  matches <-
+    pinnedRegularFileMatchesSha256
+      path
+      (TextEncoding.encodeUtf8 (Text.pack expectedSha256))
+  unless matches (fail "benchmark marker input SHA-256 mismatch")
   pure path
+
+requiredPinnedFdPath :: String -> IO FilePath
+requiredPinnedFdPath variable = do
+  configured <- requiredConfiguredValue variable
+  valid <- validPinnedRegularFilePath configured
+  unless valid (fail (variable <> " must be an inherited regular /proc/self/fd/N"))
+  pure configured
 
 requiredConfiguredPath :: String -> IO FilePath
 requiredConfiguredPath variable = do

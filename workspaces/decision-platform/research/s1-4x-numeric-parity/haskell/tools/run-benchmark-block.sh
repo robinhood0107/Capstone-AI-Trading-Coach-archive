@@ -53,57 +53,100 @@ HASKELL_ROOT="$REPO_ROOT/workspaces/decision-platform/research/s1-4x-numeric-par
 HELPER="$HASKELL_ROOT/tools/haskell_benchmark_block.py"
 BENCHMARK_PYTHON="${S1_4X_BENCHMARK_PYTHON_BIN:?S1_4X_BENCHMARK_PYTHON_BIN is required}"
 BENCHMARK_PYTHON_SHA256="${S1_4X_BENCHMARK_PYTHON_SHA256:?S1_4X_BENCHMARK_PYTHON_SHA256 is required}"
+BENCHMARK_PYTHON_PINNED_FD_PATH="${S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH:?S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH is required}"
 GHCUP_BIN="${S1_4X_GHCUP_BIN:?S1_4X_GHCUP_BIN is required}"
+GHCUP_SHA256="${S1_4X_GHCUP_SHA256:?S1_4X_GHCUP_SHA256 is required}"
+GHCUP_PINNED_FD_PATH="${S1_4X_GHCUP_PINNED_FD_PATH:?S1_4X_GHCUP_PINNED_FD_PATH is required}"
 STACK_BIN="${S1_4X_STACK_BIN:?S1_4X_STACK_BIN is required}"
+STACK_SHA256="${S1_4X_STACK_SHA256:?S1_4X_STACK_SHA256 is required}"
+STACK_PINNED_FD_PATH="${S1_4X_STACK_PINNED_FD_PATH:?S1_4X_STACK_PINNED_FD_PATH is required}"
 AUTHORITATIVE_GHC_BIN="${S1_4X_AUTHORITATIVE_GHC_BIN:?S1_4X_AUTHORITATIVE_GHC_BIN is required}"
+AUTHORITATIVE_GHC_SHA256="${S1_4X_AUTHORITATIVE_GHC_SHA256:?S1_4X_AUTHORITATIVE_GHC_SHA256 is required}"
+AUTHORITATIVE_GHC_PINNED_FD_PATH="${S1_4X_AUTHORITATIVE_GHC_PINNED_FD_PATH:?S1_4X_AUTHORITATIVE_GHC_PINNED_FD_PATH is required}"
 LATEST_GHC_BIN="${S1_4X_LATEST_GHC_BIN:?S1_4X_LATEST_GHC_BIN is required}"
+LATEST_GHC_SHA256="${S1_4X_LATEST_GHC_SHA256:?S1_4X_LATEST_GHC_SHA256 is required}"
+LATEST_GHC_PINNED_FD_PATH="${S1_4X_LATEST_GHC_PINNED_FD_PATH:?S1_4X_LATEST_GHC_PINNED_FD_PATH is required}"
 HLINT_BIN="${S1_4X_HLINT_BIN:?S1_4X_HLINT_BIN is required}"
+HLINT_SHA256="${S1_4X_HLINT_SHA256:?S1_4X_HLINT_SHA256 is required}"
+HLINT_PINNED_FD_PATH="${S1_4X_HLINT_PINNED_FD_PATH:?S1_4X_HLINT_PINNED_FD_PATH is required}"
 STYLISH_BIN="${S1_4X_STYLISH_BIN:?S1_4X_STYLISH_BIN is required}"
-RUNTIME_HOME="${HOME:?HOME is required}"
+STYLISH_SHA256="${S1_4X_STYLISH_SHA256:?S1_4X_STYLISH_SHA256 is required}"
+STYLISH_PINNED_FD_PATH="${S1_4X_STYLISH_PINNED_FD_PATH:?S1_4X_STYLISH_PINNED_FD_PATH is required}"
+BASELINE_CORRECTNESS="${S1_4X_HASKELL_BASELINE_CORRECTNESS:?S1_4X_HASKELL_BASELINE_CORRECTNESS is required}"
+BASELINE_CORRECTNESS_SHA256="${S1_4X_HASKELL_BASELINE_CORRECTNESS_SHA256:?S1_4X_HASKELL_BASELINE_CORRECTNESS_SHA256 is required}"
+BASELINE_CORRECTNESS_SOURCE_PATH="${S1_4X_HASKELL_BASELINE_CORRECTNESS_SOURCE_PATH:?S1_4X_HASKELL_BASELINE_CORRECTNESS_SOURCE_PATH is required}"
+OPTIMIZED_CORRECTNESS="${S1_4X_HASKELL_OPTIMIZED_CORRECTNESS:?S1_4X_HASKELL_OPTIMIZED_CORRECTNESS is required}"
+OPTIMIZED_CORRECTNESS_SHA256="${S1_4X_HASKELL_OPTIMIZED_CORRECTNESS_SHA256:?S1_4X_HASKELL_OPTIMIZED_CORRECTNESS_SHA256 is required}"
+OPTIMIZED_CORRECTNESS_SOURCE_PATH="${S1_4X_HASKELL_OPTIMIZED_CORRECTNESS_SOURCE_PATH:?S1_4X_HASKELL_OPTIMIZED_CORRECTNESS_SOURCE_PATH is required}"
+QUALIFICATION_ARTIFACT="${S1_4X_HASKELL_QUALIFICATION_ARTIFACT:?S1_4X_HASKELL_QUALIFICATION_ARTIFACT is required}"
+QUALIFICATION_ARTIFACT_SHA256="${S1_4X_HASKELL_QUALIFICATION_ARTIFACT_SHA256:?S1_4X_HASKELL_QUALIFICATION_ARTIFACT_SHA256 is required}"
+QUALIFICATION_ARTIFACT_SOURCE_PATH="${S1_4X_HASKELL_QUALIFICATION_ARTIFACT_SOURCE_PATH:?S1_4X_HASKELL_QUALIFICATION_ARTIFACT_SOURCE_PATH is required}"
+CACHE_ROOT="${S1_4X_CACHE_ROOT:?S1_4X_CACHE_ROOT is required}"
 
-export S1_4X_GHCUP_SHA256="9ed5da5449b48043a0d17e767c05d2ef585e25a639bb934329496c6d2fad9cf8"
-export S1_4X_STACK_SHA256="923dbd137756652c67b376e2447c655b87fcc373f4d104b5073bca913471ecbe"
-GHCUP_SHA256="$S1_4X_GHCUP_SHA256"
-STACK_SHA256="$S1_4X_STACK_SHA256"
-AUTHORITATIVE_GHC_SHA256="d0c0dd79a1bcc5dce3c9e73613c1be51f61b78d5ef7c0970ffe9f142a90a5e2c"
-LATEST_GHC_SHA256="ecfd54b4161699f574d2b163bdc817c54df08a08a310323e43b41ab5fc413ef1"
-HLINT_SHA256="3ff3fb4b571876d668ddf4ad0245769c19a640283fabb0c2629038aa34197f62"
-STYLISH_SHA256="385dc27bc2d0fb654e76ecadfb57bc0b7e1c58afe74f19923e20b696e6fe0d7b"
-
-verify_executable() {
+verify_source_path_layout() {
   local label="$1"
-  local executable="$2"
-  local expected_sha256="$3"
-  if [[ "$executable" != /* \
-    || ! -f "$executable" \
-    || ! -x "$executable" \
-    || -L "$executable" \
-    || "$(/usr/bin/realpath -e -- "$executable")" != "$executable" ]]; then
-    echo "$label identity is unsafe" >&2
-    exit 69
-  fi
-  if [[ "$(/usr/bin/sha256sum "$executable" | /usr/bin/awk '{print $1}')" \
-    != "$expected_sha256" ]]; then
-    echo "$label SHA-256 mismatch" >&2
+  local source_path="$2"
+  if [[ "$source_path" != /* \
+    || "$source_path" == *":"* \
+    || "$source_path" == *"|"* \
+    || "$source_path" == *$'\n'* \
+    || "$source_path" == *"//"* \
+    || "$source_path" == *"/./"* \
+    || "$source_path" == *"/../"* \
+    || "$source_path" == */. \
+    || "$source_path" == */.. ]]; then
+    echo "$label source path layout is unsafe" >&2
     exit 69
   fi
 }
 
-verify_executable "benchmark Python" "$BENCHMARK_PYTHON" "$BENCHMARK_PYTHON_SHA256"
-verify_executable "GHCup" "$GHCUP_BIN" "$GHCUP_SHA256"
-verify_executable "Stack" "$STACK_BIN" "$STACK_SHA256"
-verify_executable "authoritative GHC" "$AUTHORITATIVE_GHC_BIN" "$AUTHORITATIVE_GHC_SHA256"
-verify_executable "compatibility GHC" "$LATEST_GHC_BIN" "$LATEST_GHC_SHA256"
-verify_executable "HLint" "$HLINT_BIN" "$HLINT_SHA256"
-verify_executable "stylish-haskell" "$STYLISH_BIN" "$STYLISH_SHA256"
+verify_pinned_object() {
+  local label="$1"
+  local pinned_fd_path="$2"
+  local expected_sha256="$3"
+  local kind="$4"
+  if [[ ! "$pinned_fd_path" =~ ^/proc/self/fd/([3-9]|[1-9][0-9]+)$ \
+    || ! -f "$pinned_fd_path" \
+    || ! "$expected_sha256" =~ ^[0-9a-f]{64}$ \
+    || ("$kind" == "executable" && ! -x "$pinned_fd_path") ]]; then
+    echo "$label pinned FD identity is unsafe" >&2
+    exit 69
+  fi
+  if [[ "$(/usr/bin/sha256sum "$pinned_fd_path" | /usr/bin/awk '{print $1}')" \
+    != "$expected_sha256" ]]; then
+    echo "$label pinned FD SHA-256 mismatch" >&2
+    exit 69
+  fi
+}
+
+for tool_record in \
+  "benchmark Python|$BENCHMARK_PYTHON|$BENCHMARK_PYTHON_PINNED_FD_PATH|$BENCHMARK_PYTHON_SHA256" \
+  "GHCup|$GHCUP_BIN|$GHCUP_PINNED_FD_PATH|$GHCUP_SHA256" \
+  "Stack|$STACK_BIN|$STACK_PINNED_FD_PATH|$STACK_SHA256" \
+  "authoritative GHC|$AUTHORITATIVE_GHC_BIN|$AUTHORITATIVE_GHC_PINNED_FD_PATH|$AUTHORITATIVE_GHC_SHA256" \
+  "compatibility GHC|$LATEST_GHC_BIN|$LATEST_GHC_PINNED_FD_PATH|$LATEST_GHC_SHA256" \
+  "HLint|$HLINT_BIN|$HLINT_PINNED_FD_PATH|$HLINT_SHA256" \
+  "stylish-haskell|$STYLISH_BIN|$STYLISH_PINNED_FD_PATH|$STYLISH_SHA256"; do
+  IFS="|" read -r label source_path pinned_fd_path expected_sha256 <<<"$tool_record"
+  verify_source_path_layout "$label" "$source_path"
+  verify_pinned_object "$label" "$pinned_fd_path" "$expected_sha256" "executable"
+done
+for evidence_record in \
+  "baseline correctness|$BASELINE_CORRECTNESS_SOURCE_PATH|$BASELINE_CORRECTNESS|$BASELINE_CORRECTNESS_SHA256" \
+  "optimized correctness|$OPTIMIZED_CORRECTNESS_SOURCE_PATH|$OPTIMIZED_CORRECTNESS|$OPTIMIZED_CORRECTNESS_SHA256" \
+  "qualification artifact|$QUALIFICATION_ARTIFACT_SOURCE_PATH|$QUALIFICATION_ARTIFACT|$QUALIFICATION_ARTIFACT_SHA256"; do
+  IFS="|" read -r label source_path pinned_fd_path expected_sha256 <<<"$evidence_record"
+  verify_source_path_layout "$label" "$source_path"
+  verify_pinned_object "$label" "$pinned_fd_path" "$expected_sha256" "json"
+done
 
 if [[ ! -f "$HELPER" \
   || -L "$HELPER" \
-  || "$RUNTIME_HOME" != /* \
-  || ! -d "$RUNTIME_HOME" \
-  || -L "$RUNTIME_HOME" \
-  || "$(/usr/bin/realpath -e -- "$RUNTIME_HOME")" != "$RUNTIME_HOME" ]]; then
-  echo "benchmark helper/runtime home identity is unsafe" >&2
+  || "$CACHE_ROOT" != /* \
+  || ! -d "$CACHE_ROOT" \
+  || -L "$CACHE_ROOT" \
+  || "$(/usr/bin/realpath -e -- "$CACHE_ROOT")" != "$CACHE_ROOT" ]]; then
+  echo "benchmark helper/cache root identity is unsafe" >&2
   exit 69
 fi
 
@@ -111,19 +154,39 @@ exec /usr/bin/env -i \
   PATH="/usr/bin:/bin" \
   LC_ALL="C" \
   TZ="UTC" \
-  HOME="$RUNTIME_HOME" \
+  HOME="/nonexistent" \
   S1_4X_BENCHMARK_PYTHON_BIN="$BENCHMARK_PYTHON" \
   S1_4X_BENCHMARK_PYTHON_SHA256="$BENCHMARK_PYTHON_SHA256" \
+  S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH="$BENCHMARK_PYTHON_PINNED_FD_PATH" \
   S1_4X_GHCUP_BIN="$GHCUP_BIN" \
   S1_4X_GHCUP_SHA256="$GHCUP_SHA256" \
+  S1_4X_GHCUP_PINNED_FD_PATH="$GHCUP_PINNED_FD_PATH" \
   S1_4X_STACK_BIN="$STACK_BIN" \
   S1_4X_STACK_SHA256="$STACK_SHA256" \
+  S1_4X_STACK_PINNED_FD_PATH="$STACK_PINNED_FD_PATH" \
   S1_4X_AUTHORITATIVE_GHC_BIN="$AUTHORITATIVE_GHC_BIN" \
   S1_4X_AUTHORITATIVE_GHC_SHA256="$AUTHORITATIVE_GHC_SHA256" \
+  S1_4X_AUTHORITATIVE_GHC_PINNED_FD_PATH="$AUTHORITATIVE_GHC_PINNED_FD_PATH" \
   S1_4X_LATEST_GHC_BIN="$LATEST_GHC_BIN" \
+  S1_4X_LATEST_GHC_SHA256="$LATEST_GHC_SHA256" \
+  S1_4X_LATEST_GHC_PINNED_FD_PATH="$LATEST_GHC_PINNED_FD_PATH" \
   S1_4X_HLINT_BIN="$HLINT_BIN" \
+  S1_4X_HLINT_SHA256="$HLINT_SHA256" \
+  S1_4X_HLINT_PINNED_FD_PATH="$HLINT_PINNED_FD_PATH" \
   S1_4X_STYLISH_BIN="$STYLISH_BIN" \
-  "$BENCHMARK_PYTHON" "$HELPER" \
+  S1_4X_STYLISH_SHA256="$STYLISH_SHA256" \
+  S1_4X_STYLISH_PINNED_FD_PATH="$STYLISH_PINNED_FD_PATH" \
+  S1_4X_HASKELL_BASELINE_CORRECTNESS="$BASELINE_CORRECTNESS" \
+  S1_4X_HASKELL_BASELINE_CORRECTNESS_SHA256="$BASELINE_CORRECTNESS_SHA256" \
+  S1_4X_HASKELL_BASELINE_CORRECTNESS_SOURCE_PATH="$BASELINE_CORRECTNESS_SOURCE_PATH" \
+  S1_4X_HASKELL_OPTIMIZED_CORRECTNESS="$OPTIMIZED_CORRECTNESS" \
+  S1_4X_HASKELL_OPTIMIZED_CORRECTNESS_SHA256="$OPTIMIZED_CORRECTNESS_SHA256" \
+  S1_4X_HASKELL_OPTIMIZED_CORRECTNESS_SOURCE_PATH="$OPTIMIZED_CORRECTNESS_SOURCE_PATH" \
+  S1_4X_HASKELL_QUALIFICATION_ARTIFACT="$QUALIFICATION_ARTIFACT" \
+  S1_4X_HASKELL_QUALIFICATION_ARTIFACT_SHA256="$QUALIFICATION_ARTIFACT_SHA256" \
+  S1_4X_HASKELL_QUALIFICATION_ARTIFACT_SOURCE_PATH="$QUALIFICATION_ARTIFACT_SOURCE_PATH" \
+  S1_4X_CACHE_ROOT="$CACHE_ROOT" \
+  "$BENCHMARK_PYTHON_PINNED_FD_PATH" "$HELPER" \
   --repo-root "$REPO_ROOT" \
   --plan "$2" \
   --block-dir "$4" \
