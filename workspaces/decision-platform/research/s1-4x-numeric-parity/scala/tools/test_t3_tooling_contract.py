@@ -375,6 +375,11 @@ def main() -> int:
     assert native_smoke.index('"-jvm", "PINNED_JAVA_FD"') > (
         native_smoke.index("S1_4X_SCALA_JAVAC_PINNED_FD_PATH")
     )
+    assert native_smoke.index(
+        'export S1_4X_BENCHMARK_RUN_MODE="$MODE"'
+    ) < native_smoke.index(
+        '"$SCALA_ROOT/tools/compile-benchmarks.sh"'
+    )
     assert "S1_4X_MEASUREMENT_READY_MARKER" in native_smoke
     assert "measurementReadyMarkerSha256" in native_smoke
     for marker in (
