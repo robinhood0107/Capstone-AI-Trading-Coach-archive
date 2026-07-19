@@ -79,12 +79,17 @@ class FakeRunner:
         fail_role: str | None = None,
         base_passed: int = 262,
         replace_supplier: Path | None = None,
+        mutate_supplier_in_place: Path | None = None,
+        dirty_repository: bool = False,
     ) -> None:
         self.fail_role = fail_role
         self.base_passed = base_passed
         self.replace_supplier = replace_supplier
+        self.mutate_supplier_in_place = mutate_supplier_in_place
+        self.dirty_repository = dirty_repository
         self.calls: list[tuple[list[str], dict[str, Any]]] = []
         self.uv_calls = 0
+        self.executed_uv_sha256: list[str] = []
 
     def __call__(
         self,
@@ -93,6 +98,17 @@ class FakeRunner:
     ) -> subprocess.CompletedProcess[bytes]:
         self.calls.append((list(command), kwargs))
         if command[0] == "/usr/bin/git":
+            if "status" in command:
+                return subprocess.CompletedProcess(
+                    command,
+                    0,
+                    stdout=(
+                        b" M workspaces/decision-platform/python-services/app.py\0"
+                        if self.dirty_repository
+                        else b""
+                    ),
+                    stderr=b"",
+                )
             return subprocess.CompletedProcess(
                 command,
                 0,
@@ -107,6 +123,10 @@ class FakeRunner:
             replacement.write_bytes(b"#!/bin/sh\nexit 88\n")
             replacement.chmod(0o700)
             os.replace(replacement, self.replace_supplier)
+        if self.uv_calls == 1 and self.mutate_supplier_in_place is not None:
+            self.mutate_supplier_in_place.write_bytes(b"#!/bin/sh\nexit 77\n")
+            self.mutate_supplier_in_place.chmod(0o700)
+        self.executed_uv_sha256.append(_sha256(Path(command[0]).read_bytes()))
 
         junit = self._junit_path(command)
         if junit is not None:
@@ -321,6 +341,55 @@ def test_gate_keeps_running_the_sealed_uv_after_supplier_replacement(
         if command[0] != "/usr/bin/git"
     ]
     assert len({command[0] for command in uv_commands}) == 1
+
+
+def test_gate_executes_immutable_uv_bytes_after_same_inode_supplier_write(
+    tmp_path: Path,
+) -> None:
+    uv = tmp_path / "verified-uv"
+    original = b"#!/bin/sh\nexit 99\n"
+    runner = FakeRunner(mutate_supplier_in_place=uv)
+    _, _, _, receipts = _run(tmp_path, runner)
+
+    assert receipts["production"]["status"] == "PASS"
+    assert runner.executed_uv_sha256
+    assert set(runner.executed_uv_sha256) == {_sha256(original)}
+    assert _sha256(uv.read_bytes()) != _sha256(original)
+
+
+def test_gate_rejects_dirty_repository_and_strips_ambient_injection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    uv, uv_sha256 = _fake_uv(tmp_path)
+    correctness_root = tmp_path / "correctness"
+    correctness_root.mkdir()
+    with pytest.raises(RegressionGateError, match="SUBJECT_WORKTREE_DIRTY"):
+        run_regression_gate(
+            repo_root=REPO_ROOT,
+            output_root=correctness_root / "regression",
+            uv_executable=uv,
+            uv_sha256=uv_sha256,
+            benchmark_subject_commit=_head(),
+            runner=FakeRunner(dirty_repository=True),
+        )
+    assert not (correctness_root / "regression").exists()
+
+    monkeypatch.setenv("UV_ENV_FILE", "/tmp/attacker.env")
+    monkeypatch.setenv("LD_PRELOAD", "/tmp/attacker.so")
+    monkeypatch.setenv("PYTEST_PLUGINS", "attacker")
+    runner = FakeRunner()
+    clean_root = tmp_path / "clean"
+    clean_root.mkdir()
+    _run(clean_root, runner)
+    for command, kwargs in runner.calls:
+        if command[0] == "/usr/bin/git":
+            continue
+        environment = kwargs["env"]
+        assert "UV_ENV_FILE" not in environment
+        assert "LD_PRELOAD" not in environment
+        assert "PYTEST_PLUGINS" not in environment
+        assert not any(name.startswith("GIT_CONFIG") for name in environment)
 
 
 @pytest.mark.parametrize("occupied_kind", ["directory", "file", "symlink"])
