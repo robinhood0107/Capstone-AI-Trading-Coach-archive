@@ -195,10 +195,14 @@ class HLintInventoryTests(unittest.TestCase):
             manifest["entries"],
         )
 
-        self.assertEqual(summary.allowance_count, 6)
-        self.assertEqual(summary.imported_symbol_count, 12)
+        self.assertEqual(summary.allowance_count, 7)
+        self.assertEqual(summary.imported_symbol_count, 13)
         self.assertIn(
             "System.Environment(getExecutablePath,lookupEnv)",
+            {entry["symbol"] for entry in manifest["entries"]},
+        )
+        self.assertIn(
+            "System.Environment(getExecutablePath)",
             {entry["symbol"] for entry in manifest["entries"]},
         )
 
