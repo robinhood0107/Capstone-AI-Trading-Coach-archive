@@ -82,22 +82,38 @@ class BenchmarkWrapperContractTests(unittest.TestCase):
 
         self.assertRegex(
             source,
-            r"\(\s*\\\s*~preparedCases\s*->\s*"
-            r'bgroup "" \(benchmarkPreparedCases selectedCases preparedCases\)',
+            r"\(\s*\\\s*preparedCases\s*->\s*"
+            r'bgroup\s+""\s*'
+            r"\(\s*zipWith\s+"
+            r"\(benchmarkPreparedCase preparedCases\)\s+"
+            r"\[0 \.\.\]\s+selectedCases\s*\)",
         )
         self.assertRegex(
             source,
-            r"benchmarkPreparedCases\s+"
-            r"\(benchmarkCase : benchmarkCases\)\s+"
-            r"preparedCases\s*=\s*"
-            r"let\s+~\(preparedCase,\s*remainingPreparedCases\)\s*=\s*"
-            r"unconsPreparedCases preparedCases",
+            r"benchmarkPreparedCase preparedCases index benchmarkCase\s*=\s*"
+            r"(?:--[^\n]*\n\s*)?"
+            r"env\s*"
+            r"\(preparedCaseAt index preparedCases\)\s*"
+            r"\(benchmark benchmarkCase\)",
         )
         self.assertRegex(
             source,
-            r"unconsPreparedCases preparedCases\s*=\s*"
-            r"case preparedCases of\s*"
-            r"preparedCase : remainingPreparedCases\s*->",
+            r"preparedCaseAt\s*::\s*"
+            r"Int\s*->\s*\[PreparedCase\]\s*->\s*IO PreparedCase",
+        )
+        self.assertRegex(
+            source,
+            r"preparedCaseAt index preparedCases\s*=\s*"
+            r"maybe\s*"
+            r'\(fail "prepared benchmark case closure mismatch"\)\s*'
+            r"pure\s*"
+            r"\(listToMaybe \(drop index preparedCases\)\)",
+        )
+        self.assertNotIn("~preparedCases", source)
+        self.assertNotIn("unconsPreparedCases", source)
+        self.assertNotIn(
+            'error "prepared benchmark case closure mismatch"',
+            source,
         )
         self.assertNotIn(
             '(bgroup "" . zipWith benchmark selectedCases)',
