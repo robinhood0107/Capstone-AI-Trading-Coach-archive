@@ -379,6 +379,7 @@ class BenchmarkWrapperContractTests(unittest.TestCase):
                 path.write_text('{"status":"PASS"}\n', encoding="utf-8")
                 evidence_paths.append(path)
                 evidence_descriptors.append(os.open(path, os.O_RDONLY))
+            (root / "large").mkdir()
             try:
                 environment = {
                     "PATH": "/usr/bin:/bin",
@@ -390,6 +391,7 @@ class BenchmarkWrapperContractTests(unittest.TestCase):
                         f"/proc/self/fd/{benchmark_python_descriptor}"
                     ),
                     "S1_4X_CACHE_ROOT": str(root),
+                    "S1_4X_LARGE_FIXTURE_ROOT": str(root),
                 }
                 for prefix, path, descriptor in zip(
                     (
