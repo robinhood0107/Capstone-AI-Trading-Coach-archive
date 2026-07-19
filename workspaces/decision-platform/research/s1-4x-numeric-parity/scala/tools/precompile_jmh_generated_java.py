@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -98,6 +99,18 @@ class GeneratorOutputClosure:
     generated_resource_root: Path
     generator_class_input_sha256: str
     generated_resource_root_sha256: str
+
+
+@dataclass(frozen=True)
+class ExecutableIdentity:
+    """실행 pathname/parent proc FD의 pre/post 비교용 immutable identity."""
+
+    path: Path
+    expected_sha256: str
+    file_identity: tuple[int, int, int, int, int, int, int, int, int]
+    proc_owner_pid: int | None
+    proc_owner_start_time: int | None
+    proc_owner_uid: int | None
 
 
 def sha256_file(path: Path) -> str:
@@ -553,13 +566,177 @@ def _normalized_exec_path(path: Path) -> Path:
     return path
 
 
+def _stat_identity(
+    metadata: os.stat_result,
+) -> tuple[int, int, int, int, int, int, int, int, int]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_nlink,
+        metadata.st_uid,
+        metadata.st_gid,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
+
+
+def _sha256_fd(fd: int) -> str:
+    digest = hashlib.sha256()
+    offset = 0
+    while True:
+        block = os.pread(fd, 1024 * 1024, offset)
+        if not block:
+            break
+        digest.update(block)
+        offset += len(block)
+    return digest.hexdigest()
+
+
+def _process_identity(pid: int) -> tuple[int, int, int]:
+    """proc owner의 parent/start-time/uid를 PID 재사용과 함께 고정한다."""
+
+    try:
+        proc_root = Path(f"/proc/{pid}")
+        proc_metadata = os.stat(proc_root, follow_symlinks=False)
+        raw_stat = (proc_root / "stat").read_text(encoding="utf-8")
+        closing_parenthesis = raw_stat.rfind(")")
+        if (
+            closing_parenthesis < 0
+            or not raw_stat.startswith(f"{pid} (")
+        ):
+            raise ValueError("invalid proc stat")
+        fields = raw_stat[closing_parenthesis + 2 :].split()
+        parent_pid = int(fields[1])
+        start_time = int(fields[19])
+    except (IndexError, OSError, ValueError) as error:
+        raise PrecompileError("PROC_FD_OWNER_IDENTITY_INVALID") from error
+    return parent_pid, start_time, proc_metadata.st_uid
+
+
+def _ancestor_process_identities() -> dict[int, tuple[int, int]]:
+    """현재 helper와 실제 ancestor만 parent-sealed FD owner로 허용한다."""
+
+    ancestors: dict[int, tuple[int, int]] = {}
+    pid = os.getpid()
+    for _ in range(256):
+        if pid <= 0 or pid in ancestors:
+            break
+        parent_pid, start_time, uid = _process_identity(pid)
+        ancestors[pid] = (start_time, uid)
+        if parent_pid == pid:
+            break
+        pid = parent_pid
+    return ancestors
+
+
+def _executable_identity(
+    path: Path,
+    *,
+    expected_sha256: str,
+) -> ExecutableIdentity:
+    """Regular pathname 또는 exact ancestor proc FD를 fstat/hash로 검증한다."""
+
+    if not path.is_absolute():
+        raise PrecompileError("EXECUTION_PATH_NOT_ABSOLUTE")
+    proc_match = PROC_FD_PATTERN.fullmatch(str(path))
+    proc_owner_pid: int | None = None
+    proc_owner_start_time: int | None = None
+    proc_owner_uid: int | None = None
+    if proc_match is not None:
+        if proc_match.group("pid") == "self":
+            raise PrecompileError("PROC_FD_PATH_NOT_NORMALIZED")
+        proc_owner_pid = int(proc_match.group("pid"))
+        ancestor_identities = _ancestor_process_identities()
+        owner_identity = ancestor_identities.get(proc_owner_pid)
+        if owner_identity is None or owner_identity[1] != os.geteuid():
+            raise PrecompileError("PROC_FD_OWNER_IDENTITY_INVALID")
+        proc_owner_start_time, proc_owner_uid = owner_identity
+        owner_before = _process_identity(proc_owner_pid)
+        if owner_before[1:] != (proc_owner_start_time, proc_owner_uid):
+            raise PrecompileError("PROC_FD_OWNER_IDENTITY_INVALID")
+        open_flags = os.O_RDONLY | os.O_CLOEXEC
+    else:
+        if (
+            path.is_symlink()
+            or not path.is_file()
+            or path.resolve(strict=True) != path
+        ):
+            raise PrecompileError("REGULAR_EXECUTION_PATH_INVALID")
+        open_flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
+
+    try:
+        fd = os.open(path, open_flags)
+    except OSError as error:
+        raise PrecompileError("EXECUTION_PATH_OPEN_FAILED") from error
+    try:
+        before = os.fstat(fd)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_nlink != 1
+            or before.st_mode & 0o111 == 0
+            or not os.access(path, os.X_OK)
+        ):
+            raise PrecompileError("EXECUTION_FILE_INVALID")
+        digest = _sha256_fd(fd)
+        after = os.fstat(fd)
+        try:
+            path_metadata = os.stat(path, follow_symlinks=True)
+        except OSError as error:
+            raise PrecompileError("EXECUTION_PATH_STAT_FAILED") from error
+        if (
+            digest != expected_sha256
+            or _stat_identity(before) != _stat_identity(after)
+            or _stat_identity(after) != _stat_identity(path_metadata)
+        ):
+            raise PrecompileError("EXECUTION_FILE_IDENTITY_MISMATCH")
+    finally:
+        os.close(fd)
+
+    if proc_owner_pid is not None:
+        owner_after = _process_identity(proc_owner_pid)
+        if owner_after[1:] != (proc_owner_start_time, proc_owner_uid):
+            raise PrecompileError("PROC_FD_OWNER_IDENTITY_INVALID")
+    return ExecutableIdentity(
+        path=path,
+        expected_sha256=expected_sha256,
+        file_identity=_stat_identity(after),
+        proc_owner_pid=proc_owner_pid,
+        proc_owner_start_time=proc_owner_start_time,
+        proc_owner_uid=proc_owner_uid,
+    )
+
+
+def _verify_executable_stability(
+    identity: ExecutableIdentity,
+    *,
+    label: str,
+) -> None:
+    """실행 전 snapshot과 실행 후 proc owner/inode/bytes가 동일함을 확인한다."""
+
+    try:
+        current = _executable_identity(
+            identity.path,
+            expected_sha256=identity.expected_sha256,
+        )
+    except PrecompileError as error:
+        raise PrecompileError(
+            f"{label}_EXECUTION_POST_EXEC_IDENTITY_MISMATCH"
+        ) from error
+    if current != identity:
+        raise PrecompileError(
+            f"{label}_EXECUTION_POST_EXEC_IDENTITY_MISMATCH"
+        )
+
+
 def _verified_executable(
     *,
     binary: Path,
     execution_path: Path,
     expected_sha256: str,
     label: str,
-) -> tuple[Path, str]:
+) -> tuple[Path, str, ExecutableIdentity]:
     binary = _require_absolute_regular(binary, label=f"{label}_BINARY")
     if (
         not os.access(binary, os.X_OK)
@@ -568,11 +745,17 @@ def _verified_executable(
     ):
         raise PrecompileError(f"{label}_BINARY_IDENTITY_MISMATCH")
     execution_path = _normalized_exec_path(execution_path)
-    if (
-        not execution_path.is_absolute()
-        or not execution_path.is_file()
-        or not os.access(execution_path, os.X_OK)
-        or sha256_file(execution_path) != expected_sha256
+    try:
+        identity = _executable_identity(
+            execution_path,
+            expected_sha256=expected_sha256,
+        )
+    except PrecompileError as error:
+        raise PrecompileError(
+            f"{label}_EXECUTION_IDENTITY_MISMATCH"
+        ) from error
+    if identity.file_identity != _stat_identity(
+        os.stat(binary, follow_symlinks=False)
     ):
         raise PrecompileError(f"{label}_EXECUTION_IDENTITY_MISMATCH")
     execution_id = (
@@ -580,7 +763,7 @@ def _verified_executable(
         if PROC_FD_PATTERN.fullmatch(str(execution_path)) is not None
         else label
     )
-    return execution_path, execution_id
+    return execution_path, execution_id, identity
 
 
 def _write_process_logs(
@@ -755,13 +938,17 @@ def precompile(arguments: argparse.Namespace) -> dict[str, Any]:
         jdk_modules_sha256 = lock["jdk"]["jdkModulesSha256"]
     except (KeyError, TypeError) as error:
         raise PrecompileError("TOOLCHAIN_JAVAC_CLOSURE_MISSING") from error
-    scala_cli_exec, scala_cli_execution_id = _verified_executable(
+    (
+        scala_cli_exec,
+        scala_cli_execution_id,
+        scala_cli_identity,
+    ) = _verified_executable(
         binary=arguments.scala_cli_binary,
         execution_path=arguments.scala_cli_exec,
         expected_sha256=scala_cli_sha256,
         label="SCALA_CLI_1_15_0",
     )
-    javac_exec, javac_execution_id = _verified_executable(
+    javac_exec, javac_execution_id, javac_identity = _verified_executable(
         binary=arguments.javac_binary,
         execution_path=arguments.javac_exec,
         expected_sha256=javac_sha256,
@@ -834,6 +1021,11 @@ def precompile(arguments: argparse.Namespace) -> dict[str, Any]:
     )
     if compile_exit != 0:
         raise PrecompileError(f"SCALA_JMH_PRECOMPILE_FAILED:{compile_exit}")
+    _verify_executable_stability(
+        scala_cli_identity,
+        label="SCALA_CLI_1_15_0",
+    )
+    _verify_executable_stability(javac_identity, label="JAVAC")
     classpath = classpath_closure(
         stdout_path.read_text(encoding="utf-8"),
         workspace=workspace,
@@ -866,11 +1058,10 @@ def precompile(arguments: argparse.Namespace) -> dict[str, Any]:
     )
     if javac_exit != 0:
         raise PrecompileError(f"PINNED_JAVAC_FAILED:{javac_exit}")
+    _verify_executable_stability(javac_identity, label="JAVAC")
     generated_classes = _generated_class_closure(destination)
     if sha256_file(arguments.javac_binary) != javac_sha256:
         raise PrecompileError("JAVAC_BINARY_POST_EXEC_IDENTITY_MISMATCH")
-    if sha256_file(javac_exec) != javac_sha256:
-        raise PrecompileError("JAVAC_EXECUTION_POST_EXEC_IDENTITY_MISMATCH")
     if sha256_file(jdk_modules) != jdk_modules_sha256:
         raise PrecompileError("JDK_MODULES_POST_EXEC_IDENTITY_MISMATCH")
     # javac이 외부 directory를 채운 뒤의 최종 bytes를 receipt classpath에
@@ -1068,7 +1259,7 @@ def verify(arguments: argparse.Namespace) -> dict[str, Any]:
         is None
     ):
         raise PrecompileError("PRECOMPILE_JAVAC_RECEIPT_INVALID")
-    javac_exec, javac_execution_id = _verified_executable(
+    javac_exec, javac_execution_id, javac_identity = _verified_executable(
         binary=arguments.javac_binary,
         execution_path=arguments.javac_exec,
         expected_sha256=javac["binarySha256"],
@@ -1081,9 +1272,12 @@ def verify(arguments: argparse.Namespace) -> dict[str, Any]:
         or not modules.is_file()
         or modules.resolve(strict=True) != modules
         or sha256_file(modules) != javac["jdkModulesSha256"]
-        or sha256_file(javac_exec) != javac["binarySha256"]
     ):
         raise PrecompileError("JDK_COMPILER_POST_RUN_DRIFT")
+    try:
+        _verify_executable_stability(javac_identity, label="JAVAC")
+    except PrecompileError as error:
+        raise PrecompileError("JDK_COMPILER_POST_RUN_DRIFT") from error
 
     generated_source_root_id = receipt.get("generatedSourceRootPathId")
     if not isinstance(generated_source_root_id, str):
