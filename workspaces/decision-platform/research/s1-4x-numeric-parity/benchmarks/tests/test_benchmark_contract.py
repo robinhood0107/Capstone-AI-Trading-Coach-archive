@@ -83,6 +83,18 @@ def test_plan_freezes_native_full_run_settings_and_bare_bigint_trials(
     assert '"trial_count": 1e' not in raw_plan.lower()
 
 
+def test_plan_freezes_constrained_local_host_policy() -> None:
+    plan = validate_plan(DEFAULT_PLAN, verify_files=False)
+    environment = plan["environmentValidity"]
+
+    assert environment["minAvailableMemoryGiB"] == 4
+    assert environment["runningContainerCount"] == 4
+    assert environment["maxNormalizedLoad1"] == 0.1
+    assert environment["loadSampleCount"] == 3
+    assert environment["externalProcessCpuPercentThreshold"] == 5
+    assert plan["allocationPolicy"]["capBytes"] * 8 == 4 * 1024**3
+
+
 def test_each_repetition_has_29_blocks_and_three_exact_rotations(
     plan: dict[str, Any],
 ) -> None:

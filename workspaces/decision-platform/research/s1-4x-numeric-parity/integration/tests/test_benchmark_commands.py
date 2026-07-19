@@ -300,6 +300,16 @@ class BenchmarkCommandManifestTests(TestCase):
         self.assertIn("S1_4X_BENCHMARK_PYTHON_SHA256", python_source)
         self.assertIn("export UV_PYTHON=", python_source)
 
+    def test_host_wrapper_uses_approved_constrained_host_thresholds(self) -> None:
+        source = (
+            INTEGRATION.parent / "integration/tools/run-host-validator.sh"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("--min-available-memory-bytes 4294967296", source)
+        self.assertIn("--max-running-containers 4", source)
+        self.assertNotIn("--min-available-memory-bytes 8589934592", source)
+        self.assertNotIn("--max-running-containers 0", source)
+
     def test_supporting_gates_require_the_verified_uv_path(self) -> None:
         for wrapper in (
             INTEGRATION / "tools/run-integration-correctness.sh",

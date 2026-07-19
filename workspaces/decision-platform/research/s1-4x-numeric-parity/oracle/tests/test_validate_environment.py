@@ -22,11 +22,11 @@ class FakeEnvironment:
 
     def __init__(self) -> None:
         self.free_bytes = 30 * GIB
-        self.memory_bytes = 8 * GIB
+        self.memory_bytes = 4 * GIB
         self.affinity = frozenset({0, 1})
         self.logical_cpus = 2
         self.loads = [0.2, 0.2, 0.2]
-        self.containers: list[str] = []
+        self.containers = [f"container-{index}" for index in range(1, 5)]
         self.now = 0.0
         self.external_delta_ticks = 149
         self.reuse_pid = False
@@ -92,12 +92,12 @@ def _policy() -> EnvironmentPolicy:
     return EnvironmentPolicy(
         cpu_set=frozenset({0, 1}),
         min_home_free_bytes=30 * GIB,
-        min_available_memory_bytes=8 * GIB,
+        min_available_memory_bytes=4 * GIB,
         max_normalized_load1=0.10,
         load_samples=3,
         sample_interval_seconds=30.0,
         max_quiet_wait_seconds=60.0,
-        max_running_containers=0,
+        max_running_containers=4,
         external_process_sample_seconds=30.0,
         max_external_process_cpu_percent=5.0,
         allowed_process_root_pid=10,
@@ -112,12 +112,12 @@ def test_default_policy_freezes_every_gate1_host_threshold() -> None:
     policy = EnvironmentPolicy(cpu_set=frozenset({0}), allowed_process_root_pid=10)
 
     assert policy.min_home_free_bytes == 30 * GIB
-    assert policy.min_available_memory_bytes == 8 * GIB
+    assert policy.min_available_memory_bytes == 4 * GIB
     assert policy.max_normalized_load1 == 0.10
     assert policy.load_samples == 3
     assert policy.sample_interval_seconds == 30.0
     assert policy.max_quiet_wait_seconds == 600.0
-    assert policy.max_running_containers == 0
+    assert policy.max_running_containers == 4
     assert policy.external_process_sample_seconds == 30.0
     assert policy.max_external_process_cpu_percent == 5.0
 
@@ -207,7 +207,7 @@ def test_each_frozen_negative_boundary_fails(mutation: str) -> None:
     elif mutation == "load":
         adapter.loads = [0.200001, 0.200001, 0.200001]
     elif mutation == "container":
-        adapter.containers = ["container-1"]
+        adapter.containers.append("container-5")
     elif mutation == "affinity":
         adapter.affinity = frozenset({0})
     elif mutation == "external-threshold":
@@ -220,6 +220,26 @@ def test_each_frozen_negative_boundary_fails(mutation: str) -> None:
 
     assert report["status"] == "FAIL"
     assert report["failureCount"] >= 1
+
+
+def test_container_count_policy_accepts_four_and_rejects_five() -> None:
+    accepted = FakeEnvironment()
+    accepted_report = validate_environment(
+        Path("/unused"),
+        policy=_policy(),
+        adapter=accepted,
+    )
+
+    rejected = FakeEnvironment()
+    rejected.containers.append("container-5")
+    rejected_report = validate_environment(
+        Path("/unused"),
+        policy=_policy(),
+        adapter=rejected,
+    )
+
+    assert _checks(accepted_report)["docker.running-containers"]["status"] == "PASS"
+    assert _checks(rejected_report)["docker.running-containers"]["status"] == "FAIL"
 
 
 def test_proc_stat_parser_handles_spaces_inside_command() -> None:
