@@ -22,9 +22,9 @@ module S14X.Core.NumericPrimitives
   )
 where
 
-import           Data.List (foldl')
 import           Numeric.SpecFunctions (erfc, log1p)
 
+import qualified Data.List           as List
 import qualified Data.Vector.Unboxed as U
 
 import           S14X.Core.Error (StableError (LikelihoodInvalid, ResearchResultNonFinite, ResultNonFinite))
@@ -314,7 +314,7 @@ normalInverseCdf probability
 
 horner :: Double -> [Double] -> Double
 horner argument =
-  foldl' (\accumulator coefficient -> accumulator * argument + coefficient) 0.0
+  List.foldl' (\accumulator coefficient -> accumulator * argument + coefficient) 0.0
 
 -- | 자유도 1인 chi-square 통계량의 survival probability를 'erfc'로 계산한다.
 -- 최종 확률은 finite/range gate를 통과해야 한다.
