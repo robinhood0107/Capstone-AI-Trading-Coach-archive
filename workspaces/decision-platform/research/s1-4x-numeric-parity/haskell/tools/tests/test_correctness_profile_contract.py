@@ -74,6 +74,7 @@ class CorrectnessProfileContractTests(unittest.TestCase):
                 environment["GHCUP_INSTALL_BASE_PREFIX"],
                 str(ghcup_prefix),
             )
+            self.assertEqual(environment["LC_ALL"], "C.UTF-8")
 
             forged_link = root / "forged-prefix"
             forged_link.symlink_to(ghcup_prefix, target_is_directory=True)
@@ -127,9 +128,10 @@ class CorrectnessProfileContractTests(unittest.TestCase):
         second_work = helper.isolated_stack_work_dir(second)
         self.assertEqual(
             first_work,
-            Path(".stack-work/s1-4x") / first.name,
+            Path(f".stack-work-s1-4x-{first.name}"),
         )
         self.assertFalse(first_work.is_absolute())
+        self.assertEqual(len(first_work.parts), 1)
         self.assertNotEqual(first_work, second_work)
         self.assertRegex(
             first.name,
@@ -193,7 +195,7 @@ class CorrectnessProfileContractTests(unittest.TestCase):
                 "--stack-root",
                 "/cache/stack-root",
                 "--work-dir",
-                ".stack-work/s1-4x/stack-root",
+                ".stack-work-s1-4x-stack-root",
                 "--stack-yaml",
                 "/repo/haskell/stack.yaml",
                 "--no-terminal",
@@ -215,8 +217,8 @@ class CorrectnessProfileContractTests(unittest.TestCase):
         helper = load_helper()
         with tempfile.TemporaryDirectory() as temporary:
             haskell_root = Path(temporary).resolve()
-            work_a = Path(".stack-work/s1-4x/run-a")
-            work_b = Path(".stack-work/s1-4x/run-b")
+            work_a = Path(".stack-work-s1-4x-run-a")
+            work_b = Path(".stack-work-s1-4x-run-b")
             suffix = (
                 "dist/platform/ghc-9.10.3/build/"
                 "s1-4x-haskell/s1-4x-haskell"
@@ -270,8 +272,9 @@ class CorrectnessProfileContractTests(unittest.TestCase):
         ):
             source = (TOOLS_ROOT / name).read_text(encoding="utf-8")
             with self.subTest(wrapper=name):
-                self.assertIn('STACK_WORK_DIR=".stack-work/s1-4x/', source)
+                self.assertIn('STACK_WORK_DIR=".stack-work-s1-4x-', source)
                 self.assertIn('--work-dir "$STACK_WORK_DIR"', source)
+                self.assertIn('export LC_ALL="C.UTF-8"', source)
 
     def test_wrapper_is_exclusive_typed_and_has_no_arbitrary_command_escape(
         self,

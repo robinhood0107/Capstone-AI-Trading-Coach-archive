@@ -304,6 +304,8 @@ class BenchmarkWrapperContractTests(unittest.TestCase):
         source = WRAPPER.read_text(encoding="utf-8")
         self.assertEqual(source.splitlines()[0], "#!/usr/bin/bash")
         self.assertIn('[[ "$#" -eq 20 ]]', source)
+        self.assertEqual(source.count('LC_ALL="C.UTF-8"'), 2)
+        self.assertNotIn('LC_ALL="C"', source)
         offsets = [source.index(f'"{option}"') for option in EXPECTED_OPTIONS]
         self.assertEqual(offsets, sorted(offsets))
         self.assertEqual(
@@ -638,8 +640,8 @@ class BenchmarkWrapperContractTests(unittest.TestCase):
                 "command = module.build_stack_benchmark_command("
                 "ghcup_bin=ghcup.fd_path, stack_bin=stack.fd_path, "
                 "tool_path=tool_path, stack_yaml=stack_root / 'stack.yaml', "
-                "stack_root=stack_root, work_dir=Path('.stack-work') / "
-                "'s1-4x' / stack_root.name, "
+                "stack_root=stack_root, "
+                "work_dir=Path(f'.stack-work-s1-4x-{stack_root.name}'), "
                 "profile_options=['-O0', '-fasm'], time_limit_seconds=5, "
                 "native_report=stack_root / 'raw.json', "
                 "criterion_prefix='probe/')\n"

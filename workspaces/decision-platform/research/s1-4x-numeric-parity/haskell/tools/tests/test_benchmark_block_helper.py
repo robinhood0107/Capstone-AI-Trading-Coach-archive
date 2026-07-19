@@ -90,7 +90,7 @@ class BenchmarkBlockHelperTests(unittest.TestCase):
             stack_yaml=Path("/repo/haskell/stack.yaml"),
             stack_root=Path("/cache/stack-root-benchmark-abc"),
             work_dir=Path(
-                ".stack-work/s1-4x/stack-root-benchmark-abc"
+                ".stack-work-s1-4x-stack-root-benchmark-abc"
             ),
             profile_options=["-O2", "-fasm"],
             time_limit_seconds=5,
@@ -118,7 +118,7 @@ class BenchmarkBlockHelperTests(unittest.TestCase):
                 "--stack-root",
                 "/cache/stack-root-benchmark-abc",
                 "--work-dir",
-                ".stack-work/s1-4x/stack-root-benchmark-abc",
+                ".stack-work-s1-4x-stack-root-benchmark-abc",
                 "--stack-yaml",
                 "/repo/haskell/stack.yaml",
                 "--no-terminal",
@@ -747,7 +747,7 @@ class BenchmarkBlockHelperTests(unittest.TestCase):
                     stack_yaml=root / "stack.yaml",
                     stack_root=stack_root,
                     work_dir=Path(
-                        f".stack-work/s1-4x/{stack_root.name}"
+                        f".stack-work-s1-4x-{stack_root.name}"
                     ),
                     profile_options=["-O0", "-fasm"],
                     time_limit_seconds=5,
