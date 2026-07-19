@@ -5,10 +5,12 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import io
 import json
 import math
 import os
 import re
+import stat
 import subprocess
 import sys
 import tarfile
@@ -16,7 +18,7 @@ import tempfile
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence
 
 
 class EvidenceError(RuntimeError):
@@ -42,6 +44,14 @@ class ProfileSelection:
     per_case_maxima: Mapping[str, float]
     aggregate_ratio: float
     improving_outer_repetitions: int
+
+
+@dataclass(frozen=True)
+class VectorArchiveSnapshot:
+    """동일 pinned FD에서 읽고 hash한 upstream vector archive bytes."""
+
+    payload: bytes
+    sha256: str
 
 
 CANDIDATE_ROOTS = ("src", "app", "test", "benchmark")
@@ -306,6 +316,36 @@ def canonical_sha256(value: Any) -> str:
     return hashlib.sha256(canonical_json_bytes(value)).hexdigest()
 
 
+def property_stack_root_path_id(output_directory: Path) -> str:
+    """Property output identity로부터 portable isolated Stack root ID를 파생한다."""
+
+    if not output_directory.is_absolute():
+        raise EvidenceError("property Stack root output must be absolute")
+    identity = b"property\0" + os.fsencode(str(output_directory))
+    suffix = hashlib.sha256(identity).hexdigest()[:24]
+    return f"S1_4X_CACHE_ROOT/stack-root-property-{suffix}"
+
+
+def validate_property_stack_root_path_id(
+    path_id: str,
+    output_directory: Path,
+) -> str:
+    """실제 property output에 결속된 exact portable Stack root ID만 허용한다."""
+
+    expected = property_stack_root_path_id(output_directory)
+    if (
+        type(path_id) is not str
+        or re.fullmatch(
+            r"S1_4X_CACHE_ROOT/stack-root-property-[0-9a-f]{24}",
+            path_id,
+        )
+        is None
+        or path_id != expected
+    ):
+        raise EvidenceError("property Stack root path ID does not match output")
+    return path_id
+
+
 def canonical_source_manifest_sha256(files: Mapping[str, Mapping[str, str]]) -> str:
     """LC_ALL=C `sha256sum` line closure와 같은 path-sorted manifest SHA-256."""
 
@@ -333,6 +373,119 @@ def sha256_file(path: Path) -> str:
         while chunk := stream.read(1024 * 1024):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def snapshot_vector_archive(
+    archive_path: Path,
+    *,
+    _test_hook: Callable[[str, Path], None] | None = None,
+) -> VectorArchiveSnapshot:
+    """nofollow FD 하나에서 archive bytes와 SHA를 함께 고정한다."""
+
+    descriptor: int | None = None
+    route = archive_path
+    fd_match = re.fullmatch(r"/proc/self/fd/([3-9]|[1-9][0-9]+)", str(route))
+    try:
+        if fd_match is not None:
+            inherited_descriptor = int(fd_match.group(1))
+            descriptor = os.dup(inherited_descriptor)
+            route_follows_symlink = True
+        else:
+            route = archive_path.absolute()
+            try:
+                resolved = route.resolve(strict=True)
+                route_metadata = route.stat(follow_symlinks=False)
+            except (OSError, RuntimeError) as exc:
+                raise EvidenceError("vector archive identity is unsafe") from exc
+            if (
+                resolved != route
+                or stat.S_ISLNK(route_metadata.st_mode)
+                or not stat.S_ISREG(route_metadata.st_mode)
+            ):
+                raise EvidenceError("vector archive identity is unsafe")
+            no_follow = getattr(os, "O_NOFOLLOW", None)
+            if no_follow is None:
+                raise EvidenceError("vector archive nofollow is unsupported")
+            descriptor = os.open(
+                route,
+                os.O_RDONLY | os.O_CLOEXEC | no_follow,
+            )
+            route_follows_symlink = False
+
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode) or opened.st_size > 16 * 1024 * 1024:
+            raise EvidenceError("vector archive identity is unsafe")
+        initial_identity = (
+            opened.st_dev,
+            opened.st_ino,
+            opened.st_mode,
+            opened.st_nlink,
+            opened.st_size,
+            opened.st_mtime_ns,
+            opened.st_ctime_ns,
+        )
+        if _test_hook is not None:
+            _test_hook("after-open", route)
+        try:
+            route_metadata = route.stat(follow_symlinks=route_follows_symlink)
+        except OSError as exc:
+            raise EvidenceError("vector archive route changed") from exc
+        route_identity = (
+            route_metadata.st_dev,
+            route_metadata.st_ino,
+            route_metadata.st_mode,
+            route_metadata.st_nlink,
+            route_metadata.st_size,
+            route_metadata.st_mtime_ns,
+            route_metadata.st_ctime_ns,
+        )
+        if route_identity != initial_identity:
+            raise EvidenceError("vector archive route changed")
+
+        payload_chunks: list[bytes] = []
+        while chunk := os.read(descriptor, 1024 * 1024):
+            payload_chunks.append(chunk)
+        payload = b"".join(payload_chunks)
+        if _test_hook is not None:
+            _test_hook("after-read", route)
+        after = os.fstat(descriptor)
+        try:
+            current_route = route.stat(follow_symlinks=route_follows_symlink)
+        except OSError as exc:
+            raise EvidenceError("vector archive route changed") from exc
+        after_identity = (
+            after.st_dev,
+            after.st_ino,
+            after.st_mode,
+            after.st_nlink,
+            after.st_size,
+            after.st_mtime_ns,
+            after.st_ctime_ns,
+        )
+        current_route_identity = (
+            current_route.st_dev,
+            current_route.st_ino,
+            current_route.st_mode,
+            current_route.st_nlink,
+            current_route.st_size,
+            current_route.st_mtime_ns,
+            current_route.st_ctime_ns,
+        )
+        if (
+            after_identity != initial_identity
+            or current_route_identity != initial_identity
+            or len(payload) != opened.st_size
+        ):
+            raise EvidenceError("vector archive route changed")
+        return VectorArchiveSnapshot(
+            payload=payload,
+            sha256=hashlib.sha256(payload).hexdigest(),
+        )
+    except OSError as exc:
+        raise EvidenceError("vector archive snapshot failed") from exc
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
 
 
 def strict_json_load(path: Path) -> Any:
@@ -1220,11 +1373,11 @@ def audit_vector_archive(
 ) -> list[dict[str, Any]]:
     """Official vector archive bytes와 actual source graph를 frozen exact allowlist와 비교한다."""
 
-    archive_path = archive_path.resolve(strict=True)
     vector = policy.get("vectorProvenance")
     if not isinstance(vector, Mapping):
         raise EvidenceError("vector provenance policy is missing")
-    source_sha256 = sha256_file(archive_path)
+    snapshot = snapshot_vector_archive(archive_path)
+    source_sha256 = snapshot.sha256
     if source_sha256 != vector.get("officialArchiveSha256"):
         raise EvidenceError("vector official archive SHA-256 mismatch")
     raw_allowlist = vector.get("upstreamTransitiveAllowlist")
@@ -1242,7 +1395,10 @@ def audit_vector_archive(
     sources: dict[str, bytes] = {}
     cabal_payload: bytes | None = None
     try:
-        with tarfile.open(archive_path, mode="r:gz") as archive:
+        with tarfile.open(
+            fileobj=io.BytesIO(snapshot.payload),
+            mode="r:gz",
+        ) as archive:
             for member in archive.getmembers():
                 if member.issym() or member.islnk():
                     raise EvidenceError("vector archive links are forbidden")
@@ -1616,6 +1772,189 @@ def validate_cabal_projection(cabal_text: str) -> None:
         raise EvidenceError("generated Cabal projection leaks shell dependencies into core")
 
 
+def write_generated_cabal_provenance(
+    root: Path,
+    *,
+    output_directory: Path,
+    benchmark_subject_commit: str,
+    stack_bin: Path,
+    pre_build_sha256: str,
+    profile_ghc_options: Sequence[str],
+    stack_root_path_id: str,
+    runtime_build_argv_sha256: str,
+) -> dict[str, Any]:
+    """Ignored Hpack projection을 tracked subject와 exact toolchain에 결속해 봉인한다."""
+
+    root = root.resolve(strict=True)
+    output = output_directory.resolve(strict=True)
+    if re.fullmatch(r"[0-9a-f]{40}", benchmark_subject_commit) is None:
+        raise EvidenceError("generated Cabal benchmark subject is invalid")
+    repository = Path(
+        subprocess.run(
+            ["/usr/bin/git", "-C", str(root), "rev-parse", "--show-toplevel"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+    ).resolve(strict=True)
+    head = subprocess.run(
+        ["/usr/bin/git", "-C", str(repository), "rev-parse", "--verify", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    if head != benchmark_subject_commit:
+        raise EvidenceError("generated Cabal benchmark subject drift")
+
+    package_yaml = root / "package.yaml"
+    source_manifest = root / "source-inputs.v1.json"
+    toolchain_lock = root / "toolchain-lock.v1.json"
+    cabal = root / "s1-4x-haskell.cabal"
+    for path in (package_yaml, source_manifest, toolchain_lock, cabal):
+        if path.is_symlink() or not path.is_file():
+            raise EvidenceError(f"generated Cabal input is unsafe: {path.name}")
+    try:
+        cabal_payload = cabal.read_bytes()
+        cabal_text = cabal_payload.decode("utf-8", errors="strict")
+    except (OSError, UnicodeError) as exc:
+        raise EvidenceError("generated Cabal bytes are invalid") from exc
+    validate_cabal_projection(cabal_text)
+    cabal_sha256 = hashlib.sha256(cabal_payload).hexdigest()
+    if pre_build_sha256 != cabal_sha256:
+        raise EvidenceError("generated Cabal changed during Hpack build")
+    validated_stack_root_path_id = validate_property_stack_root_path_id(
+        stack_root_path_id,
+        output,
+    )
+    if re.fullmatch(r"[0-9a-f]{64}", runtime_build_argv_sha256) is None:
+        raise EvidenceError("generated Cabal runtime build argv SHA-256 is invalid")
+
+    def subject_blob(path: Path) -> tuple[str, bytes]:
+        relative = path.relative_to(repository).as_posix()
+        payload = subprocess.run(
+            [
+                "/usr/bin/git",
+                "-C",
+                str(repository),
+                "show",
+                f"{benchmark_subject_commit}:{relative}",
+            ],
+            check=True,
+            capture_output=True,
+        ).stdout
+        if payload != path.read_bytes():
+            raise EvidenceError(f"generated Cabal subject blob drift: {relative}")
+        return relative, payload
+
+    package_relative, package_payload = subject_blob(package_yaml)
+    manifest_relative, manifest_payload = subject_blob(source_manifest)
+    lock = strict_json_load(toolchain_lock)
+    stack_lock = lock.get("resolvedTools", {}).get("stack")
+    if not isinstance(stack_lock, Mapping) or set(stack_lock) != {
+        "pathId",
+        "version",
+        "sha256",
+    }:
+        raise EvidenceError("generated Cabal Stack lock is invalid")
+    configured_stack = stack_bin.resolve(strict=True)
+    if (
+        stack_bin.is_symlink()
+        or not configured_stack.is_file()
+        or not os.access(configured_stack, os.X_OK)
+        or sha256_file(configured_stack) != stack_lock["sha256"]
+    ):
+        raise EvidenceError("generated Cabal Stack binary drift")
+    stack_version = subprocess.run(
+        [str(configured_stack), "--numeric-version"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    hpack_output = subprocess.run(
+        [str(configured_stack), "--hpack-numeric-version"],
+        check=True,
+        capture_output=True,
+    ).stdout
+    if stack_version != stack_lock["version"] or hpack_output != b"0.39.6\n":
+        raise EvidenceError("generated Cabal Stack or Hpack version drift")
+
+    portable_argv = [
+        "stack",
+        "--stack-root",
+        "<isolated-stack-root>",
+        "--work-dir",
+        "<isolated-stack-work-dir>",
+        "--system-ghc",
+        "--no-install-ghc",
+        "--stack-yaml",
+        "haskell/stack.yaml",
+        "--hpack-force",
+        "build",
+        "--test",
+        "--no-run-tests",
+        "--no-terminal",
+        "--ghc-options",
+        " ".join(profile_ghc_options),
+    ]
+    generated_directory = output / "generated"
+    generated_directory.mkdir(mode=0o700)
+    artifact = generated_directory / cabal.name
+    with artifact.open("xb") as stream:
+        stream.write(cabal_payload)
+        stream.flush()
+        os.fsync(stream.fileno())
+    report = {
+        "schemaVersion": "s1.4x-haskell-generated-cabal-provenance-v1",
+        "benchmarkSubjectCommit": benchmark_subject_commit,
+        "toolchainLockSha256": sha256_file(toolchain_lock),
+        "packageYaml": {
+            "path": package_relative,
+            "blobSha256": hashlib.sha256(package_payload).hexdigest(),
+        },
+        "sourceInputManifest": {
+            "path": manifest_relative,
+            "blobSha256": hashlib.sha256(manifest_payload).hexdigest(),
+        },
+        "stack": {
+            "pathId": stack_lock["pathId"],
+            "version": stack_version,
+            "binarySha256": stack_lock["sha256"],
+        },
+        "hpack": {
+            "version": "0.39.6",
+            "versionOutputSha256": hashlib.sha256(hpack_output).hexdigest(),
+        },
+        "build": {
+            "portableArgv": portable_argv,
+            "portableArgvSha256": canonical_sha256(portable_argv),
+            "runtimeArgvSha256": runtime_build_argv_sha256,
+            "stackRootPathId": validated_stack_root_path_id,
+            "exitCode": 0,
+        },
+        "generatedCabal": {
+            "repositoryRelativePath": cabal.relative_to(repository).as_posix(),
+            "artifactPath": "coverage/haskell/generated/s1-4x-haskell.cabal",
+            "sha256": cabal_sha256,
+            "sizeBytes": len(cabal_payload),
+            "preBuildSha256": pre_build_sha256,
+            "postBuildSha256": cabal_sha256,
+        },
+        "sourceTreeSha256": benchmark_source_tree_sha256(root),
+        "propertyClosureSha256": property_execution_closure_sha256(root),
+        "status": "PASS",
+    }
+    if sha256_file(cabal) != cabal_sha256:
+        raise EvidenceError("generated Cabal changed during provenance assembly")
+    report_path = output / "haskell-generated-cabal-provenance.v1.json"
+    if report_path.exists() or report_path.is_symlink():
+        raise EvidenceError("generated Cabal provenance output collision")
+    with report_path.open("xb") as stream:
+        stream.write(canonical_json_bytes(report, trailing_newline=True))
+        stream.flush()
+        os.fsync(stream.fileno())
+    return report
+
+
 def _source_inputs_command(arguments: argparse.Namespace) -> None:
     root = arguments.haskell_root.resolve(strict=True)
     manifest_path = arguments.manifest.resolve(strict=False)
@@ -1751,6 +2090,20 @@ def _property_closure_command(arguments: argparse.Namespace) -> None:
     )
 
 
+def _generated_cabal_provenance_command(arguments: argparse.Namespace) -> None:
+    report = write_generated_cabal_provenance(
+        arguments.haskell_root,
+        output_directory=arguments.output_directory,
+        benchmark_subject_commit=arguments.benchmark_subject_commit,
+        stack_bin=arguments.stack_bin,
+        pre_build_sha256=arguments.pre_build_sha256,
+        profile_ghc_options=arguments.ghc_option,
+        stack_root_path_id=arguments.stack_root_path_id,
+        runtime_build_argv_sha256=arguments.runtime_build_argv_sha256,
+    )
+    print(json.dumps(report, allow_nan=False, sort_keys=True))
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -1790,6 +2143,17 @@ def _parser() -> argparse.ArgumentParser:
     property_closure = commands.add_parser("property-closure")
     property_closure.add_argument("--haskell-root", type=Path, required=True)
     property_closure.set_defaults(handler=_property_closure_command)
+
+    generated_cabal = commands.add_parser("generated-cabal-provenance")
+    generated_cabal.add_argument("--haskell-root", type=Path, required=True)
+    generated_cabal.add_argument("--output-directory", type=Path, required=True)
+    generated_cabal.add_argument("--benchmark-subject-commit", required=True)
+    generated_cabal.add_argument("--stack-bin", type=Path, required=True)
+    generated_cabal.add_argument("--pre-build-sha256", required=True)
+    generated_cabal.add_argument("--ghc-option", action="append", required=True)
+    generated_cabal.add_argument("--stack-root-path-id", required=True)
+    generated_cabal.add_argument("--runtime-build-argv-sha256", required=True)
+    generated_cabal.set_defaults(handler=_generated_cabal_provenance_command)
     return parser
 
 

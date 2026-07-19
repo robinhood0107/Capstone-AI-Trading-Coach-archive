@@ -71,6 +71,7 @@ def _report_paths(candidate: str, output_directory: Path) -> dict[str, Path]:
 def run_candidate_coverage(
     *,
     candidate: str,
+    candidate_profile: str | None,
     runner_path: Path,
     output_directory: Path,
     receipt_path: Path,
@@ -84,6 +85,11 @@ def run_candidate_coverage(
 
     if candidate not in CANDIDATES:
         raise CoverageExecutionError("CANDIDATE_INVALID")
+    if candidate == "scala":
+        if candidate_profile not in {"A", "B", "C"}:
+            raise CoverageExecutionError("SCALA_PROFILE_INVALID")
+    elif candidate_profile is not None:
+        raise CoverageExecutionError("HASKELL_PROFILE_ARGUMENT_FORBIDDEN")
     configured_runner = runner_path.resolve(strict=True)
     if (
         runner_path.is_symlink()
@@ -98,6 +104,8 @@ def run_candidate_coverage(
     if timeout_seconds < 1:
         raise CoverageExecutionError("COVERAGE_TIMEOUT_INVALID")
     command = [str(configured_runner), "--output-dir", str(output)]
+    if candidate_profile is not None:
+        command.extend(["--profile", candidate_profile])
     command_sha256 = _canonical_sha256(command)
     runner_sha256 = _sha256_file(configured_runner)
     started = _utc_now()
@@ -122,10 +130,34 @@ def run_candidate_coverage(
     execution = strict_json_load(paths["execution"])
     if not isinstance(execution, dict):
         raise CoverageExecutionError("EXECUTION_REPORT_INVALID")
-    if execution.get("commandArgvSha256") != command_sha256:
+    outer_command_field = (
+        "commandArgvSha256"
+        if candidate == "scala"
+        else "outerCommandArgvSha256"
+    )
+    if execution.get(outer_command_field) != command_sha256:
         raise CoverageExecutionError("EXECUTION_COMMAND_DIGEST_MISMATCH")
     if execution.get("runnerSha256") != runner_sha256:
         raise CoverageExecutionError("EXECUTION_RUNNER_DIGEST_MISMATCH")
+    if candidate == "haskell":
+        expected_stack_root_path_id = (
+            "S1_4X_CACHE_ROOT/stack-root-property-"
+            + hashlib.sha256(
+                b"property\0" + str(output).encode("utf-8")
+            ).hexdigest()[:24]
+        )
+        if (
+            execution.get("stackRootPathId")
+            != expected_stack_root_path_id
+        ):
+            raise CoverageExecutionError(
+                "EXECUTION_STACK_ROOT_PATH_ID_MISMATCH"
+            )
+    if (
+        candidate_profile is not None
+        and execution.get("toolchainProfile") != candidate_profile
+    ):
+        raise CoverageExecutionError("EXECUTION_PROFILE_MISMATCH")
     for path in paths.values():
         if path.is_symlink() or not path.is_file():
             raise CoverageExecutionError(f"COVERAGE_ARTIFACT_MISSING:{path.name}")
@@ -170,6 +202,7 @@ def run_candidate_coverage(
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--candidate", choices=sorted(CANDIDATES), required=True)
+    parser.add_argument("--profile", choices=("A", "B", "C"))
     parser.add_argument("--runner", type=Path, required=True)
     parser.add_argument("--output-directory", type=Path, required=True)
     parser.add_argument("--receipt", type=Path, required=True)
@@ -185,6 +218,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         receipt = run_candidate_coverage(
             candidate=arguments.candidate,
+            candidate_profile=arguments.profile,
             runner_path=arguments.runner,
             output_directory=arguments.output_directory,
             receipt_path=arguments.receipt,

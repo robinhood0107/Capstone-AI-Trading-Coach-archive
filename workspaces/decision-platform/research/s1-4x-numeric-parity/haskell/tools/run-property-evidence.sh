@@ -57,14 +57,17 @@ STACK_ROOT_PATH="$(
     --purpose property \
     --output "$OUTPUT_DIRECTORY"
 )"
-if [[ "$STACK_ROOT_PATH" != "$CACHE_ROOT"/stack-root-property-* \
+STACK_ROOT_BASENAME="${STACK_ROOT_PATH##*/}"
+if [[ "$STACK_ROOT_PATH" != "$CACHE_ROOT/$STACK_ROOT_BASENAME" \
+  || ! "$STACK_ROOT_BASENAME" =~ ^stack-root-property-[0-9a-f]{24}$ \
   || -e "$STACK_ROOT_PATH" \
   || -L "$STACK_ROOT_PATH" ]]; then
   echo "output-bound property Stack root must be new" >&2
   exit 73
 fi
+STACK_ROOT_PATH_ID="S1_4X_CACHE_ROOT/$STACK_ROOT_BASENAME"
 mkdir -m 700 -- "$STACK_ROOT_PATH"
-STACK_WORK_DIR=".stack-work-s1-4x-${STACK_ROOT_PATH##*/}"
+STACK_WORK_DIR=".stack-work-s1-4x-$STACK_ROOT_BASENAME"
 
 if [[ ! -x "$STACK_BIN" || ! -x "$GHC_BIN" ]]; then
   echo "required Haskell toolchain executable is missing" >&2
@@ -119,6 +122,31 @@ print(closure["propertyClosureSha256"])
 PY
 }
 
+export PATH="${GHC_BIN%/*}:${STACK_BIN%/*}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+STACK_ARGUMENTS=(
+  --stack-root "$STACK_ROOT_PATH"
+  --work-dir "$STACK_WORK_DIR"
+  --system-ghc
+  --no-install-ghc
+  --stack-yaml "${HASKELL_ROOT}/stack.yaml"
+  --hpack-force
+)
+# Fresh checkout에도 ignored Cabal을 tracked package.yaml에서 먼저 재생성한다.
+"$STACK_BIN" "${STACK_ARGUMENTS[@]}" build \
+  --dry-run \
+  --test \
+  --no-run-tests \
+  --no-terminal \
+  >/dev/null
+GENERATED_CABAL="$HASKELL_ROOT/s1-4x-haskell.cabal"
+[[ -f "$GENERATED_CABAL" && ! -L "$GENERATED_CABAL" ]] || {
+  echo "pre-build generated Cabal projection is missing" >&2
+  exit 2
+}
+PRE_BUILD_GENERATED_CABAL_SHA256="$(
+  sha256sum "$GENERATED_CABAL" | awk '{print $1}'
+)"
+
 mapfile -t PRE_BUILD_FIELDS < <(validate_execution_closure "pre-build")
 [[ "${#PRE_BUILD_FIELDS[@]}" -eq 7 ]] || {
   echo "pre-build property closure field count drift" >&2
@@ -138,16 +166,6 @@ case "$PROFILE_ID:$PROFILE_GHC_OPTIONS" in
     exit 2
     ;;
 esac
-
-export PATH="${GHC_BIN%/*}:${STACK_BIN%/*}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-STACK_ARGUMENTS=(
-  --stack-root "$STACK_ROOT_PATH"
-  --work-dir "$STACK_WORK_DIR"
-  --system-ghc
-  --no-install-ghc
-  --stack-yaml "${HASKELL_ROOT}/stack.yaml"
-  --hpack-force
-)
 
 BUILD_ARGV_SHA256="$(
   s1_4x_run_benchmark_python - \
@@ -204,6 +222,7 @@ mkdir -m 700 "$OUTPUT_DIRECTORY"
   "$PROFILE_ID" \
   "$PROFILE_GHC_OPTIONS" \
   "$PROFILE_OPTIONS_SHA256" \
+  "$STACK_ROOT_PATH_ID" \
   "$BUILD_ARGV_SHA256" \
   "$SELECTED_PROFILE_SHA256" \
   "$EXPECTED_SOURCE_MANIFEST_SHA256" \
@@ -215,3 +234,19 @@ if [[ "${#POST_RUN_FIELDS[@]}" -ne 7 \
   echo "post-run property closure drift" >&2
   exit 2
 fi
+generated_cabal_arguments=()
+for ghc_option in $PROFILE_GHC_OPTIONS; do
+  generated_cabal_arguments+=(--ghc-option "$ghc_option")
+done
+s1_4x_run_benchmark_python \
+  "$HASKELL_ROOT/tools/haskell_evidence.py" generated-cabal-provenance \
+  --haskell-root "$HASKELL_ROOT" \
+  --output-directory "$OUTPUT_DIRECTORY" \
+  --benchmark-subject-commit \
+    "${S1_4X_BENCHMARK_SUBJECT_COMMIT:?benchmark subject is required}" \
+  --stack-bin "$STACK_BIN" \
+  --pre-build-sha256 "$PRE_BUILD_GENERATED_CABAL_SHA256" \
+  --stack-root-path-id "$STACK_ROOT_PATH_ID" \
+  --runtime-build-argv-sha256 "$BUILD_ARGV_SHA256" \
+  "${generated_cabal_arguments[@]}" \
+  >/dev/null

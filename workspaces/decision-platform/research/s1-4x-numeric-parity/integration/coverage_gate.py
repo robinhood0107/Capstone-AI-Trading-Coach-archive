@@ -23,6 +23,13 @@ class CoverageError(ValueError):
 
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:+/=-]{0,255}$")
+HASKELL_STACK_ROOT_PATH_ID = re.compile(
+    r"^S1_4X_CACHE_ROOT/stack-root-property-[0-9a-f]{24}$"
+)
+HASKELL_PROFILE_OPTIONS = {
+    "baseline-o0-fasm": ["-O0", "-fasm"],
+    "optimized-o2-fasm": ["-O2", "-fasm"],
+}
 
 
 def _sha256(path: Path) -> str:
@@ -31,6 +38,18 @@ def _sha256(path: Path) -> str:
         for block in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def _canonical_sha256(value: Any) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            value,
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
 
 
 def _object(value: Any, *, error: str) -> dict[str, Any]:
@@ -94,6 +113,13 @@ def validate_candidate_coverage(
 ) -> dict[str, Any]:
     """24-seed 25/25 property와 20/20·19+13 registry exact set을 강제한다."""
 
+    if implementation_label not in {"scala", "haskell"}:
+        raise CoverageError("IMPLEMENTATION_LABEL_INVALID")
+    expected_reported_implementation = (
+        "scala-3.8.4-jvm25"
+        if implementation_label == "scala"
+        else "haskell"
+    )
     plan = _object(strict_json_load(property_plan_path), error="PROPERTY_PLAN_INVALID")
     functions = _object(
         strict_json_load(function_registry_path),
@@ -197,6 +223,8 @@ def validate_candidate_coverage(
         property_document["schemaVersion"]
         != "s1.4x-candidate-property-coverage-v1"
         or property_document["status"] != "PASS"
+        or property_document["implementation"]
+        != expected_reported_implementation
         or property_document["propertyPlanSha256"] != _sha256(property_plan_path)
     ):
         raise CoverageError("PROPERTY_REPORT_IDENTITY_INVALID")
@@ -232,26 +260,42 @@ def validate_candidate_coverage(
         execution_report,
         error="PROPERTY_EXECUTION_REPORT_INVALID",
     )
+    common_execution_fields = {
+        "schemaVersion",
+        "implementation",
+        "propertyPlanSha256",
+        "seedCorpusSha256",
+        "seedCount",
+        "minimumSuccessfulPerSeed",
+        "framework",
+        "toolchainProfile",
+        "commandArgvSha256",
+        "runnerSha256",
+        "sourceClosureSha256",
+        "startedAt",
+        "finishedAt",
+        "exitCode",
+        "properties",
+        "status",
+    }
+    candidate_execution_fields = (
+        {"maximumDiscardRatio", "scalaCliBinarySha256"}
+        if implementation_label == "scala"
+        else {
+            "outerCommandArgvSha256",
+            "buildArgvSha256",
+            "sourceInputManifestSha256",
+            "selectedProfileSha256",
+            "sourceTreeSha256",
+            "propertyClosureSha256",
+            "profileGhcOptions",
+            "profileOptionsSha256",
+            "stackRootPathId",
+        }
+    )
     _exact_fields(
         execution_document,
-        {
-            "schemaVersion",
-            "implementation",
-            "propertyPlanSha256",
-            "seedCorpusSha256",
-            "seedCount",
-            "minimumSuccessfulPerSeed",
-            "framework",
-            "toolchainProfile",
-            "commandArgvSha256",
-            "runnerSha256",
-            "sourceClosureSha256",
-            "startedAt",
-            "finishedAt",
-            "exitCode",
-            "properties",
-            "status",
-        },
+        common_execution_fields | candidate_execution_fields,
         error="PROPERTY_EXECUTION_REPORT_INVALID",
     )
     if (
@@ -280,6 +324,95 @@ def validate_candidate_coverage(
         )
     ):
         raise CoverageError("PROPERTY_EXECUTION_IDENTITY_INVALID")
+    if implementation_label == "scala":
+        toolchain_lock_path = s1_4x_root / "scala/toolchain-lock.v1.json"
+        if toolchain_lock_path.is_symlink() or not toolchain_lock_path.is_file():
+            raise CoverageError("PROPERTY_EXECUTION_IDENTITY_INVALID")
+        toolchain_lock = _object(
+            strict_json_load(toolchain_lock_path),
+            error="PROPERTY_EXECUTION_IDENTITY_INVALID",
+        )
+        scala_cli = toolchain_lock.get("scalaCli")
+        if (
+            execution_document["framework"] != "scala-check-1.19.0"
+            or execution_document["toolchainProfile"] not in {"A", "B", "C"}
+            or type(execution_document["maximumDiscardRatio"]) is not float
+            or execution_document["maximumDiscardRatio"]
+            != plan["maximumDiscardRatio"]
+            or not isinstance(scala_cli, dict)
+            or execution_document["scalaCliBinarySha256"]
+            != scala_cli.get("binarySha256")
+            or SHA256.fullmatch(
+                str(execution_document["scalaCliBinarySha256"])
+            )
+            is None
+        ):
+            raise CoverageError("PROPERTY_EXECUTION_IDENTITY_INVALID")
+    else:
+        selected_profile_path = (
+            s1_4x_root / "haskell/selected-profile.v1.json"
+        )
+        source_manifest_path = s1_4x_root / "haskell/source-inputs.v1.json"
+        if (
+            selected_profile_path.is_symlink()
+            or not selected_profile_path.is_file()
+            or source_manifest_path.is_symlink()
+            or not source_manifest_path.is_file()
+        ):
+            raise CoverageError("PROPERTY_EXECUTION_IDENTITY_INVALID")
+        selected_profile = _object(
+            strict_json_load(selected_profile_path),
+            error="PROPERTY_EXECUTION_IDENTITY_INVALID",
+        )
+        profile_id = selected_profile.get("profileId")
+        expected_options = HASKELL_PROFILE_OPTIONS.get(str(profile_id))
+        selected_options = selected_profile.get("ghcOptions")
+        selected_options_sha256 = selected_profile.get("optionsSha256")
+        sha_fields = (
+            "outerCommandArgvSha256",
+            "buildArgvSha256",
+            "sourceInputManifestSha256",
+            "selectedProfileSha256",
+            "sourceTreeSha256",
+            "propertyClosureSha256",
+            "profileOptionsSha256",
+        )
+        if (
+            selected_profile.get("schemaVersion")
+            not in {
+                "s1.4x-haskell-selected-profile-pending-v1",
+                "s1.4x-haskell-selected-profile-v1",
+            }
+            or selected_profile.get("compilerVersion") != "9.10.3"
+            or expected_options is None
+            or selected_options != expected_options
+            or selected_options_sha256 != _canonical_sha256(expected_options)
+            or SHA256.fullmatch(str(selected_profile.get("sourceTreeSha256")))
+            is None
+            or execution_document["framework"] != "QuickCheck-2.15.0.1"
+            or execution_document["toolchainProfile"]
+            != f"haskell-ghc-9.10.3-{profile_id}"
+            or execution_document["profileGhcOptions"] != expected_options
+            or execution_document["profileOptionsSha256"]
+            != selected_options_sha256
+            or execution_document["sourceInputManifestSha256"]
+            != _sha256(source_manifest_path)
+            or execution_document["selectedProfileSha256"]
+            != _sha256(selected_profile_path)
+            or execution_document["sourceTreeSha256"]
+            != selected_profile["sourceTreeSha256"]
+            or execution_document["propertyClosureSha256"]
+            != execution_document["sourceClosureSha256"]
+            or HASKELL_STACK_ROOT_PATH_ID.fullmatch(
+                str(execution_document["stackRootPathId"])
+            )
+            is None
+            or any(
+                SHA256.fullmatch(str(execution_document[field])) is None
+                for field in sha_fields
+            )
+        ):
+            raise CoverageError("PROPERTY_EXECUTION_IDENTITY_INVALID")
     started = _utc_timestamp(
         execution_document["startedAt"],
         error="PROPERTY_EXECUTION_TIMESTAMP_INVALID",
