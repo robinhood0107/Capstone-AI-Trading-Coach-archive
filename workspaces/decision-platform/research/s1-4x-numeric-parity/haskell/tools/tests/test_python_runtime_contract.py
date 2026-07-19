@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import venv
 from pathlib import Path
 
 
@@ -85,6 +86,17 @@ class PythonRuntimeContractTests(unittest.TestCase):
             with self.subTest(wrapper=name):
                 self.assertIn("python-runtime.sh", source)
                 self.assertIn("s1_4x_pin_benchmark_python", source)
+                self.assertRegex(
+                    source,
+                    r"s1_4x_(?:run|exec)_benchmark_python",
+                )
+                self.assertIsNone(
+                    re.search(
+                        r'(?m)^\s*(?:exec\s+)?"\$(?:S1_4X_)?'
+                        r'BENCHMARK_PYTHON_PINNED_FD_PATH"',
+                        source,
+                    )
+                )
 
     def test_system_python_3_14_is_rejected(self) -> None:
         system_python = Path("/usr/bin/python3").resolve(strict=True)
@@ -114,17 +126,57 @@ class PythonRuntimeContractTests(unittest.TestCase):
             completed.stderr,
         )
 
-    def test_cpython_3_12_pinned_fd_survives_nested_child(self) -> None:
+    def test_cpython_3_12_pinned_fd_preserves_venv_in_nested_child(self) -> None:
         self.assertEqual(sys.implementation.name, "cpython")
         self.assertEqual(sys.version_info[:3], (3, 12, 13))
-        python = Path(sys.executable).resolve(strict=True)
         with tempfile.TemporaryDirectory() as temporary:
-            parent_script = Path(temporary).resolve() / "parent.py"
+            temporary_root = Path(temporary).resolve()
+            venv_root = temporary_root / "oracle-venv"
+            venv.EnvBuilder(with_pip=False, symlinks=False).create(venv_root)
+            python = venv_root / "bin/python"
+            self.assertTrue(python.is_file())
+            self.assertFalse(python.is_symlink())
+            site_packages = (
+                venv_root
+                / "lib"
+                / "python3.12"
+                / "site-packages"
+            )
+            site_packages.mkdir(parents=True, exist_ok=True)
+            for package, version in (
+                ("jsonschema", "4.26.0"),
+                ("numpy", "2.5.1"),
+            ):
+                package_root = site_packages / package
+                package_root.mkdir()
+                (package_root / "__init__.py").write_text(
+                    f'__version__ = "{version}"\n',
+                    encoding="utf-8",
+                )
+                metadata_root = (
+                    site_packages / f"{package}-{version}.dist-info"
+                )
+                metadata_root.mkdir()
+                (metadata_root / "METADATA").write_text(
+                    "Metadata-Version: 2.1\n"
+                    f"Name: {package}\n"
+                    f"Version: {version}\n",
+                    encoding="utf-8",
+                )
+            (site_packages / "s1_4x_venv_sentinel.py").write_text(
+                'VALUE = "external-venv-dependency-closure"\n',
+                encoding="utf-8",
+            )
+            output_directory = temporary_root / "child-output"
+            output_directory.mkdir()
+            parent_script = temporary_root / "parent.py"
             parent_script.write_text(
                 "import json\n"
                 "import os\n"
-                "import subprocess\n"
                 "import sys\n"
+                "from pathlib import Path\n"
+                "sys.path.insert(0, sys.argv[2])\n"
+                "import profile_workflow as workflow\n"
                 "fd_path = os.environ[\n"
                 "    'S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH'\n"
                 "]\n"
@@ -132,29 +184,41 @@ class PythonRuntimeContractTests(unittest.TestCase):
                 "pinned = os.fstat(descriptor)\n"
                 "current = os.stat('/proc/self/exe')\n"
                 "child_code = (\n"
-                "    \"import json, os, sys; \"\n"
+                "    \"import json, os, sys, s1_4x_venv_sentinel; \"\n"
                 "    \"p=os.environ['S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH']; \"\n"
                 "    \"d=int(p.rsplit('/',1)[1]); f=os.fstat(d); \"\n"
                 "    \"e=os.stat('/proc/self/exe'); \"\n"
                 "    \"print(json.dumps({'implementation':sys.implementation.name,\"\n"
                 "    \"'version':list(sys.version_info[:3]),\"\n"
+                "    \"'prefix':sys.prefix,\"\n"
+                "    \"'sentinel':s1_4x_venv_sentinel.VALUE,\"\n"
                 "    \"'identityMatches':[f.st_dev,f.st_ino]==[e.st_dev,e.st_ino]}))\"\n"
                 ")\n"
-                "child = subprocess.run(\n"
-                "    [fd_path, '-I', '-S', '-c', child_code],\n"
-                "    check=True,\n"
-                "    capture_output=True,\n"
-                "    text=True,\n"
+                "runtime = workflow._benchmark_python_runtime()\n"
+                "record = workflow._run_logged(\n"
+                "    [fd_path, '-I', '-c', child_code],\n"
+                "    cwd=Path(sys.argv[2]),\n"
+                "    environment=dict(os.environ),\n"
+                "    phase='canonical-compare',\n"
+                "    output_directory=Path(sys.argv[1]),\n"
                 "    pass_fds=(descriptor,),\n"
+                "    portable_path_ids={\n"
+                "        fd_path: workflow._benchmark_python_path_id(runtime),\n"
+                "    },\n"
+                ")\n"
+                "child = json.loads(\n"
+                "    (Path(sys.argv[1]) / 'canonical-compare.stdout').read_text()\n"
                 ")\n"
                 "print(json.dumps({\n"
                 "    'implementation': sys.implementation.name,\n"
                 "    'version': list(sys.version_info[:3]),\n"
+                "    'prefix': sys.prefix,\n"
                 "    'identityMatches': (\n"
                 "        (pinned.st_dev, pinned.st_ino)\n"
                 "        == (current.st_dev, current.st_ino)\n"
                 "    ),\n"
-                "    'child': json.loads(child.stdout),\n"
+                "    'child': child,\n"
+                "    'receiptArgv': record['argv'],\n"
                 "}, sort_keys=True))\n",
                 encoding="utf-8",
             )
@@ -165,12 +229,13 @@ class PythonRuntimeContractTests(unittest.TestCase):
                     (
                         'set -euo pipefail; source "$1"; '
                         "s1_4x_pin_benchmark_python; "
-                        'exec "$S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH" '
-                        '-I -S "$2"'
+                        's1_4x_exec_benchmark_python -I "$2" "$3" "$4"'
                     ),
                     "python-runtime-contract",
                     str(RUNTIME_HELPER),
                     str(parent_script),
+                    str(output_directory),
+                    str(TOOLS_ROOT),
                 ],
                 env=runtime_environment(python),
                 check=False,
@@ -181,10 +246,21 @@ class PythonRuntimeContractTests(unittest.TestCase):
         evidence = json.loads(completed.stdout)
         self.assertEqual(evidence["implementation"], "cpython")
         self.assertEqual(evidence["version"], [3, 12, 13])
+        self.assertEqual(evidence["prefix"], str(venv_root))
         self.assertTrue(evidence["identityMatches"])
         self.assertEqual(evidence["child"]["implementation"], "cpython")
         self.assertEqual(evidence["child"]["version"], [3, 12, 13])
+        self.assertEqual(evidence["child"]["prefix"], str(venv_root))
+        self.assertEqual(
+            evidence["child"]["sentinel"],
+            "external-venv-dependency-closure",
+        )
         self.assertTrue(evidence["child"]["identityMatches"])
+        self.assertTrue(
+            evidence["receiptArgv"][0].startswith(
+                "S1_4X_BENCHMARK_CPYTHON_3_12_13_SHA256_"
+            )
+        )
 
 
 if __name__ == "__main__":
