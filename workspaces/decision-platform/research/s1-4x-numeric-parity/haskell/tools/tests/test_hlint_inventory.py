@@ -41,7 +41,7 @@ class HLintInventoryTests(unittest.TestCase):
             manifest,
         )
 
-        self.assertEqual(len(entries), 11)
+        self.assertEqual(len(entries), 12)
         self.assertTrue(all(entry["language"] == "haskell" for entry in entries))
 
     def test_suppression_schema_drift_is_fail_closed(self) -> None:
