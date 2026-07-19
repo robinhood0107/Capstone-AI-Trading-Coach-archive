@@ -335,6 +335,7 @@ def selector_fixture(
     toolchain_lock_sha = module.sha256_file(toolchain_lock_path)
     capability_plan_sha = module.sha256_file(capability_plan_path)
     java_sha = toolchain_lock["jdk"]["javaExecutableSha256"]
+    javac_sha = toolchain_lock["jdk"]["javacExecutableSha256"]
 
     scala_cli = root / "scala-cli"
     scala_cli.write_bytes(b"selector-fixture-scala-cli\n")
@@ -488,10 +489,222 @@ def selector_fixture(
             marker_path = case_root / "measurement-ready.v1.json"
             write_json(marker_path, marker)
 
+            precompile_stdout = (
+                case_root / module.jmh_precompile.SCALA_COMPILE_STDOUT
+            )
+            precompile_stderr = (
+                case_root / module.jmh_precompile.SCALA_COMPILE_STDERR
+            )
+            javac_stdout = case_root / module.jmh_precompile.JAVAC_STDOUT
+            javac_stderr = case_root / module.jmh_precompile.JAVAC_STDERR
+            for process_log in (
+                precompile_stdout,
+                precompile_stderr,
+                javac_stdout,
+                javac_stderr,
+            ):
+                process_log.write_bytes(b"")
+            generated_source_paths = list(
+                module.jmh_precompile.expected_generated_source_paths()
+            )
+            generated_sources = [
+                {"path": path, "sha256": f"{index + 500:064x}"}
+                for index, path in enumerate(generated_source_paths)
+            ]
+            generated_class_root = (
+                case_root / module.jmh_precompile.GENERATED_CLASSES_NAME
+            )
+            generated_classes = []
+            for index, source_path in enumerate(
+                generated_source_paths,
+                start=1,
+            ):
+                relative_class = (
+                    f"{source_path.removesuffix('.java')}.class"
+                )
+                class_path = generated_class_root / relative_class
+                class_path.parent.mkdir(parents=True, exist_ok=True)
+                class_path.write_bytes(f"class-{index}\n".encode())
+                generated_classes.append(
+                    {
+                        "path": relative_class,
+                        "sha256": module.sha256_file(class_path),
+                    }
+                )
+            precompile_portable = [
+                "SCALA_CLI_1_15_0",
+                "--power",
+                "compile",
+                *[f"SCALA_ROOT/{path}" for path in jmh_inputs],
+                "--workspace",
+                "SCALA_WORKSPACE",
+                "--server=false",
+                "--classpath",
+                (
+                    "EVIDENCE_ROOT/"
+                    f"{module.jmh_precompile.GENERATED_CLASSES_NAME}"
+                ),
+                "--jvm",
+                "system",
+                "--coursier-validate-checksums",
+                *module.PROFILE_CLI_ARGUMENTS[profile],
+                "--jmh",
+                "--jmh-version",
+                "1.37",
+                "--print-classpath",
+            ]
+            javac_portable = [
+                "TEMURIN_25_0_3_9_LTS/bin/javac",
+                "-encoding",
+                "UTF-8",
+                "-proc:none",
+                "-classpath",
+                "SCALA_COMPILE_CLASSPATH",
+                "-d",
+                (
+                    "EVIDENCE_ROOT/"
+                    f"{module.jmh_precompile.GENERATED_CLASSES_NAME}"
+                ),
+                *[
+                    f"SCALA_WORKSPACE_GENERATED/{path}"
+                    for path in generated_source_paths
+                ],
+            ]
+            class_output_id = (
+                "SCALA_WORKSPACE/.scala-build/"
+                "selector_jmh_deadbeef00/classes/main"
+            )
+            generated_resource_id = (
+                "SCALA_WORKSPACE/.scala-build/selector_jmh/resources"
+            )
+            generated_class_output_id = (
+                "EVIDENCE_ROOT/"
+                f"{module.jmh_precompile.GENERATED_CLASSES_NAME}"
+            )
+            generated_classes_sha = canonical_sha256(generated_classes)
+            classpath_entries = [
+                {
+                    "pathId": class_output_id,
+                    "kind": "directory",
+                    "sha256": "a" * 64,
+                },
+                {
+                    "pathId": generated_resource_id,
+                    "kind": "directory",
+                    "sha256": "e" * 64,
+                },
+                {
+                    "pathId": (
+                        "COURSIER_CACHE/https/repo.example/"
+                        "org/openjdk/jmh/jmh-core/1.37/jmh-core-1.37.jar"
+                    ),
+                    "kind": "file",
+                    "sha256": "b" * 64,
+                },
+                {
+                    "pathId": generated_class_output_id,
+                    "kind": "directory",
+                    "sha256": generated_classes_sha,
+                },
+            ]
+            precompile_receipt = {
+                "schemaVersion": (
+                    "s1.4x-scala-jmh-generated-java-precompile-v1"
+                ),
+                "profileId": profile,
+                "sourceInputManifestSha256": source_manifest_sha,
+                "compilerProfilesSha256": compiler_profiles_sha,
+                "toolchainLockSha256": toolchain_lock_sha,
+                "scalaCli": {
+                    "pathId": "SCALA_CLI_1_15_0",
+                    "binarySha256": scala_cli_sha,
+                    "executionPathId": "PINNED_SCALA_CLI_1_15_0_FD",
+                },
+                "javac": {
+                    "pathId": "TEMURIN_25_0_3_9_LTS/bin/javac",
+                    "binarySha256": javac_sha,
+                    "executionPathId": "PINNED_JAVAC_FD",
+                    "jdkModulesPathId": (
+                        toolchain_lock["jdk"]["jdkModulesPathId"]
+                    ),
+                    "jdkModulesSha256": (
+                        toolchain_lock["jdk"]["jdkModulesSha256"]
+                    ),
+                },
+                "scalaCompile": {
+                    "portableArgv": precompile_portable,
+                    "portableArgvSha256": canonical_sha256(
+                        precompile_portable
+                    ),
+                    "runtimeArgvSha256": "c" * 64,
+                    "stdoutSha256": module.sha256_file(
+                        precompile_stdout
+                    ),
+                    "stderrSha256": module.sha256_file(
+                        precompile_stderr
+                    ),
+                    "exitCode": 0,
+                    "status": "PASS",
+                },
+                "jmhGenerator": {
+                    "generatorId": "reflection",
+                    "processedClassCount": 147,
+                    "classInputPathId": (
+                        "SCALA_WORKSPACE/.scala-build/"
+                        "selector/classes/main"
+                    ),
+                    "generatedSourceRootPathId": (
+                        "SCALA_WORKSPACE/.scala-build/"
+                        "selector_jmh/sources"
+                    ),
+                    "generatedResourceRootPathId": generated_resource_id,
+                    "classInputClosureSha256": "f" * 64,
+                    "generatedResourceClosureSha256": "e" * 64,
+                },
+                "generatedSourceRootPathId": (
+                    "SCALA_WORKSPACE/.scala-build/"
+                    "selector_jmh/sources"
+                ),
+                "generatedSources": generated_sources,
+                "generatedSourcesSha256": canonical_sha256(
+                    generated_sources
+                ),
+                "classpathEntries": classpath_entries,
+                "classpathEntriesSha256": canonical_sha256(
+                    classpath_entries
+                ),
+                "scalaClassOutputPathId": class_output_id,
+                "generatedClassOutputPathId": generated_class_output_id,
+                "generatedClasses": generated_classes,
+                "generatedClassesSha256": generated_classes_sha,
+                "javacProcess": {
+                    "portableArgv": javac_portable,
+                    "portableArgvSha256": canonical_sha256(
+                        javac_portable
+                    ),
+                    "runtimeArgvSha256": "d" * 64,
+                    "stdoutSha256": module.sha256_file(javac_stdout),
+                    "stderrSha256": module.sha256_file(javac_stderr),
+                    "exitCode": 0,
+                    "status": "PASS",
+                },
+                "status": "PASS",
+                "aggregateStatus": "PASS",
+            }
+            precompile_receipt_path = (
+                case_root / module.jmh_precompile.RECEIPT_NAME
+            )
+            write_json(precompile_receipt_path, precompile_receipt)
+
             common_tail = [
                 "--workspace",
                 "SCALA_WORKSPACE",
                 "--server=false",
+                "--classpath",
+                (
+                    "EVIDENCE_ROOT/"
+                    f"{module.jmh_precompile.GENERATED_CLASSES_NAME}"
+                ),
                 "--jvm",
                 "system",
                 "--coursier-validate-checksums",
@@ -541,6 +754,12 @@ def selector_fixture(
                 *[
                     os.environ["S1_4X_SCALA_JAVA_PINNED_FD_PATH"]
                     if item == "PINNED_JAVA_FD"
+                    else str(generated_class_root)
+                    if item
+                    == (
+                        "EVIDENCE_ROOT/"
+                        f"{module.jmh_precompile.GENERATED_CLASSES_NAME}"
+                    )
                     else item
                     for item in common_tail[2:]
                 ],
@@ -596,6 +815,9 @@ def selector_fixture(
                 ),
                 "measurementReadyMarkerSha256": module.sha256_file(
                     marker_path
+                ),
+                "generatedJavaPrecompileReceiptSha256": (
+                    module.sha256_file(precompile_receipt_path)
                 ),
                 "stdoutSha256": module.sha256_file(stdout_path),
                 "stderrSha256": module.sha256_file(stderr_path),

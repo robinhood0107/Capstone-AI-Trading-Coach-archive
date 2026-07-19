@@ -52,7 +52,7 @@ def main() -> int:
         )
         class_output = (
             workspace
-            / ".scala-build/project_jmh_deadbeef/classes/main"
+            / ".scala-build/project_jmh_deadbeef00/classes/main"
         )
         benchmark_list = class_output / "META-INF/BenchmarkList"
         generated_resources = (
@@ -124,7 +124,7 @@ def main() -> int:
         assert [item.path_id for item in classpath.entries] == [
             (
                 "SCALA_WORKSPACE/"
-                ".scala-build/project_jmh_deadbeef/classes/main"
+                ".scala-build/project_jmh_deadbeef00/classes/main"
             ),
             "SCALA_WORKSPACE/.scala-build/project_jmh/resources",
             "EVIDENCE_ROOT/generated-java-classes",
@@ -208,8 +208,8 @@ def main() -> int:
             "JMH_CLASS_OUTPUT_CLOSURE_MISMATCH",
             lambda: helper.classpath_closure(
                 generator_stdout.replace(
-                    f"{class_output}:{dependency}",
-                    f"{class_output}:{second_output.parent.parent}",
+                    f":{dependency}\n",
+                    f":{second_output.parent.parent}:{dependency}\n",
                 ),
                 workspace=workspace,
                 coursier_cache=coursier,
