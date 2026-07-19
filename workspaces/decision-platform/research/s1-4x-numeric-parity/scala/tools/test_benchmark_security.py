@@ -55,8 +55,11 @@ def main() -> int:
     for marker in (
         "benchmark_python_exec = benchmark_python_pin.proc_path",
         'environment["S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH"]',
+        'environment["S1_4X_SCALA_JAVAC_PINNED_FD_PATH"]',
         "python=benchmark_python_exec",
         "str(benchmark_python_exec)",
+        "javac_pin.proc_path",
+        "*javac_pin.pass_fds",
     ):
         assert marker in helper_source
 
@@ -143,6 +146,46 @@ def main() -> int:
                 "tool pathname substitution passed",
             )
 
+        javac_tool = root / "javac-tool"
+        javac_tool.write_bytes(Path("/usr/bin/dash").read_bytes())
+        javac_tool.chmod(0o755)
+        javac_sha = hashlib.sha256(javac_tool.read_bytes()).hexdigest()
+        with module.PinnedExecutable(
+            javac_tool,
+            expected_sha256=javac_sha,
+            label="JAVAC",
+        ) as javac_pin:
+            javac_pin.verify_path_identity()
+            child_environment = {
+                "PATH": "/usr/bin:/bin",
+                "S1_4X_SCALA_JAVAC_PINNED_FD_PATH": str(
+                    javac_pin.proc_path
+                ),
+                "S1_4X_TEST_EXPECTED_SHA256": javac_sha,
+            }
+            child = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    """
+import hashlib
+import os
+
+path = os.environ["S1_4X_SCALA_JAVAC_PINNED_FD_PATH"]
+with open(path, "rb") as stream:
+    assert hashlib.sha256(stream.read()).hexdigest() == (
+        os.environ["S1_4X_TEST_EXPECTED_SHA256"]
+    )
+os.execv(path, [path, "-c", "exit 0"])
+""",
+                ],
+                check=False,
+                env=child_environment,
+                pass_fds=javac_pin.pass_fds,
+            )
+            assert child.returncode == 0
+            javac_pin.verify_path_identity()
+
         cache_root = root / "cache"
         cache_root.mkdir()
         block = root / "block"
@@ -187,7 +230,7 @@ def main() -> int:
     print(
         "SCALA_BENCHMARK_SECURITY_TEST_PASS "
         "dirty=REJECT ignoredBuild=REJECT fdPin=PASS abaExecution=PASS "
-        "ambient=REJECT cacheIsolation=PASS"
+        "javacChild=PASS ambient=REJECT cacheIsolation=PASS"
     )
     return 0
 

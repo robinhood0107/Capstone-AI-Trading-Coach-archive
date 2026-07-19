@@ -33,6 +33,8 @@ def main() -> int:
         "S1_4X_BENCHMARK_PYTHON_SHA256",
         "S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH",
         "S1_4X_SCALA_CLI_BIN",
+        "S1_4X_SCALA_JAVAC_BIN",
+        "S1_4X_SCALA_JAVAC_SHA256",
         "S1_4X_SCALAFIX_BIN",
         "S1_4X_SCALAFMT_ARCHIVE",
         "S1_4X_SCALAFMT_BIN",
