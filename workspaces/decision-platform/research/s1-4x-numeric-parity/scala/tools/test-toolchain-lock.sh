@@ -48,6 +48,11 @@ jq -e '
   .schemaVersion == "s1.4x-scala-toolchain-lock-v1" and
   .language == "scala" and
   .jdk.javaHomePathId == "TEMURIN_25_0_3_9_LTS" and
+  .jdk.javacExecutableSha256 ==
+    "5dc287a983c41c8cee0c00e621d87a46ff9dd77202885814b39645074d714dd9" and
+  .jdk.jdkModulesPathId == "TEMURIN_25_0_3_9_LTS/lib/modules" and
+  .jdk.jdkModulesSha256 ==
+    "0b4f933e2a29a05a74a869dddd823d1e7bc0ed9b38db0db25a44eab5dfb5c462" and
   .scalaCli.pathId == "SCALA_CLI_1_15_0" and
   .scalafix.pathId == "SCALAFIX_0_14_7" and
   .scalafmt.runnerPathId == "SCALA_CLI_1_15_0" and
@@ -78,6 +83,10 @@ expect_tamper_rejected merged-provenance-sha \
   ".mergedToolchainProvenanceSha256 = $zero"
 expect_tamper_rejected jdk-runtime \
   '.jdk.runtimeVersion = "25"'
+expect_tamper_rejected javac-sha \
+  ".jdk.javacExecutableSha256 = $zero"
+expect_tamper_rejected jdk-modules-sha \
+  ".jdk.jdkModulesSha256 = $zero"
 expect_tamper_rejected scala-cli-sha \
   ".scalaCli.binarySha256 = $zero"
 expect_tamper_rejected scalafmt-config-sha \
@@ -93,4 +102,4 @@ expect_tamper_rejected stack-archive-sha \
 expect_tamper_rejected installed-stack-role \
   '.sharedDistributionProvenance.upstreamStandaloneAssetRole = "installed"'
 
-printf 'SCALA_TOOLCHAIN_LOCK_TEST_PASS tamperCases=9\n'
+printf 'SCALA_TOOLCHAIN_LOCK_TEST_PASS tamperCases=11\n'
