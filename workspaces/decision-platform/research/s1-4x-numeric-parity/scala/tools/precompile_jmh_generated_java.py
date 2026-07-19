@@ -1012,11 +1012,69 @@ def require_matching_classpath(
         raise PrecompileError("JMH_RUN_CLASSPATH_DRIFT")
 
 
+def _runtime_class_output(
+    generator: GeneratorOutputClosure,
+) -> Path:
+    """Actual run build에서 exact 10-hex JMH class-output 하나만 선택한다."""
+
+    generated_build = generator.generated_source_root.parent
+    build_parent = generated_build.parent
+    pattern = re.compile(
+        rf"{re.escape(generated_build.name)}_[0-9a-f]{{10}}"
+    )
+    candidates: list[Path] = []
+    try:
+        children = list(build_parent.iterdir())
+    except OSError as error:
+        raise PrecompileError(
+            "JMH_RUN_CLASS_OUTPUT_CARDINALITY_INVALID"
+        ) from error
+    for child in children:
+        if pattern.fullmatch(child.name) is None:
+            continue
+        class_output = child / "classes/main"
+        if (
+            child.is_symlink()
+            or not child.is_dir()
+            or child.resolve(strict=True) != child
+            or class_output.is_symlink()
+            or not class_output.is_dir()
+            or class_output.resolve(strict=True) != class_output
+        ):
+            raise PrecompileError(
+                "JMH_RUN_CLASS_OUTPUT_CARDINALITY_INVALID"
+            )
+        candidates.append(class_output)
+    if len(candidates) != 1:
+        raise PrecompileError(
+            "JMH_RUN_CLASS_OUTPUT_CARDINALITY_INVALID"
+        )
+    return candidates[0]
+
+
+def _classpath_entry_index(
+    closure: ClasspathClosure,
+    path: Path,
+) -> int:
+    indexes = [
+        index
+        for index, item in enumerate(closure.entries)
+        if item.path == path
+    ]
+    if len(indexes) != 1:
+        raise PrecompileError("JMH_RUN_CLASSPATH_DRIFT")
+    return indexes[0]
+
+
 def require_jmh_stdout_binding(
     compile_raw: str,
     jmh_raw: str,
-) -> str:
-    """Actual stdout의 generator 2행을 compile log에, fork classpath를 hash에 묶는다."""
+    *,
+    workspace: Path,
+    coursier_cache: Path,
+    evidence_dir: Path,
+) -> ClasspathClosure:
+    """Compile/run build path만 exact role로 remap하고 actual fork closure를 만든다."""
 
     if (
         "\x00" in compile_raw
@@ -1031,11 +1089,92 @@ def require_jmh_stdout_binding(
         len(compile_lines) != 3
         or not compile_raw.endswith("\n")
         or len(jmh_lines) < 3
-        or tuple(jmh_lines[:2]) != tuple(compile_lines[:2])
         or jmh_lines[2] != "# JMH version: 1.37"
     ):
         raise PrecompileError("JMH_RUN_STDOUT_BINDING_INVALID")
-    return hashlib.sha256(compile_lines[2].encode("utf-8")).hexdigest()
+    precompile_classpath = classpath_closure(
+        compile_raw,
+        workspace=workspace,
+        coursier_cache=coursier_cache,
+        evidence_dir=evidence_dir,
+    )
+    runtime_prefix = "\n".join(jmh_lines[:2]) + "\n"
+    try:
+        runtime_generator = generator_output_closure(
+            runtime_prefix,
+            workspace=workspace,
+        )
+    except PrecompileError as error:
+        raise PrecompileError(
+            "JMH_RUN_STDOUT_BINDING_INVALID"
+        ) from error
+    if (
+        runtime_generator.processed_class_count
+        != precompile_classpath.processed_class_count
+        or runtime_generator.generator_class_input_sha256
+        != precompile_classpath.generator_class_input_sha256
+        or runtime_generator.generated_resource_root_sha256
+        != precompile_classpath.generated_resource_root_sha256
+    ):
+        raise PrecompileError("JMH_RUN_CLASSPATH_DRIFT")
+
+    class_output_index = _classpath_entry_index(
+        precompile_classpath,
+        precompile_classpath.class_output,
+    )
+    resource_index = _classpath_entry_index(
+        precompile_classpath,
+        precompile_classpath.generated_resource_root,
+    )
+    if class_output_index == resource_index:
+        raise PrecompileError("JMH_RUN_CLASSPATH_DRIFT")
+    runtime_paths = [
+        item.path for item in precompile_classpath.entries
+    ]
+    runtime_paths[class_output_index] = _runtime_class_output(
+        runtime_generator
+    )
+    runtime_paths[resource_index] = (
+        runtime_generator.generated_resource_root
+    )
+    runtime_raw = (
+        runtime_prefix
+        + os.pathsep.join(str(path) for path in runtime_paths)
+        + "\n"
+    )
+    runtime_classpath = classpath_closure(
+        runtime_raw,
+        workspace=workspace,
+        coursier_cache=coursier_cache,
+        evidence_dir=evidence_dir,
+    )
+    for index, (precompile_item, runtime_item) in enumerate(
+        zip(
+            precompile_classpath.entries,
+            runtime_classpath.entries,
+            strict=True,
+        )
+    ):
+        if index in {class_output_index, resource_index}:
+            if (
+                precompile_item.kind != "directory"
+                or runtime_item.kind != "directory"
+                or precompile_item.sha256 != runtime_item.sha256
+            ):
+                raise PrecompileError("JMH_RUN_CLASSPATH_DRIFT")
+        elif (
+            precompile_item.path_id,
+            precompile_item.kind,
+            precompile_item.sha256,
+            precompile_item.identity_sha256,
+        ) != (
+            runtime_item.path_id,
+            runtime_item.kind,
+            runtime_item.sha256,
+            runtime_item.identity_sha256,
+        ):
+            raise PrecompileError("JMH_RUN_CLASSPATH_DRIFT")
+    return runtime_classpath
 
 
 def require_runtime_classpath_evidence(
@@ -1360,6 +1499,371 @@ def capture_classpath_post_run(
         generated_resource_path_id=generated_resource_path_id,
     )
     return result
+
+
+def _generator_evidence_value(
+    closure: ClasspathClosure,
+    *,
+    workspace: Path,
+    coursier_cache: Path,
+    evidence_dir: Path,
+) -> dict[str, Any]:
+    """Generator의 path role과 byte closure를 portable evidence로 만든다."""
+
+    return {
+        "generatorId": "reflection",
+        "processedClassCount": closure.processed_class_count,
+        "classInputPathId": _portable_path_id(
+            closure.generator_class_input,
+            workspace=workspace,
+            coursier_cache=coursier_cache,
+            evidence_dir=evidence_dir,
+        ),
+        "generatedSourceRootPathId": _portable_path_id(
+            closure.generated_source_root,
+            workspace=workspace,
+            coursier_cache=coursier_cache,
+            evidence_dir=evidence_dir,
+        ),
+        "generatedResourceRootPathId": _portable_path_id(
+            closure.generated_resource_root,
+            workspace=workspace,
+            coursier_cache=coursier_cache,
+            evidence_dir=evidence_dir,
+        ),
+        "classInputClosureSha256": (
+            closure.generator_class_input_sha256
+        ),
+        "generatedResourceClosureSha256": (
+            closure.generated_resource_root_sha256
+        ),
+    }
+
+
+def _classpath_evidence_values(
+    closure: ClasspathClosure,
+) -> list[dict[str, str]]:
+    return [
+        {
+            "pathId": item.path_id,
+            "kind": item.kind,
+            "sha256": item.sha256,
+            "identitySha256": item.identity_sha256,
+        }
+        for item in closure.entries
+    ]
+
+
+def create_jmh_runtime_closure_evidence(
+    *,
+    precompile_classpath: ClasspathClosure,
+    runtime_classpath: ClasspathClosure,
+    generated_sources_sha256: str,
+    workspace: Path,
+    coursier_cache: Path,
+    evidence_dir: Path,
+) -> dict[str, Any]:
+    """Actual run의 remapped 3개 role과 ordered fork classpath를 기록한다."""
+
+    if SHA256_PATTERN.fullmatch(generated_sources_sha256) is None:
+        raise PrecompileError("JMH_RUNTIME_CLOSURE_EVIDENCE_INVALID")
+    precompile_class_index = _classpath_entry_index(
+        precompile_classpath,
+        precompile_classpath.class_output,
+    )
+    precompile_resource_index = _classpath_entry_index(
+        precompile_classpath,
+        precompile_classpath.generated_resource_root,
+    )
+    runtime_class_index = _classpath_entry_index(
+        runtime_classpath,
+        runtime_classpath.class_output,
+    )
+    runtime_resource_index = _classpath_entry_index(
+        runtime_classpath,
+        runtime_classpath.generated_resource_root,
+    )
+    if (
+        precompile_class_index != runtime_class_index
+        or precompile_resource_index != runtime_resource_index
+    ):
+        raise PrecompileError("JMH_RUNTIME_CLOSURE_EVIDENCE_INVALID")
+    precompile_class = precompile_classpath.entries[
+        precompile_class_index
+    ]
+    precompile_resource = precompile_classpath.entries[
+        precompile_resource_index
+    ]
+    runtime_class = runtime_classpath.entries[runtime_class_index]
+    runtime_resource = runtime_classpath.entries[
+        runtime_resource_index
+    ]
+    runtime_entries = _classpath_evidence_values(runtime_classpath)
+    result = {
+        "schemaVersion": "s1.4x-jmh-runtime-closure-v1",
+        "generator": _generator_evidence_value(
+            runtime_classpath,
+            workspace=workspace,
+            coursier_cache=coursier_cache,
+            evidence_dir=evidence_dir,
+        ),
+        "roleMappings": [
+            {
+                "role": "SCALA_CLASS_OUTPUT",
+                "precompilePathId": precompile_class.path_id,
+                "runtimePathId": runtime_class.path_id,
+                "sha256": runtime_class.sha256,
+            },
+            {
+                "role": "JMH_GENERATED_SOURCES",
+                "precompilePathId": _portable_path_id(
+                    precompile_classpath.generated_source_root,
+                    workspace=workspace,
+                    coursier_cache=coursier_cache,
+                    evidence_dir=evidence_dir,
+                ),
+                "runtimePathId": _portable_path_id(
+                    runtime_classpath.generated_source_root,
+                    workspace=workspace,
+                    coursier_cache=coursier_cache,
+                    evidence_dir=evidence_dir,
+                ),
+                "sha256": generated_sources_sha256,
+            },
+            {
+                "role": "JMH_GENERATED_RESOURCES",
+                "precompilePathId": precompile_resource.path_id,
+                "runtimePathId": runtime_resource.path_id,
+                "sha256": runtime_resource.sha256,
+            },
+        ],
+        "runtimeClasspathEntries": runtime_entries,
+        "runtimeClasspathEntriesSha256": canonical_sha256(
+            runtime_entries
+        ),
+        "runtimeClasspathSha256": (
+            runtime_classpath.runtime_classpath_sha256
+        ),
+        "status": "PASS",
+    }
+    return result
+
+
+def validate_jmh_runtime_closure_evidence(
+    value: Any,
+    *,
+    classpath_entries: Any,
+    classpath_post_run: Any,
+    scala_class_output_path_id: Any,
+    jmh_generator: Any,
+    generated_sources_sha256: Any,
+) -> None:
+    """Final runtime mapping이 exact 3개 role 외 path/order/identity를 못 바꾸게 한다."""
+
+    invalid = "JMH_RUNTIME_CLOSURE_EVIDENCE_INVALID"
+    if (
+        not isinstance(jmh_generator, dict)
+        or set(jmh_generator)
+        != {
+            "generatorId",
+            "processedClassCount",
+            "classInputPathId",
+            "generatedSourceRootPathId",
+            "generatedResourceRootPathId",
+            "classInputClosureSha256",
+            "generatedResourceClosureSha256",
+        }
+        or jmh_generator.get("generatorId") != "reflection"
+        or jmh_generator.get("processedClassCount")
+        != EXPECTED_JMH_PROCESSED_CLASS_COUNT
+        or SHA256_PATTERN.fullmatch(
+            str(jmh_generator.get("classInputClosureSha256"))
+        )
+        is None
+        or SHA256_PATTERN.fullmatch(
+            str(jmh_generator.get("generatedResourceClosureSha256"))
+        )
+        is None
+        or SHA256_PATTERN.fullmatch(str(generated_sources_sha256))
+        is None
+    ):
+        raise PrecompileError(invalid)
+    generated_resource_path_id = jmh_generator[
+        "generatedResourceRootPathId"
+    ]
+    try:
+        validate_classpath_post_run_evidence(
+            classpath_post_run,
+            classpath_entries=classpath_entries,
+            scala_class_output_path_id=scala_class_output_path_id,
+            generated_resource_path_id=generated_resource_path_id,
+        )
+    except PrecompileError as error:
+        raise PrecompileError(invalid) from error
+
+    runtime_generator = (
+        value.get("generator") if isinstance(value, dict) else None
+    )
+    runtime_entries = (
+        value.get("runtimeClasspathEntries")
+        if isinstance(value, dict)
+        else None
+    )
+    if (
+        not isinstance(value, dict)
+        or set(value)
+        != {
+            "schemaVersion",
+            "generator",
+            "roleMappings",
+            "runtimeClasspathEntries",
+            "runtimeClasspathEntriesSha256",
+            "runtimeClasspathSha256",
+            "status",
+        }
+        or value.get("schemaVersion")
+        != "s1.4x-jmh-runtime-closure-v1"
+        or value.get("status") != "PASS"
+        or not isinstance(runtime_generator, dict)
+        or set(runtime_generator) != set(jmh_generator)
+        or runtime_generator.get("generatorId") != "reflection"
+        or runtime_generator.get("processedClassCount")
+        != jmh_generator["processedClassCount"]
+        or runtime_generator.get("classInputClosureSha256")
+        != jmh_generator["classInputClosureSha256"]
+        or runtime_generator.get("generatedResourceClosureSha256")
+        != jmh_generator["generatedResourceClosureSha256"]
+        or not isinstance(runtime_entries, list)
+        or len(runtime_entries) != len(classpath_entries)
+        or value.get("runtimeClasspathEntriesSha256")
+        != canonical_sha256(runtime_entries)
+        or SHA256_PATTERN.fullmatch(
+            str(value.get("runtimeClasspathSha256"))
+        )
+        is None
+    ):
+        raise PrecompileError(invalid)
+
+    runtime_input_match = re.fullmatch(
+        r"SCALA_WORKSPACE/\.scala-build/"
+        r"(?P<build>[A-Za-z0-9._-]+)/classes/main",
+        str(runtime_generator.get("classInputPathId")),
+    )
+    if runtime_input_match is None:
+        raise PrecompileError(invalid)
+    runtime_build = runtime_input_match.group("build")
+    runtime_source_id = (
+        f"SCALA_WORKSPACE/.scala-build/{runtime_build}_jmh/sources"
+    )
+    runtime_resource_id = (
+        f"SCALA_WORKSPACE/.scala-build/{runtime_build}_jmh/resources"
+    )
+    if (
+        runtime_generator.get("generatedSourceRootPathId")
+        != runtime_source_id
+        or runtime_generator.get("generatedResourceRootPathId")
+        != runtime_resource_id
+    ):
+        raise PrecompileError(invalid)
+    runtime_class_pattern = re.compile(
+        r"SCALA_WORKSPACE/\.scala-build/"
+        rf"{re.escape(runtime_build)}_jmh_[0-9a-f]{{10}}/classes/main"
+    )
+    runtime_class_ids = [
+        item.get("pathId")
+        for item in runtime_entries
+        if isinstance(item, dict)
+        and runtime_class_pattern.fullmatch(
+            str(item.get("pathId"))
+        )
+        is not None
+    ]
+    if len(runtime_class_ids) != 1:
+        raise PrecompileError(invalid)
+    runtime_class_id = runtime_class_ids[0]
+
+    seen: set[str] = set()
+    for item in runtime_entries:
+        if (
+            not isinstance(item, dict)
+            or set(item)
+            != {"pathId", "kind", "sha256", "identitySha256"}
+            or not isinstance(item.get("pathId"), str)
+            or item["pathId"] in seen
+            or item.get("kind") not in {"file", "directory"}
+            or SHA256_PATTERN.fullmatch(str(item.get("sha256"))) is None
+            or SHA256_PATTERN.fullmatch(
+                str(item.get("identitySha256"))
+            )
+            is None
+        ):
+            raise PrecompileError(invalid)
+        seen.add(item["pathId"])
+
+    precompile_entries_by_id = {
+        item.get("pathId"): item
+        for item in classpath_entries
+        if isinstance(item, dict)
+    }
+    precompile_class = precompile_entries_by_id.get(
+        scala_class_output_path_id
+    )
+    precompile_resource = precompile_entries_by_id.get(
+        generated_resource_path_id
+    )
+    if (
+        not isinstance(precompile_class, dict)
+        or not isinstance(precompile_resource, dict)
+    ):
+        raise PrecompileError(invalid)
+    expected_mappings = [
+        {
+            "role": "SCALA_CLASS_OUTPUT",
+            "precompilePathId": scala_class_output_path_id,
+            "runtimePathId": runtime_class_id,
+            "sha256": precompile_class["sha256"],
+        },
+        {
+            "role": "JMH_GENERATED_SOURCES",
+            "precompilePathId": jmh_generator[
+                "generatedSourceRootPathId"
+            ],
+            "runtimePathId": runtime_source_id,
+            "sha256": generated_sources_sha256,
+        },
+        {
+            "role": "JMH_GENERATED_RESOURCES",
+            "precompilePathId": generated_resource_path_id,
+            "runtimePathId": runtime_resource_id,
+            "sha256": precompile_resource["sha256"],
+        },
+    ]
+    if value.get("roleMappings") != expected_mappings:
+        raise PrecompileError(invalid)
+
+    post_entries = classpath_post_run["entries"]
+    for precompile_item, post_item, runtime_item in zip(
+        classpath_entries,
+        post_entries,
+        runtime_entries,
+        strict=True,
+    ):
+        if precompile_item["pathId"] == scala_class_output_path_id:
+            expected_path_id = runtime_class_id
+            expected_identity = runtime_item.get("identitySha256")
+        elif precompile_item["pathId"] == generated_resource_path_id:
+            expected_path_id = runtime_resource_id
+            expected_identity = runtime_item.get("identitySha256")
+        else:
+            expected_path_id = precompile_item["pathId"]
+            expected_identity = post_item["postRunIdentitySha256"]
+        if (
+            runtime_item.get("pathId") != expected_path_id
+            or runtime_item.get("kind") != precompile_item["kind"]
+            or runtime_item.get("sha256") != precompile_item["sha256"]
+            or runtime_item.get("identitySha256") != expected_identity
+        ):
+            raise PrecompileError(invalid)
 
 
 def _strict_json_payload(payload: bytes) -> Any:
@@ -2269,6 +2773,9 @@ def verify(arguments: argparse.Namespace) -> dict[str, Any]:
         or receipt.get("aggregateStatus") != "PASS"
         or "classpathPostRun" in receipt
         or "classpathPostRunSha256" in receipt
+        or "jmhRuntimeClosure" in receipt
+        or "jmhRuntimeClosureSha256" in receipt
+        or "precompileRuntimeClasspathSha256" in receipt
     ):
         raise PrecompileError("PRECOMPILE_RECEIPT_INVALID")
 
@@ -2423,66 +2930,56 @@ def verify(arguments: argparse.Namespace) -> dict[str, Any]:
     )
     compile_raw = compile_stdout.read_text(encoding="utf-8")
     jmh_raw = jmh_stdout.read_text(encoding="utf-8")
-    stdout_runtime_classpath_sha256 = require_jmh_stdout_binding(
+    runtime_classpath = require_jmh_stdout_binding(
         compile_raw,
         jmh_raw,
-    )
-    actual_generator = generator_output_closure(
-        jmh_raw,
         workspace=workspace,
+        coursier_cache=coursier_cache,
+        evidence_dir=evidence_dir,
     )
-    actual_generator_values = {
-        "generatorId": "reflection",
-        "processedClassCount": actual_generator.processed_class_count,
-        "classInputPathId": _portable_path_id(
-            actual_generator.generator_class_input,
-            workspace=workspace,
-            coursier_cache=coursier_cache,
-            evidence_dir=evidence_dir,
-        ),
-        "generatedSourceRootPathId": _portable_path_id(
-            actual_generator.generated_source_root,
-            workspace=workspace,
-            coursier_cache=coursier_cache,
-            evidence_dir=evidence_dir,
-        ),
-        "generatedResourceRootPathId": _portable_path_id(
-            actual_generator.generated_resource_root,
-            workspace=workspace,
-            coursier_cache=coursier_cache,
-            evidence_dir=evidence_dir,
-        ),
-        "classInputClosureSha256": (
-            actual_generator.generator_class_input_sha256
-        ),
-        "generatedResourceClosureSha256": (
-            actual_generator.generated_resource_root_sha256
-        ),
-    }
-    if generator != actual_generator_values:
+    runtime_generator_values = _generator_evidence_value(
+        runtime_classpath,
+        workspace=workspace,
+        coursier_cache=coursier_cache,
+        evidence_dir=evidence_dir,
+    )
+    if (
+        runtime_generator_values["generatorId"]
+        != generator["generatorId"]
+        or runtime_generator_values["processedClassCount"]
+        != generator["processedClassCount"]
+        or runtime_generator_values["classInputClosureSha256"]
+        != generator["classInputClosureSha256"]
+        or runtime_generator_values[
+            "generatedResourceClosureSha256"
+        ]
+        != generator["generatedResourceClosureSha256"]
+    ):
         raise PrecompileError("JMH_GENERATOR_POST_RUN_DRIFT")
     actual_sources = generated_source_closure_at(
-        actual_generator.generated_source_root,
+        runtime_classpath.generated_source_root,
         workspace=workspace,
     )
     if _file_digest_values(actual_sources.files) != source_values:
         raise PrecompileError("GENERATED_SOURCE_POST_RUN_DRIFT")
 
-    actual_classpath = classpath_closure(
+    precompile_classpath = classpath_closure(
         compile_raw,
         workspace=workspace,
         coursier_cache=coursier_cache,
         evidence_dir=evidence_dir,
     )
-    actual_classpath_values = [
-        {
-            "pathId": item.path_id,
-            "kind": item.kind,
-            "sha256": item.sha256,
-            "identitySha256": item.identity_sha256,
-        }
-        for item in actual_classpath.entries
-    ]
+    precompile_generator_values = _generator_evidence_value(
+        precompile_classpath,
+        workspace=workspace,
+        coursier_cache=coursier_cache,
+        evidence_dir=evidence_dir,
+    )
+    if precompile_generator_values != generator:
+        raise PrecompileError("JMH_GENERATOR_POST_RUN_DRIFT")
+    actual_classpath_values = _classpath_evidence_values(
+        precompile_classpath
+    )
     expected_classpath_values = classpath_post_run["entries"]
     if len(actual_classpath_values) != len(expected_classpath_values):
         raise PrecompileError("JMH_RUN_CLASSPATH_DRIFT")
@@ -2500,22 +2997,37 @@ def verify(arguments: argparse.Namespace) -> dict[str, Any]:
         ):
             raise PrecompileError("JMH_RUN_CLASSPATH_DRIFT")
     actual_class_output_id = _portable_path_id(
-        actual_classpath.class_output,
+        precompile_classpath.class_output,
         workspace=workspace,
         coursier_cache=coursier_cache,
         evidence_dir=evidence_dir,
     )
-    forks = _strict_json_value(fork_evidence_path)
     if (
         actual_class_output_id != receipt.get("scalaClassOutputPathId")
         or receipt.get("runtimeClasspathSha256")
-        != actual_classpath.runtime_classpath_sha256
-        or stdout_runtime_classpath_sha256
-        != actual_classpath.runtime_classpath_sha256
+        != precompile_classpath.runtime_classpath_sha256
     ):
         raise PrecompileError("JMH_RUN_CLASSPATH_DRIFT")
+
+    runtime_evidence = create_jmh_runtime_closure_evidence(
+        precompile_classpath=precompile_classpath,
+        runtime_classpath=runtime_classpath,
+        generated_sources_sha256=receipt["generatedSourcesSha256"],
+        workspace=workspace,
+        coursier_cache=coursier_cache,
+        evidence_dir=evidence_dir,
+    )
+    validate_jmh_runtime_closure_evidence(
+        runtime_evidence,
+        classpath_entries=classpath_values,
+        classpath_post_run=classpath_post_run,
+        scala_class_output_path_id=class_output_id,
+        jmh_generator=generator,
+        generated_sources_sha256=receipt["generatedSourcesSha256"],
+    )
+    forks = _strict_json_value(fork_evidence_path)
     require_runtime_classpath_evidence(
-        actual_classpath.runtime_classpath_sha256,
+        runtime_classpath.runtime_classpath_sha256,
         forks,
     )
     try:
@@ -2526,6 +3038,16 @@ def verify(arguments: argparse.Namespace) -> dict[str, Any]:
     except PrecompileError as error:
         raise PrecompileError("JDK_COMPILER_POST_RUN_DRIFT") from error
 
+    receipt["precompileRuntimeClasspathSha256"] = receipt[
+        "runtimeClasspathSha256"
+    ]
+    receipt["runtimeClasspathSha256"] = (
+        runtime_classpath.runtime_classpath_sha256
+    )
+    receipt["jmhRuntimeClosure"] = runtime_evidence
+    receipt["jmhRuntimeClosureSha256"] = canonical_sha256(
+        runtime_evidence
+    )
     receipt["classpathPostRun"] = classpath_post_run
     receipt["classpathPostRunSha256"] = canonical_sha256(
         classpath_post_run
@@ -2541,6 +3063,7 @@ def verify(arguments: argparse.Namespace) -> dict[str, Any]:
         "generatedSourcesSha256": receipt["generatedSourcesSha256"],
         "generatedClassesSha256": receipt["generatedClassesSha256"],
         "classpathEntriesSha256": receipt["classpathEntriesSha256"],
+        "runtimeClasspathSha256": receipt["runtimeClasspathSha256"],
         "classInputClosureSha256": (
             generator["classInputClosureSha256"]
         ),
