@@ -713,16 +713,31 @@ ORDER BY url.time DESC
                 (snapshot_url,),
             )
         )
+        if not rows:
+            # Stack 3.11의 bulk Pantry cache는 URL 연결 없이 snapshot을
+            # content-addressed blob으로만 보관하므로 frozen lock SHA로 다시 찾는다.
+            rows = list(
+                connection.execute(
+                    """
+SELECT contents
+FROM blob
+WHERE sha = ? AND size = ?
+""",
+                    (bytes.fromhex(expected_sha256), expected_size),
+                )
+            )
     finally:
         connection.close()
-    if len(rows) != 1:
+    if not rows:
         raise CompatibilityEvidenceError("current frozen snapshot cardinality drift")
-    payload = bytes(rows[0][0])
-    if (
+    payloads = [bytes(row[0]) for row in rows]
+    if any(
         len(payload) != expected_size
         or hashlib.sha256(payload).hexdigest() != expected_sha256
+        for payload in payloads
     ):
         raise CompatibilityEvidenceError("current frozen snapshot bytes drift")
+    payload = payloads[0]
     try:
         return payload.decode("utf-8")
     except UnicodeError as exc:
