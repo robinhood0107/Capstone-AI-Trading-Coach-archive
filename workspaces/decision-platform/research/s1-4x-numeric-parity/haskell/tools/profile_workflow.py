@@ -1837,6 +1837,33 @@ def build_final_profile_document(
     }
 
 
+def validate_materialized_profile_selection(
+    materialized: object,
+    refreshed: object,
+) -> None:
+    """Historical receipt SHA를 유지하면서 fresh requalification 의미를 비교한다."""
+
+    if (
+        not isinstance(materialized, dict)
+        or not isinstance(refreshed, dict)
+        or set(materialized) != RUNTIME_PROFILE_FIELDS
+        or set(refreshed) != RUNTIME_PROFILE_FIELDS
+    ):
+        raise WorkflowError("SELECTED_PROFILE_REQUALIFICATION_DRIFT")
+    materialization_only = {
+        "fullCorrectnessSha256",
+        "qualificationArtifactSha256",
+    }
+    if any(
+        materialized[field] != refreshed[field]
+        for field in RUNTIME_PROFILE_FIELDS - materialization_only
+    ) or any(
+        SHA256_PATTERN.fullmatch(str(materialized[field])) is None
+        for field in materialization_only
+    ):
+        raise WorkflowError("SELECTED_PROFILE_REQUALIFICATION_DRIFT")
+
+
 def current_compatibility_lock_hashes(haskell_root: Path) -> dict[str, str]:
     """두 Stack lock을 각각의 regular-file bytes에서 독립적으로 계산한다."""
 
@@ -5127,12 +5154,29 @@ def _select_profile(arguments: argparse.Namespace) -> None:
             atomic_replace_json(manifest_path, manifest)
         finally:
             lock_path.unlink(missing_ok=True)
+        evidence_mode = "MATERIALIZATION"
     else:
         actual = strict_json_load(profile_path)
-        if (
-            actual != profile_document
-            or profile_path.read_bytes()
-            != canonical_json_bytes(profile_document, trailing_newline=True)
+        evidence.validate_selected_profile_document(
+            actual,
+            expected_compiler_sha256=evidence.AUTHORITATIVE_GHC_SHA256,
+            expected_source_tree_sha256=source_tree_sha256,
+            expected_qualification_plan_sha256=sha256_file(plan_path),
+            expected_selector_config_sha256=canonical_sha256(configuration),
+        )
+        if candidate_commit == fixed_point["preMaterializationSubjectCommit"]:
+            if actual != profile_document:
+                raise WorkflowError("SELECTED_PROFILE_CHECK_FAILED")
+            evidence_mode = "HISTORICAL_EXACT"
+        else:
+            validate_materialized_profile_selection(
+                actual,
+                profile_document,
+            )
+            evidence_mode = "REQUALIFICATION"
+        if profile_path.read_bytes() != canonical_json_bytes(
+            actual,
+            trailing_newline=True,
         ):
             raise WorkflowError("SELECTED_PROFILE_CHECK_FAILED")
         evidence.validate_source_manifest(haskell_root, manifest_path)
@@ -5141,6 +5185,7 @@ def _select_profile(arguments: argparse.Namespace) -> None:
             {
                 "mode": arguments.mode,
                 "materializationCommit": fixed_point["materializationCommit"],
+                "evidenceMode": evidence_mode,
                 "preMaterializationSubjectCommit": fixed_point[
                     "preMaterializationSubjectCommit"
                 ],

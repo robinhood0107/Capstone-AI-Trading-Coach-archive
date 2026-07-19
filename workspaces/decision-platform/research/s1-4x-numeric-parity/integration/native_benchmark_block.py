@@ -4152,19 +4152,11 @@ def _validate_execution_receipt(
             sha256_value=haskell_provenance["qualificationArtifactSha256"],
             error=provenance_error,
         )
-        selected_correctness_sha256 = (
-            haskell_provenance["optimizedCorrectnessSha256"]
-            if profile == "optimized-o2-fasm"
-            else haskell_provenance["baselineCorrectnessSha256"]
-        )
         if (
             selected_profile["profileId"] != profile
             or selected_profile["optionsSha256"] != effective_runtime_arguments_sha256
             or selected_profile["ghcOptions"] != selected_options
             or selected_profile["sourceTreeSha256"] != source_tree_sha256
-            or selected_profile["fullCorrectnessSha256"] != selected_correctness_sha256
-            or selected_profile["qualificationArtifactSha256"]
-            != haskell_provenance["qualificationArtifactSha256"]
         ):
             raise GateError(f"NATIVE_EXECUTION_PROVENANCE_INVALID:{case_id}")
         selector = next(

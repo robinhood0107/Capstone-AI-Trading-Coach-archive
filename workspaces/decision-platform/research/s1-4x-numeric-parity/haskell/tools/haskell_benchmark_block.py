@@ -795,7 +795,7 @@ def validate_profile_evidence_closure(
     evidence: Mapping[str, PinnedJsonEvidence],
     benchmark_subject_commit: str,
 ) -> dict[str, str]:
-    """Final profile이 same-FD correctness/qualification bytes를 선택했음을 고정한다."""
+    """Final profile 결정과 same-subject fresh requalification을 함께 고정한다."""
 
     if (
         set(evidence) != {"baseline", "optimized", "qualification"}
@@ -850,21 +850,20 @@ def validate_profile_evidence_closure(
         or not isinstance(selection, dict)
         or selection.get("profileId") != profile.get("profileId")
         or selection.get("selectedBy") != profile.get("selectedBy")
-        or evidence["qualification"].sha256
-        != profile.get("qualificationArtifactSha256")
     ):
         raise BlockError("PINNED_PROFILE_QUALIFICATION_INVALID")
-    selected_name = (
-        "optimized"
-        if profile.get("profileId") == "optimized-o2-fasm"
-        else "baseline"
-    )
     if (
         profile.get("profileId") not in expected_profiles.values()
-        or evidence[selected_name].sha256
-        != profile.get("fullCorrectnessSha256")
+        or SHA256_PATTERN.fullmatch(
+            str(profile.get("fullCorrectnessSha256"))
+        )
+        is None
+        or SHA256_PATTERN.fullmatch(
+            str(profile.get("qualificationArtifactSha256"))
+        )
+        is None
     ):
-        raise BlockError("PINNED_SELECTED_CORRECTNESS_INVALID")
+        raise BlockError("PINNED_PROFILE_MATERIALIZATION_EVIDENCE_INVALID")
     return {
         "baselineCorrectnessSha256": evidence["baseline"].sha256,
         "baselineCorrectnessSourcePath": str(
