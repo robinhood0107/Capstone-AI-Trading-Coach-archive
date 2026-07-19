@@ -3245,7 +3245,7 @@ def validate_jmh_native_json(
         != expected_measurement_iterations
         or result.get("measurementTime") != canonical_measurement_time
         or result.get("jvmArgs") != effective_jvm_arguments
-        or result.get("params") != {}
+        or result.get("params") is not None
         or not isinstance(metric, dict)
         or metric.get("scoreUnit") != "ns/op"
     ):
