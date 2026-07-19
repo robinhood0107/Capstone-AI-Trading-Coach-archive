@@ -434,6 +434,12 @@ def test_runner_executes_fd_bound_uv_dependency_after_path_replacement(
         encoding="utf-8",
     )
     supplied_uv.chmod(0o700)
+    supplied_docker = tmp_path / "docker"
+    supplied_docker.write_text(
+        "#!/usr/bin/bash\nexit 0\n",
+        encoding="utf-8",
+    )
+    supplied_docker.chmod(0o700)
     wrapper_identity = {
         "path": str(wrapper),
         "sha256": sha256_file(wrapper),
@@ -442,10 +448,18 @@ def test_runner_executes_fd_bound_uv_dependency_after_path_replacement(
         "path": str(supplied_uv),
         "sha256": sha256_file(supplied_uv),
     }
+    docker_identity = {
+        "path": str(supplied_docker),
+        "sha256": sha256_file(supplied_docker),
+    }
 
     with (
         runner._pin_executable(wrapper_identity, role="wrapper") as pinned_wrapper,
         runner._pin_executable(uv_identity, role="uv") as pinned_uv,
+        runner._pin_executable(
+            docker_identity,
+            role="docker",
+        ) as pinned_docker,
     ):
         replacement = tmp_path / "replacement-uv"
         replacement.write_text(
@@ -457,7 +471,7 @@ def test_runner_executes_fd_bound_uv_dependency_after_path_replacement(
         stdout = tmp_path / "uv.stdout"
         stderr = tmp_path / "uv.stderr"
         environment = runner._benchmark_environment(
-            {"uv": pinned_uv},
+            {"uv": pinned_uv, "docker": pinned_docker},
             {},
             boundary_id="hostValidator",
         )
@@ -465,7 +479,7 @@ def test_runner_executes_fd_bound_uv_dependency_after_path_replacement(
         runner._run_process(
             [str(wrapper)],
             executable=pinned_wrapper,
-            inherited_executables=(pinned_uv,),
+            inherited_executables=(pinned_uv, pinned_docker),
             cwd=tmp_path,
             timeout_seconds=5,
             stdout_path=stdout,
