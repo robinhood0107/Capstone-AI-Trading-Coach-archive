@@ -447,7 +447,7 @@ def selector_fixture(
                     "warmupTime": "500 ms",
                     "measurementIterations": 8,
                     "measurementTime": "500 ms",
-                    "params": {},
+                    "params": None,
                     "primaryMetric": {
                         "score": score,
                         "scoreUnit": "ns/op",
@@ -1679,7 +1679,7 @@ def main() -> int:
             "warmupTime": "200 ms",
             "measurementIterations": 1,
             "measurementTime": "200 ms",
-            "params": {},
+            "params": None,
             "primaryMetric": {
                 "score": 12.5,
                 "scoreUnit": "ns/op",
@@ -1701,6 +1701,14 @@ def main() -> int:
     )
     assert validated["nativeValue"] == 12.5
     native_tampers = []
+    fabricated_empty_params = json.loads(json.dumps(native))
+    fabricated_empty_params[0]["params"] = {}
+    native_tampers.append(
+        (
+            fabricated_empty_params,
+            "fabricated empty JMH params object passed",
+        )
+    )
     nonfinite = json.loads(json.dumps(native))
     nonfinite[0]["primaryMetric"]["score"] = float("nan")
     native_tampers.append((nonfinite, "non-finite native score passed"))
