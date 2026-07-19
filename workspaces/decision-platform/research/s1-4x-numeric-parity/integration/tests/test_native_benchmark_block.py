@@ -7,6 +7,7 @@ import hashlib
 import json
 import math
 import os
+import stat
 import statistics
 import sys
 import tempfile
@@ -46,6 +47,84 @@ def _canonical_sha256(value: Any) -> str:
             sort_keys=True,
         ).encode("utf-8")
     ).hexdigest()
+
+
+def _toolchain_tree_metadata(
+    root: Path,
+    *,
+    allow_relative_symlinks: bool = False,
+) -> dict[str, int | str]:
+    """Haskell producer와 같은 stat closure projection을 test fixture에 만든다."""
+
+    records: list[dict[str, Any]] = []
+    total_file_bytes = 0
+    pending = [root]
+    while pending:
+        directory = pending.pop()
+        relative_directory = (
+            "." if directory == root else directory.relative_to(root).as_posix()
+        )
+        directory_stat = os.lstat(directory)
+        records.append(
+            {
+                "path": relative_directory,
+                "type": "directory",
+                "device": directory_stat.st_dev,
+                "inode": directory_stat.st_ino,
+                "mode": directory_stat.st_mode,
+                "size": directory_stat.st_size,
+                "mtimeNs": directory_stat.st_mtime_ns,
+                "ctimeNs": directory_stat.st_ctime_ns,
+                "linkCount": directory_stat.st_nlink,
+            }
+        )
+        entries = sorted(
+            os.scandir(directory),
+            key=lambda entry: os.fsencode(entry.name),
+            reverse=True,
+        )
+        for entry in entries:
+            path = Path(entry.path)
+            relative = path.relative_to(root).as_posix()
+            entry_stat = entry.stat(follow_symlinks=False)
+            common = {
+                "path": relative,
+                "device": entry_stat.st_dev,
+                "inode": entry_stat.st_ino,
+                "mode": entry_stat.st_mode,
+                "size": entry_stat.st_size,
+                "mtimeNs": entry_stat.st_mtime_ns,
+                "ctimeNs": entry_stat.st_ctime_ns,
+                "linkCount": entry_stat.st_nlink,
+            }
+            if stat.S_ISLNK(entry_stat.st_mode):
+                self_target = Path(os.readlink(path))
+                if (
+                    not allow_relative_symlinks
+                    or self_target.is_absolute()
+                    or ".." in self_target.parts
+                ):
+                    raise AssertionError(f"invalid fixture symlink: {relative}")
+                records.append(
+                    {
+                        **common,
+                        "type": "symlink",
+                        "target": str(self_target),
+                    }
+                )
+            elif stat.S_ISDIR(entry_stat.st_mode):
+                pending.append(path)
+            elif stat.S_ISREG(entry_stat.st_mode):
+                total_file_bytes += entry_stat.st_size
+                records.append({**common, "type": "regular"})
+            else:
+                raise AssertionError(f"invalid fixture entry: {relative}")
+    records.sort(key=lambda record: os.fsencode(record["path"]))
+    return {
+        "sha256": _canonical_sha256(records),
+        "entryCount": len(records),
+        "totalFileBytes": total_file_bytes,
+    }
 
 
 class NativeBenchmarkBlockTests(TestCase):
@@ -610,8 +689,45 @@ class NativeBenchmarkBlockTests(TestCase):
         ghcup.write_bytes(b"ghcup fixture")
         stack = temporary / "stack"
         stack.write_bytes(b"stack fixture")
-        authoritative_ghc = temporary / "ghc-9.10.3"
-        authoritative_ghc.write_bytes(b"authoritative ghc fixture")
+        ghc_install_root = temporary / "ghc-install"
+        ghc_install_bin = ghc_install_root / "bin"
+        ghc_distribution_root = ghc_install_root / "lib/ghc-9.10.3"
+        ghc_distribution_bin = ghc_distribution_root / "bin"
+        ghc_libdir = ghc_distribution_root / "lib"
+        ghc_package_db = ghc_libdir / "package.conf.d"
+        ghc_install_bin.mkdir(parents=True)
+        ghc_distribution_bin.mkdir(parents=True)
+        ghc_package_db.mkdir(parents=True)
+        authoritative_ghc = ghc_install_bin / "ghc-9.10.3"
+        authoritative_ghc.write_text(
+            (
+                "#!/bin/bash\n"
+                f'exedir="{ghc_distribution_bin}"\n'
+                'exeprog="./ghc-9.10.3"\n'
+                f'executablename="{ghc_distribution_bin}/./ghc-9.10.3"\n'
+                f'bindir="{ghc_install_bin}"\n'
+                f'libdir="{ghc_libdir}"\n'
+                f'docdir="{ghc_install_root / "share/doc/ghc-9.10.3"}"\n'
+                f'includedir="{ghc_install_root / "include"}"\n'
+                "\n"
+                'exec "$executablename" -B"$libdir" ${1+"$@"}\n'
+            ),
+            encoding="utf-8",
+        )
+        actual_compiler_elf = ghc_distribution_bin / "ghc-9.10.3"
+        actual_compiler_elf.write_bytes(b"actual ghc compiler ELF fixture")
+        auxiliary_elves = {
+            "ghc-pkg": ghc_distribution_bin / "ghc-pkg-9.10.3",
+            "runghc": ghc_distribution_bin / "runghc-9.10.3",
+            "haddock": ghc_distribution_bin / "haddock-ghc-9.10.3",
+        }
+        for name, executable in auxiliary_elves.items():
+            executable.write_bytes(f"{name} ELF fixture".encode())
+        (ghc_libdir / "settings").write_text(
+            "fixture settings\n",
+            encoding="utf-8",
+        )
+        (ghc_package_db / "package.cache").write_bytes(b"package cache fixture")
         latest_ghc = temporary / "ghc-9.14.1"
         latest_ghc.write_bytes(b"latest ghc fixture")
         hlint = temporary / "hlint"
@@ -622,6 +738,8 @@ class NativeBenchmarkBlockTests(TestCase):
             ghcup,
             stack,
             authoritative_ghc,
+            actual_compiler_elf,
+            *auxiliary_elves.values(),
             latest_ghc,
             hlint,
             stylish,
@@ -849,9 +967,13 @@ class NativeBenchmarkBlockTests(TestCase):
             "ghcup": inherited_fd_path(ghcup),
             "stack": inherited_fd_path(stack),
             "authoritativeGhc": inherited_fd_path(authoritative_ghc),
+            "actualCompilerElf": inherited_fd_path(actual_compiler_elf),
             "latestGhc": inherited_fd_path(latest_ghc),
             "hlint": inherited_fd_path(hlint),
             "stylish": inherited_fd_path(stylish),
+        }
+        auxiliary_fd_paths = {
+            name: inherited_fd_path(path) for name, path in auxiliary_elves.items()
         }
         marker_argv = [
             pinned_fd_paths["markerPython"],
@@ -863,13 +985,71 @@ class NativeBenchmarkBlockTests(TestCase):
         tool_bin = stack_root / "tool-bin"
         tool_bin.mkdir()
         authoritative_ghc_shim = tool_bin / "ghc"
-        authoritative_ghc_shim.symlink_to(pinned_fd_paths["authoritativeGhc"])
-        for auxiliary_name in ("ghc-pkg", "runghc", "haddock"):
-            auxiliary = temporary / auxiliary_name
-            auxiliary.write_bytes(f"{auxiliary_name} fixture".encode())
-            auxiliary.chmod(0o700)
-            (tool_bin / auxiliary_name).symlink_to(auxiliary)
-        tool_path = f"{tool_bin}:{authoritative_ghc.parent}:/usr/bin:/bin"
+        launcher_root = temporary / "sealed-launchers"
+        launcher_root.mkdir()
+        launcher_fd_paths: dict[str, str] = {}
+        launcher_sha256: dict[str, str] = {}
+        for launcher_name in ("ghc", "ghc-pkg", "runghc", "haddock"):
+            launcher = launcher_root / launcher_name
+            launcher.write_text(
+                f"#!/usr/bin/bash\n# sealed {launcher_name} launcher fixture\n",
+                encoding="utf-8",
+            )
+            launcher.chmod(0o500)
+            launcher_fd_paths[launcher_name] = inherited_fd_path(launcher)
+            launcher_sha256[launcher_name] = hashlib.sha256(
+                launcher.read_bytes()
+            ).hexdigest()
+            (tool_bin / launcher_name).symlink_to(
+                launcher_fd_paths[launcher_name]
+            )
+        tool_path = f"{tool_bin}:/usr/bin:/bin"
+        libdir_metadata = _toolchain_tree_metadata(ghc_libdir)
+        distribution_bin_metadata = _toolchain_tree_metadata(
+            ghc_distribution_bin,
+            allow_relative_symlinks=True,
+        )
+        closure_projection = {
+            "approvedWrapperPath": str(authoritative_ghc.resolve()),
+            "approvedWrapperPinnedFdPath": pinned_fd_paths["authoritativeGhc"],
+            "approvedWrapperSha256": authoritative_ghc_sha256,
+            "actualCompilerElfPath": str(actual_compiler_elf.resolve()),
+            "actualCompilerElfPinnedFdPath": pinned_fd_paths["actualCompilerElf"],
+            "actualCompilerElfSha256": hashlib.sha256(
+                actual_compiler_elf.read_bytes()
+            ).hexdigest(),
+            "actualCompilerLibdirPath": str(ghc_libdir.resolve()),
+            "libdirMetadataSha256": libdir_metadata["sha256"],
+            "libdirMetadataEntryCount": libdir_metadata["entryCount"],
+            "libdirMetadataTotalFileBytes": libdir_metadata["totalFileBytes"],
+            "distributionBinPath": str(ghc_distribution_bin.resolve()),
+            "distributionBinMetadataSha256": distribution_bin_metadata["sha256"],
+            "distributionBinMetadataEntryCount": distribution_bin_metadata[
+                "entryCount"
+            ],
+            "auxiliaryElfSha256": {
+                name: hashlib.sha256(path.read_bytes()).hexdigest()
+                for name, path in auxiliary_elves.items()
+            },
+            "auxiliaryElfPinnedFdPath": auxiliary_fd_paths,
+            "outputLauncherSha256": launcher_sha256,
+            "scoringCompilerExecutionBinding": (
+                "sealed-elf-fd-with-validated-install-closure"
+            ),
+        }
+        ghc_install_closure = temporary / "authoritative-ghc-install-closure.json"
+        ghc_install_closure_document = {
+            "schemaVersion": "s1.4x-haskell-ghc-install-closure-v1",
+            "status": "PASS",
+            **closure_projection,
+        }
+        ghc_install_closure_document["closureSha256"] = _canonical_sha256(
+            ghc_install_closure_document
+        )
+        ghc_install_closure.write_text(
+            json.dumps(ghc_install_closure_document, sort_keys=True),
+            encoding="utf-8",
+        )
         ghcup_sha256 = hashlib.sha256(ghcup.read_bytes()).hexdigest()
         stack_sha256 = hashlib.sha256(stack.read_bytes()).hexdigest()
         self.enterContext(
@@ -1048,10 +1228,10 @@ class NativeBenchmarkBlockTests(TestCase):
                 "authoritativeGhcPinnedFdPath": pinned_fd_paths["authoritativeGhc"],
                 "authoritativeGhcSha256": authoritative_ghc_sha256,
                 "authoritativeGhcShimPath": str(authoritative_ghc_shim),
-                "scoringCompilerExecutionBinding": "pinned-fd-path",
-                "toolchainInstallClosurePath": str(authoritative_ghc.parent.resolve()),
+                **closure_projection,
+                "toolchainInstallClosurePath": str(ghc_install_closure.resolve()),
                 "toolchainInstallClosurePolicy": (
-                    "ghc-pkg-and-distribution-auxiliaries-only"
+                    "sealed-critical-elf-fds-and-stable-distribution-metadata"
                 ),
                 "markerPythonPath": str(marker_python),
                 "markerPythonPinnedFdPath": pinned_fd_paths["markerPython"],
@@ -1470,7 +1650,29 @@ class NativeBenchmarkBlockTests(TestCase):
         )
 
         candidate_provenance = receipt_document["provenance"]["candidateProvenance"]
-        self.assertEqual(len(candidate_provenance), 64)
+        self.assertEqual(len(candidate_provenance), 80)
+        self.assertEqual(
+            set(candidate_provenance),
+            {
+                *native_block_module.HASKELL_CANDIDATE_PROVENANCE_FIELDS,
+                "actualCompilerElfPath",
+                "actualCompilerElfPinnedFdPath",
+                "actualCompilerElfSha256",
+                "actualCompilerLibdirPath",
+                "approvedWrapperPath",
+                "approvedWrapperPinnedFdPath",
+                "approvedWrapperSha256",
+                "auxiliaryElfPinnedFdPath",
+                "auxiliaryElfSha256",
+                "distributionBinMetadataEntryCount",
+                "distributionBinMetadataSha256",
+                "distributionBinPath",
+                "libdirMetadataEntryCount",
+                "libdirMetadataSha256",
+                "libdirMetadataTotalFileBytes",
+                "outputLauncherSha256",
+            },
+        )
         old_haskell_fields = {
             "kind",
             "selectedProfilePath",
