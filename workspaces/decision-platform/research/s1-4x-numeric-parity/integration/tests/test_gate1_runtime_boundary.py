@@ -58,11 +58,22 @@ def test_gate2_baseline_report_has_local_non_contract_format() -> None:
         "gate0MergeSha",
         "fixtureFreezeMergeSha",
         "fixtureFreezeReviewedHeadSha",
+        "hostPolicyAmendment",
         "immutableInputs",
         "freezeSemantics",
     }
     assert report["reportFormat"] == "s1.4x-integration-baseline-v1"
-    assert report["freezeSemantics"] == "identity-record-only"
+    assert (
+        report["freezeSemantics"]
+        == "identity-record-with-user-approved-host-policy-amendment"
+    )
+    assert report["hostPolicyAmendment"] == {
+        "approvalToken": "S1_4X_BENCHMARK_HOST_POLICY_APPROVED",
+        "containerIdentitySemantics": "count-only-unverified",
+        "evidenceScope": "same-run-same-host",
+        "maximumRunningContainers": {"before": 0, "after": 4},
+        "minimumAvailableMemoryGiB": {"before": 8, "after": 4},
+    }
     assert report["issue"] == 26
     assert set(report["immutableInputs"]) == {
         "benchmarkPlanSha256",
