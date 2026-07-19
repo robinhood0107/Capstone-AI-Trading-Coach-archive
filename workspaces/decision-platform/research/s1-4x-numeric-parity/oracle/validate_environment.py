@@ -512,7 +512,7 @@ def validate_environment(
             passed=False,
         )
 
-    # affinity pin이 process-visible CPU 수를 줄이기 전에 effective host 분모를 동결한다.
+    # 부모가 이미 CPU 0에 고정됐어도 system logical CPU 수를 host load 분모로 사용한다.
     try:
         logical_cpu_count = source.logical_cpu_count()
         _record(
@@ -521,7 +521,7 @@ def validate_environment(
             expected=">=1",
             actual=logical_cpu_count,
             passed=logical_cpu_count >= 1,
-            evidence={"samplePhase": "PRE_AFFINITY_PIN"},
+            evidence={"countSource": "SYSTEM_LOGICAL_CPU_COUNT"},
         )
     except (OSError, OracleContractError, ValueError):
         logical_cpu_count = 0
@@ -584,7 +584,7 @@ def validate_environment(
             "samples": policy.load_samples,
             "intervalSeconds": policy.sample_interval_seconds,
             "maxQuietWaitSeconds": policy.max_quiet_wait_seconds,
-            "logicalCpuCountSource": "PRE_AFFINITY_PIN",
+            "logicalCpuCountSource": "SYSTEM_LOGICAL_CPU_COUNT",
         },
         actual=load_result.get("windows"),
         passed=bool(load_result["passed"]),
