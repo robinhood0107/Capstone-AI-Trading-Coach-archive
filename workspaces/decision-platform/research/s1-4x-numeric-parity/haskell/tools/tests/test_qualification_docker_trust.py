@@ -59,7 +59,7 @@ class QualificationDockerTrustTests(unittest.TestCase):
         self,
     ) -> None:
         helper = load_helper()
-        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+        with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary).resolve()
             output = root / "qualification"
             output.mkdir(mode=0o700)
@@ -184,7 +184,7 @@ class QualificationDockerTrustTests(unittest.TestCase):
         self,
     ) -> None:
         helper = load_helper()
-        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+        with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary).resolve()
             output = root / "qualification"
             output.mkdir(mode=0o700)
@@ -323,7 +323,7 @@ class QualificationDockerTrustTests(unittest.TestCase):
         self,
     ) -> None:
         helper = load_helper()
-        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+        with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary).resolve()
             trusted = root / "docker.exe"
             write_executable(trusted, b"trusted docker bytes")
@@ -342,7 +342,7 @@ class QualificationDockerTrustTests(unittest.TestCase):
 
     def test_route_rejects_dead_owner_and_symlink_swap(self) -> None:
         helper = load_helper()
-        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+        with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary).resolve()
             output = root / "qualification"
             output.mkdir(mode=0o700)
@@ -396,7 +396,7 @@ class QualificationDockerTrustTests(unittest.TestCase):
 
     def test_route_rejects_retained_fd_drift(self) -> None:
         helper = load_helper()
-        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+        with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary).resolve()
             output = root / "qualification"
             output.mkdir(mode=0o700)
@@ -426,7 +426,7 @@ class QualificationDockerTrustTests(unittest.TestCase):
 
     def test_route_rejects_output_bound_docker_config_drift(self) -> None:
         helper = load_helper()
-        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+        with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary).resolve()
             output = root / "qualification"
             output.mkdir(mode=0o700)
