@@ -443,7 +443,7 @@ def main() -> int:
             / ".scala-build/project_jmh"
         )
         generator_stdout = (
-            f'Processing 147 classes from {generator_input} '
+            f'Processing 149 classes from {generator_input} '
             'with "reflection" generator\n'
             f"Writing out Java source to {generator_output / 'sources'} "
             f"and resources to {generator_output / 'resources'}\n"
@@ -457,7 +457,7 @@ def main() -> int:
             evidence_dir=generated_classes.parent,
         )
         assert classpath.class_output == class_output
-        assert classpath.processed_class_count == 147
+        assert classpath.processed_class_count == 149
         assert classpath.generator_class_input == generator_input
         assert classpath.generated_source_root == generated_root
         assert classpath.generated_resource_root == generator_output / "resources"
@@ -505,7 +505,20 @@ def main() -> int:
             "JMH_RUN_STDOUT_BINDING_INVALID",
             lambda: helper.require_jmh_stdout_binding(
                 generator_stdout,
-                post_run_stdout.replace("Processing 147", "Processing 146"),
+                post_run_stdout.replace("Processing 149", "Processing 148"),
+            ),
+        )
+        expect_error(
+            helper,
+            "JMH_GENERATOR_STDOUT_INVALID",
+            lambda: helper.classpath_closure(
+                generator_stdout.replace(
+                    "Processing 149",
+                    "Processing 150",
+                ),
+                workspace=workspace,
+                coursier_cache=coursier,
+                evidence_dir=generated_classes.parent,
             ),
         )
         expect_error(

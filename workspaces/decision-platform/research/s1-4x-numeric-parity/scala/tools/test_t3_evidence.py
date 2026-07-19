@@ -749,7 +749,7 @@ def selector_fixture(
                 "jmh-core/1.37/jmh-core-1.37.jar"
             )
             generator_stdout_prefix = (
-                f'Processing 147 classes from {generator_input_path} '
+                f'Processing 149 classes from {generator_input_path} '
                 'with "reflection" generator\n'
                 f"Writing out Java source to {generated_source_path} "
                 f"and resources to {generated_resource_path}\n"
@@ -828,7 +828,7 @@ def selector_fixture(
                 },
                 "jmhGenerator": {
                     "generatorId": "reflection",
-                    "processedClassCount": 147,
+                    "processedClassCount": 149,
                     "classInputPathId": (
                         "SCALA_WORKSPACE/.scala-build/"
                         "selector/classes/main"
