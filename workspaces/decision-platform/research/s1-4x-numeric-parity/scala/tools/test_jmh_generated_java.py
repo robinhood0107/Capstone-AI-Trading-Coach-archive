@@ -411,6 +411,9 @@ def main() -> int:
             b"compiler-hints\n"
         )
         generated_classes.mkdir(parents=True)
+        (generated_classes / "Generated.class").write_bytes(
+            b"generated-class\n"
+        )
         dependency.parent.mkdir(parents=True)
         dependency.write_bytes(b"jar-bytes\n")
         for index, relative in enumerate(expected, start=1):
