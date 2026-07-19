@@ -317,6 +317,7 @@ class OciCorrectnessContractTests(unittest.TestCase):
     def test_oci_flow_uses_exact_client_sha_and_per_command_trust_snapshots(
         self,
     ) -> None:
+        helper = load_helper()
         helper_source = HELPER_PATH.read_text(encoding="utf-8")
         wrapper_source = WRAPPER_PATH.read_text(encoding="utf-8")
 

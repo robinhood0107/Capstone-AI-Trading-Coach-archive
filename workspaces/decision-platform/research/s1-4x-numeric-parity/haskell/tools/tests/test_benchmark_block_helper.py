@@ -439,7 +439,15 @@ class BenchmarkBlockHelperTests(unittest.TestCase):
             marker = root / "ghc-reached.txt"
             ghcup_source = root / "ghcup"
             stack_source = root / "stack"
-            ghc_source = root / "ghc"
+            install = root / "toolchain" / "ghc" / "9.10.3"
+            wrapper_bin = install / "bin"
+            distribution = install / "lib" / "ghc-9.10.3"
+            distribution_bin = distribution / "bin"
+            libdir = distribution / "lib"
+            wrapper_bin.mkdir(parents=True)
+            distribution_bin.mkdir(parents=True)
+            libdir.mkdir(parents=True)
+            ghc_source = wrapper_bin / "ghc-9.10.3"
             shared_prelude = (
                 "#!/usr/bin/python3\n"
                 "import os\n"
@@ -479,18 +487,39 @@ class BenchmarkBlockHelperTests(unittest.TestCase):
             )
             write_executable(
                 ghc_source,
+                "#!/bin/bash\n"
+                f'exedir="{distribution_bin}"\n'
+                'exeprog="./ghc-9.10.3"\n'
+                f'executablename="{distribution_bin}/./ghc-9.10.3"\n'
+                f'bindir="{wrapper_bin}"\n'
+                f'libdir="{libdir}"\n'
+                f'docdir="{install}/share/doc/ghc-9.10.3"\n'
+                f'includedir="{install}/include"\n'
+                "\n"
+                'exec "$executablename" -B"$libdir" ${1+"$@"}\n',
+            )
+            write_executable(
+                distribution_bin / "ghc-9.10.3",
                 "#!/usr/bin/python3\n"
                 "import os\n"
                 "from pathlib import Path\n"
                 "Path(os.environ['TEST_MARKER']).write_text("
                 "os.readlink(os.environ['TEST_GHC_SHIM']), encoding='utf-8')\n",
             )
-            for auxiliary_name in ("ghc-pkg", "runghc", "haddock"):
+            for auxiliary_name in (
+                "ghc-pkg-9.10.3",
+                "runghc-9.10.3",
+                "haddock-ghc-9.10.3",
+            ):
                 write_executable(
-                    root / auxiliary_name,
+                    distribution_bin / auxiliary_name,
                     "#!/usr/bin/python3\n"
                     "raise SystemExit(0)\n",
                 )
+            (libdir / "settings").write_text(
+                "fixture distribution metadata\n",
+                encoding="utf-8",
+            )
             descriptors = [
                 os.open(path, os.O_RDONLY)
                 for path in (ghcup_source, stack_source, ghc_source)
@@ -526,22 +555,17 @@ class BenchmarkBlockHelperTests(unittest.TestCase):
                 ghcup, stack, ghc = pinned
                 stack_root = root / "stack-root-benchmark-probe"
                 stack_root.mkdir(mode=0o700)
-                tool_path, ghc_shim = helper.prepare_authoritative_ghc_shim(
+                closure = helper.prepare_authoritative_ghc_closure(
                     stack_root=stack_root,
                     authoritative_ghc=ghc,
                 )
+                tool_path = closure.tool_path
+                ghc_shim = closure.ghc_shim
                 self.assertEqual(
                     sorted(path.name for path in ghc_shim.parent.iterdir()),
                     ["ghc", "ghc-pkg", "haddock", "runghc"],
                 )
-                self.assertEqual(os.readlink(ghc_shim), str(ghc.fd_path))
-                for auxiliary_name in ("ghc-pkg", "runghc", "haddock"):
-                    auxiliary = ghc_shim.parent / auxiliary_name
-                    self.assertTrue(auxiliary.is_symlink())
-                    self.assertEqual(
-                        auxiliary.resolve(strict=True),
-                        root / auxiliary_name,
-                    )
+                self.assertNotEqual(os.readlink(ghc_shim), str(ghc.fd_path))
                 self.assertEqual(tool_path.split(":", 1)[0], str(ghc_shim.parent))
                 command = helper.build_stack_benchmark_command(
                     ghcup_bin=ghcup.fd_path,
@@ -561,7 +585,14 @@ class BenchmarkBlockHelperTests(unittest.TestCase):
                 environment.update(
                     {
                         "TEST_PASS_FDS": ",".join(
-                            str(descriptor) for descriptor in descriptors
+                            str(descriptor)
+                            for descriptor in (
+                                *descriptors,
+                                *(
+                                    pinned.descriptor
+                                    for pinned in closure.pinned_objects
+                                ),
+                            )
                         ),
                         "TEST_GHC_SHIM": str(ghc_shim),
                         "TEST_MARKER": str(marker),
@@ -571,16 +602,29 @@ class BenchmarkBlockHelperTests(unittest.TestCase):
                     command,
                     cwd=root,
                     environment=environment,
-                    pinned_executables=pinned,
+                    pinned_executables=(
+                        *pinned,
+                        *closure.pinned_executables,
+                    ),
                     capture_output=True,
+                    pinned_files=closure.pinned_launchers,
                 )
                 self.assertEqual(
                     completed.returncode,
                     0,
                     completed.stderr.decode("utf-8", errors="replace"),
                 )
-                self.assertEqual(marker.read_text(encoding="utf-8"), str(ghc.fd_path))
+                self.assertEqual(
+                    marker.read_text(encoding="utf-8"),
+                    os.readlink(ghc_shim),
+                )
             finally:
+                for pinned_object in getattr(
+                    locals().get("closure"),
+                    "pinned_objects",
+                    (),
+                ):
+                    os.close(pinned_object.descriptor)
                 for descriptor in descriptors:
                     os.close(descriptor)
 
