@@ -15,6 +15,7 @@ readonly GIT_BIN=/usr/bin/git
 readonly UV_BIN="${S1_4X_UV_BIN:?S1_4X_UV_BIN is required}"
 readonly PYTHON_BIN="${S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH:?S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH is required}"
 readonly PYTHON_SHA256="${S1_4X_BENCHMARK_PYTHON_SHA256:?S1_4X_BENCHMARK_PYTHON_SHA256 is required}"
+readonly LARGE_FIXTURE_ROOT="${S1_4X_LARGE_FIXTURE_ROOT:?S1_4X_LARGE_FIXTURE_ROOT is required}"
 if [[ ! "$UV_BIN" =~ ^/proc/self/fd/[0-9]+$ ]]; then
   echo "UV executable must be inherited through a sealed fd" >&2
   exit 69
@@ -58,4 +59,5 @@ exec "$UV_BIN" run --frozen --no-config --python "$PYTHON_BIN" \
   --project "$PROJECT" \
   python "$S1_4X/integration/python_benchmark_block.py" \
   --repo-root "$ROOT" \
+  --large-fixture-root "$LARGE_FIXTURE_ROOT" \
   "$@"

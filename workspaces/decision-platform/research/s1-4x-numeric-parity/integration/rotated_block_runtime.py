@@ -812,7 +812,7 @@ def _benchmark_environment(
         raise ContractError("BENCHMARK_RUNTIME_DEPENDENCY_SET_MISMATCH")
     if tuple(runtime_evidence) != expected_evidence:
         raise ContractError("BENCHMARK_RUNTIME_EVIDENCE_SET_MISMATCH")
-    if boundary_id in {"scala", "haskell"} and large_fixture_input is None:
+    if boundary_id in BOUNDARY_IDS and large_fixture_input is None:
         raise ContractError("LARGE_FIXTURE_INPUT_NOT_VALIDATED")
     for role, pinned in (*runtime_dependencies.items(), *runtime_evidence.items()):
         if (
@@ -885,7 +885,7 @@ def _benchmark_environment(
                 ],
             }
         )
-    if boundary_id in {"scala", "haskell"}:
+    if boundary_id in BOUNDARY_IDS:
         assert large_fixture_input is not None
         environment["S1_4X_LARGE_FIXTURE_ROOT"] = str(
             large_fixture_input.root

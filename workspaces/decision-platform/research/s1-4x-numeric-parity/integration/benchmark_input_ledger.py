@@ -7,6 +7,7 @@ import argparse
 import copy
 import hashlib
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,10 @@ sys.path.insert(0, str(BENCHMARKS))
 from benchmark_contract import (  # type: ignore[import-not-found]  # noqa: E402
     ContractError,
     sha256_file,
+)
+from materialize_large_fixtures import (  # noqa: E402
+    FIXTURES as MATERIALIZED_FIXTURES,
+    ROOT_PATH_ID,
 )
 from validate_benchmark_report import validate_plan  # type: ignore[import-not-found]  # noqa: E402
 
@@ -57,6 +62,9 @@ GENERATOR_FIELDS = {
     "distribution",
     "parameters",
     "chunkLength",
+}
+MATERIALIZED_FIXTURE_BY_PAYLOAD = {
+    fixture.payload_name: fixture for fixture in MATERIALIZED_FIXTURES
 }
 
 
@@ -106,6 +114,7 @@ def _contract_file_sha256(
 
 def _generated_fixture_evidence(
     large_root_text: str,
+    s1_4x_root_text: str,
     file_name: str,
     count: int,
 ) -> dict[str, Any]:
@@ -130,7 +139,14 @@ def _generated_fixture_evidence(
         != generated_root.resolve(strict=True)
     ):
         raise GateError(f"GENERATED_FIXTURE_UNSAFE:{file_name}")
-    s1_4x = large.parents[2]
+    s1_4x = Path(s1_4x_root_text)
+    if (
+        not s1_4x.is_absolute()
+        or s1_4x.is_symlink()
+        or not s1_4x.is_dir()
+        or s1_4x.resolve(strict=True) != s1_4x
+    ):
+        raise GateError("GENERATED_FIXTURE_PROVENANCE_UNSAFE")
     contract_manifest_path = s1_4x / "contract/contract-manifest.v1.json"
     generator_script = s1_4x / "oracle/generate_large_fixtures.py"
     if (
@@ -154,8 +170,12 @@ def _generated_fixture_evidence(
         root_suffix="s1-4x-numeric-parity/oracle",
         relative_path="generate_large_fixtures.py",
     )
+    materialized_expectation = MATERIALIZED_FIXTURE_BY_PAYLOAD.get(file_name)
     if (
-        sha256_file(manifest_path) != expected_manifest_sha
+        materialized_expectation is None
+        or expected_manifest_sha != materialized_expectation.manifest_sha256
+        or manifest_path.stat().st_size != materialized_expectation.manifest_byte_length
+        or sha256_file(manifest_path) != expected_manifest_sha
         or sha256_file(generator_script) != expected_generator_sha
     ):
         raise GateError("GENERATED_FIXTURE_PROVENANCE_DIGEST_MISMATCH")
@@ -172,6 +192,8 @@ def _generated_fixture_evidence(
         or manifest["shape"] != [count]
         or manifest["count"] != count
         or manifest["byteLength"] != count * 8
+        or manifest["byteLength"] != materialized_expectation.payload_byte_length
+        or manifest["sha256"] != materialized_expectation.payload_sha256
         or not isinstance(manifest["generator"], dict)
         or set(manifest["generator"]) != GENERATOR_FIELDS
         or manifest["generator"]["chunkLength"] != count
@@ -184,12 +206,10 @@ def _generated_fixture_evidence(
         raise GateError(f"GENERATED_FIXTURE_DIGEST_MISMATCH:{file_name}")
     return {
         "fixtureId": manifest["fixtureId"],
-        "manifestPath": (
-            "workspaces/decision-platform/research/s1-4x-numeric-parity/"
-            f"contract/fixtures/large/{manifest_path.name}"
-        ),
+        "manifestPath": f"{ROOT_PATH_ID}/large/{manifest_path.name}",
         "manifestSha256": expected_manifest_sha,
         "fileName": file_name,
+        "payloadPath": f"{ROOT_PATH_ID}/large/generated/{file_name}",
         "payloadSha256": manifest["sha256"],
         "byteLength": manifest["byteLength"],
         "elementCount": manifest["count"],
@@ -206,16 +226,76 @@ def generated_fixture_evidence(
     large_root: Path,
     file_name: str,
     count: int,
+    *,
+    s1_4x_root: Path | None = None,
 ) -> dict[str, Any]:
     """Manifest, contract freeze, generator source와 payload bytes를 함께 검증한다."""
 
+    resolved_large = large_root.resolve(strict=True)
+    inferred_root = resolved_large.parents[2]
+    if not (inferred_root / "contract/contract-manifest.v1.json").is_file():
+        inferred_root = Path(__file__).resolve().parents[1]
+    provenance_root = (
+        s1_4x_root.resolve(strict=True) if s1_4x_root is not None else inferred_root
+    )
     return copy.deepcopy(
         _generated_fixture_evidence(
-            str(large_root.resolve(strict=True)),
+            str(resolved_large),
+            str(provenance_root),
             file_name,
             count,
         )
     )
+
+
+def _materialized_large_directory(
+    *,
+    large_fixture_root: Path,
+    repo_root: Path,
+) -> Path:
+    """Benchmark ledger는 materializer output root만 받고 tracked payload fallback을 거부한다."""
+
+    repo = repo_root.resolve(strict=True)
+    if not large_fixture_root.is_absolute():
+        raise GateError("BENCHMARK_LARGE_FIXTURE_ROOT_INVALID")
+    try:
+        root = large_fixture_root.resolve(strict=True)
+    except OSError as exc:
+        raise GateError("BENCHMARK_LARGE_FIXTURE_ROOT_INVALID") from exc
+    tracked_fixture_parent = (
+        repo / "workspaces/decision-platform/research/s1-4x-numeric-parity/"
+        "contract/fixtures"
+    ).resolve(strict=True)
+    if (
+        root != large_fixture_root
+        or large_fixture_root.is_symlink()
+        or not root.is_dir()
+        or root in {tracked_fixture_parent, tracked_fixture_parent / "large"}
+    ):
+        raise GateError("BENCHMARK_LARGE_FIXTURE_ROOT_INVALID")
+    large = root / "large"
+    generated = large / "generated"
+    try:
+        root_names = {entry.name for entry in root.iterdir()}
+        large_names = {entry.name for entry in large.iterdir()}
+        generated_names = {entry.name for entry in generated.iterdir()}
+    except OSError as exc:
+        raise GateError("BENCHMARK_LARGE_FIXTURE_ROOT_INVALID") from exc
+    expected_manifest_names = {
+        fixture.manifest_name for fixture in MATERIALIZED_FIXTURES
+    }
+    expected_payload_names = {fixture.payload_name for fixture in MATERIALIZED_FIXTURES}
+    if (
+        root_names != {"large"}
+        or large.is_symlink()
+        or not large.is_dir()
+        or generated.is_symlink()
+        or not generated.is_dir()
+        or large_names != expected_manifest_names | {"generated"}
+        or generated_names != expected_payload_names
+    ):
+        raise GateError("BENCHMARK_LARGE_FIXTURE_ROOT_INVALID")
+    return large
 
 
 def _case_input_slices(case: dict[str, Any]) -> list[dict[str, Any]]:
@@ -293,6 +373,7 @@ def build_input_ledger(
     plan: dict[str, Any],
     plan_path: Path,
     repo_root: Path,
+    large_fixture_root: Path,
     boundary_id: str,
     selector_id: str,
 ) -> dict[str, Any]:
@@ -333,13 +414,18 @@ def build_input_ledger(
         for case in case_entries
         for input_slice in case["inputSlices"]
     }
-    large = (
-        repo
-        / "workspaces/decision-platform/research/s1-4x-numeric-parity/"
-        "contract/fixtures/large"
+    large = _materialized_large_directory(
+        large_fixture_root=large_fixture_root,
+        repo_root=repo,
     )
     fixtures = [
-        generated_fixture_evidence(large, *FIXTURE_FILES[fixture_id])
+        generated_fixture_evidence(
+            large,
+            *FIXTURE_FILES[fixture_id],
+            s1_4x_root=(
+                repo / "workspaces/decision-platform/research/s1-4x-numeric-parity"
+            ),
+        )
         for fixture_id in FIXTURE_ORDER
         if fixture_id in used_fixture_ids
     ]
@@ -354,6 +440,7 @@ def build_input_ledger(
         "planSha256": sha256_file(plan_path),
         "boundaryId": boundary_id,
         "selectorId": selector_id,
+        "materializedRootPathId": ROOT_PATH_ID,
         "generatorScriptPath": (
             "workspaces/decision-platform/research/s1-4x-numeric-parity/"
             "oracle/generate_large_fixtures.py"
@@ -371,6 +458,7 @@ def validate_input_ledger(
     plan: dict[str, Any],
     plan_path: Path,
     repo_root: Path,
+    large_fixture_root: Path,
     boundary_id: str,
     selector_id: str,
 ) -> dict[str, Any]:
@@ -380,6 +468,7 @@ def validate_input_ledger(
         plan=plan,
         plan_path=plan_path,
         repo_root=repo_root,
+        large_fixture_root=large_fixture_root,
         boundary_id=boundary_id,
         selector_id=selector_id,
     )
@@ -392,6 +481,7 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo-root", type=Path, required=True)
     parser.add_argument("--plan", type=Path, required=True)
+    parser.add_argument("--large-fixture-root", type=Path)
     parser.add_argument("--boundary", required=True)
     parser.add_argument("--selector", required=True)
     parser.add_argument("--output", type=Path, required=True)
@@ -403,10 +493,17 @@ def main(argv: list[str] | None = None) -> int:
     try:
         plan_path = arguments.plan.resolve(strict=True)
         plan = validate_plan(plan_path)
+        large_fixture_root = arguments.large_fixture_root
+        if large_fixture_root is None:
+            configured_root = os.environ.get("S1_4X_LARGE_FIXTURE_ROOT")
+            if not configured_root:
+                raise GateError("BENCHMARK_LARGE_FIXTURE_ROOT_INVALID")
+            large_fixture_root = Path(configured_root)
         ledger = build_input_ledger(
             plan=plan,
             plan_path=plan_path,
             repo_root=arguments.repo_root,
+            large_fixture_root=large_fixture_root,
             boundary_id=arguments.boundary,
             selector_id=arguments.selector,
         )

@@ -9,6 +9,7 @@ import json
 import math
 import os
 import re
+import stat
 import statistics
 import sys
 import tempfile
@@ -181,6 +182,113 @@ HASKELL_RUNTIME_IDENTITY_FIELDS = {
     "executedBenchmarkPath",
     "executedBenchmarkSha256",
     "status",
+}
+HASKELL_CANDIDATE_PROVENANCE_FIELDS = {
+    "kind",
+    "selectedProfilePath",
+    "selectedProfileSha256",
+    "selectedProfileId",
+    "sourceInputManifestPath",
+    "sourceInputManifestSha256",
+    "effectiveCompilerFlagsSha256",
+    "runtimeIdentityPath",
+    "runtimeIdentitySha256",
+    "executedBenchmarkPath",
+    "executedBenchmarkSha256",
+    "approvedWrapperPath",
+    "approvedWrapperPinnedFdPath",
+    "approvedWrapperSha256",
+    "authoritativeGhcPath",
+    "authoritativeGhcPinnedFdPath",
+    "authoritativeGhcSha256",
+    "authoritativeGhcShimPath",
+    "actualCompilerElfPath",
+    "actualCompilerElfPinnedFdPath",
+    "actualCompilerElfSha256",
+    "actualCompilerLibdirPath",
+    "libdirMetadataSha256",
+    "libdirMetadataEntryCount",
+    "libdirMetadataTotalFileBytes",
+    "distributionBinPath",
+    "distributionBinMetadataSha256",
+    "distributionBinMetadataEntryCount",
+    "auxiliaryElfSha256",
+    "auxiliaryElfPinnedFdPath",
+    "outputLauncherSha256",
+    "scoringCompilerExecutionBinding",
+    "toolchainInstallClosurePath",
+    "toolchainInstallClosurePolicy",
+    "markerPythonPath",
+    "markerPythonPinnedFdPath",
+    "markerPythonSha256",
+    "markerScriptPath",
+    "markerScriptPinnedFdPath",
+    "markerScriptSha256",
+    "markerArgv",
+    "markerArgvSha256",
+    "inputLedgerScriptPath",
+    "inputLedgerScriptPinnedFdPath",
+    "inputLedgerScriptSha256",
+    "nativeBlockScriptPath",
+    "nativeBlockScriptPinnedFdPath",
+    "nativeBlockScriptSha256",
+    "ghcupPath",
+    "ghcupPinnedFdPath",
+    "ghcupSha256",
+    "stackPath",
+    "stackPinnedFdPath",
+    "stackSha256",
+    "latestGhcPath",
+    "latestGhcPinnedFdPath",
+    "latestGhcSha256",
+    "hlintPath",
+    "hlintPinnedFdPath",
+    "hlintSha256",
+    "stylishPath",
+    "stylishPinnedFdPath",
+    "stylishSha256",
+    "stackYamlPath",
+    "stackYamlSha256",
+    "stackRootPath",
+    "stackWorkDirectory",
+    "stackWorkDirectoryAbsolute",
+    "toolPath",
+    "selectedGhcOptions",
+    "baselineCorrectnessSourcePath",
+    "baselineCorrectnessSha256",
+    "optimizedCorrectnessSourcePath",
+    "optimizedCorrectnessSha256",
+    "qualificationArtifactSourcePath",
+    "qualificationArtifactSha256",
+    "toolchainLockPath",
+    "toolchainLockSha256",
+    "mergedToolchainProvenancePath",
+    "mergedToolchainProvenanceSha256",
+}
+HASKELL_GHC_CLOSURE_PROJECTION_FIELDS = {
+    "approvedWrapperPath",
+    "approvedWrapperPinnedFdPath",
+    "approvedWrapperSha256",
+    "actualCompilerElfPath",
+    "actualCompilerElfPinnedFdPath",
+    "actualCompilerElfSha256",
+    "actualCompilerLibdirPath",
+    "libdirMetadataSha256",
+    "libdirMetadataEntryCount",
+    "libdirMetadataTotalFileBytes",
+    "distributionBinPath",
+    "distributionBinMetadataSha256",
+    "distributionBinMetadataEntryCount",
+    "auxiliaryElfSha256",
+    "auxiliaryElfPinnedFdPath",
+    "outputLauncherSha256",
+    "scoringCompilerExecutionBinding",
+}
+HASKELL_GHC_CLOSURE_FIELDS = {
+    "schemaVersion",
+    "status",
+    "closureSha256",
+    *HASKELL_GHC_CLOSURE_PROJECTION_FIELDS,
 }
 SCALA_RUNTIME_SOURCE_PATHS = (
     "benchmarks/scala/ai/trading/coach/s14x/benchmark/BenchmarkInvocation.scala",
@@ -489,6 +597,14 @@ FROZEN_JAVA_EXECUTABLE_SHA256 = (
 FROZEN_GHCUP_SHA256 = "9ed5da5449b48043a0d17e767c05d2ef585e25a639bb934329496c6d2fad9cf8"
 FROZEN_STACK_SHA256 = "923dbd137756652c67b376e2447c655b87fcc373f4d104b5073bca913471ecbe"
 FROZEN_GHC_910_SHA256 = "d0c0dd79a1bcc5dce3c9e73613c1be51f61b78d5ef7c0970ffe9f142a90a5e2c"
+FROZEN_GHC_910_COMPILER_ELF_SHA256 = (
+    "560b354d05aa626c66f6d9ef04139c3746e4000acaf272667c393ce86336a45f"
+)
+FROZEN_GHC_910_AUXILIARY_ELF_SHA256 = {
+    "ghc-pkg": "03792b0e7f08aed4553564271753cc290ddff649171c8f2b87822a6e32def7b7",
+    "runghc": "9c99cc70faf68c180d27ab2c8436e4415b13a920f0912327bda8a42e8b9bf339",
+    "haddock": "bbb8c400078b913fe1f13e126da6724ec06fd5dd7e7db36e761e8ee72c8f6984",
+}
 FROZEN_GHC_914_SHA256 = "ecfd54b4161699f574d2b163bdc817c54df08a08a310323e43b41ab5fc413ef1"
 FROZEN_HLINT_SHA256 = "3ff3fb4b571876d668ddf4ad0245769c19a640283fabb0c2629038aa34197f62"
 FROZEN_STYLISH_HASKELL_SHA256 = (
@@ -547,6 +663,488 @@ def _canonical_sha256(value: Any) -> str:
             sort_keys=True,
         ).encode("utf-8")
     ).hexdigest()
+
+
+def _portable_regular_path(
+    value: Any,
+    *,
+    sha256_value: Any,
+    error: str,
+    expected_path: Path | None = None,
+    expected_sha256: str | None = None,
+    executable: bool = False,
+) -> Path:
+    """Persistent provenance path는 canonical source identity이며 raw proc FD가 아니다."""
+
+    if (
+        not isinstance(value, str)
+        or not isinstance(sha256_value, str)
+        or SHA256.fullmatch(sha256_value) is None
+    ):
+        raise GateError(error)
+    path = Path(value)
+    try:
+        metadata = path.lstat()
+        resolved = path.resolve(strict=True)
+    except OSError as exc:
+        raise GateError(error) from exc
+    if (
+        not path.is_absolute()
+        or resolved != path
+        or stat.S_ISLNK(metadata.st_mode)
+        or not stat.S_ISREG(metadata.st_mode)
+        or (executable and metadata.st_mode & 0o111 == 0)
+        or (expected_path is not None and path != expected_path)
+        or (expected_sha256 is not None and sha256_value != expected_sha256)
+        or sha256_file(path) != sha256_value
+    ):
+        raise GateError(error)
+    return path
+
+
+def _portable_directory_path(
+    value: Any,
+    *,
+    error: str,
+    expected_path: Path | None = None,
+) -> Path:
+    """Persistent directory provenance는 absolute canonical non-symlink path다."""
+
+    if not isinstance(value, str):
+        raise GateError(error)
+    path = Path(value)
+    try:
+        metadata = path.lstat()
+        resolved = path.resolve(strict=True)
+    except OSError as exc:
+        raise GateError(error) from exc
+    if (
+        not path.is_absolute()
+        or resolved != path
+        or stat.S_ISLNK(metadata.st_mode)
+        or not stat.S_ISDIR(metadata.st_mode)
+        or (expected_path is not None and path != expected_path)
+    ):
+        raise GateError(error)
+    return path
+
+
+def _live_fd_sha256(
+    value: Any,
+    *,
+    expected_sha256: str,
+    error: str,
+    executable: bool,
+) -> int:
+    """Inherited `/proc/self/fd/N` witness를 살아 있는 같은 descriptor에서 hash한다."""
+
+    descriptor = _fd_descriptor(value, error=error)
+    if SHA256.fullmatch(expected_sha256) is None:
+        raise GateError(error)
+    try:
+        before = os.fstat(descriptor)
+    except OSError as exc:
+        raise GateError(error) from exc
+    if (
+        not stat.S_ISREG(before.st_mode)
+        or before.st_size < 0
+        or before.st_size > 1024 * 1024 * 1024
+        or (executable and before.st_mode & 0o111 == 0)
+    ):
+        raise GateError(error)
+    digest = hashlib.sha256()
+    offset = 0
+    while offset < before.st_size:
+        try:
+            chunk = os.pread(
+                descriptor,
+                min(1024 * 1024, before.st_size - offset),
+                offset,
+            )
+        except OSError as exc:
+            raise GateError(error) from exc
+        if not chunk:
+            raise GateError(error)
+        digest.update(chunk)
+        offset += len(chunk)
+    try:
+        after = os.fstat(descriptor)
+    except OSError as exc:
+        raise GateError(error) from exc
+    identity_fields = (
+        "st_dev",
+        "st_ino",
+        "st_size",
+        "st_mtime_ns",
+        "st_ctime_ns",
+        "st_nlink",
+    )
+    if (
+        any(
+            getattr(before, field) != getattr(after, field) for field in identity_fields
+        )
+        or digest.hexdigest() != expected_sha256
+    ):
+        raise GateError(error)
+    return descriptor
+
+
+def _fd_descriptor(value: Any, *, error: str) -> int:
+    """Live witness 또는 producer-time receipt의 sealed FD 표기를 strict parsing한다."""
+
+    matched = (
+        re.fullmatch(r"/proc/self/fd/([0-9]+)", value)
+        if isinstance(value, str)
+        else None
+    )
+    if matched is None:
+        raise GateError(error)
+    descriptor = int(matched.group(1))
+    if descriptor < 3 or value != f"/proc/self/fd/{descriptor}":
+        raise GateError(error)
+    return descriptor
+
+
+def _toolchain_tree_records(
+    root: Path,
+    *,
+    allow_relative_symlinks: bool,
+    error: str,
+) -> tuple[list[dict[str, Any]], int]:
+    """GHC install tree의 stat identity를 producer와 같은 canonical 순서로 읽는다."""
+
+    records: list[dict[str, Any]] = []
+    total_file_bytes = 0
+    pending = [root]
+    while pending:
+        directory = pending.pop()
+        relative_directory = (
+            "." if directory == root else directory.relative_to(root).as_posix()
+        )
+        try:
+            directory_metadata = os.lstat(directory)
+        except OSError as exc:
+            raise GateError(error) from exc
+        if not stat.S_ISDIR(directory_metadata.st_mode):
+            raise GateError(error)
+        records.append(
+            {
+                "path": relative_directory,
+                "type": "directory",
+                "device": directory_metadata.st_dev,
+                "inode": directory_metadata.st_ino,
+                "mode": directory_metadata.st_mode,
+                "size": directory_metadata.st_size,
+                "mtimeNs": directory_metadata.st_mtime_ns,
+                "ctimeNs": directory_metadata.st_ctime_ns,
+                "linkCount": directory_metadata.st_nlink,
+            }
+        )
+        try:
+            entries = sorted(
+                os.scandir(directory),
+                key=lambda entry: os.fsencode(entry.name),
+                reverse=True,
+            )
+        except OSError as exc:
+            raise GateError(error) from exc
+        for entry in entries:
+            path = Path(entry.path)
+            relative = path.relative_to(root).as_posix()
+            try:
+                metadata = entry.stat(follow_symlinks=False)
+            except OSError as exc:
+                raise GateError(error) from exc
+            common = {
+                "path": relative,
+                "device": metadata.st_dev,
+                "inode": metadata.st_ino,
+                "mode": metadata.st_mode,
+                "size": metadata.st_size,
+                "mtimeNs": metadata.st_mtime_ns,
+                "ctimeNs": metadata.st_ctime_ns,
+                "linkCount": metadata.st_nlink,
+            }
+            if stat.S_ISLNK(metadata.st_mode):
+                if not allow_relative_symlinks:
+                    raise GateError(error)
+                try:
+                    target = os.readlink(path)
+                    target_path = Path(target)
+                    resolved = (path.parent / target_path).resolve(strict=True)
+                    resolved.relative_to(root)
+                except (OSError, ValueError) as exc:
+                    raise GateError(error) from exc
+                if target_path.is_absolute() or ".." in target_path.parts:
+                    raise GateError(error)
+                records.append({**common, "type": "symlink", "target": target})
+            elif stat.S_ISDIR(metadata.st_mode):
+                pending.append(path)
+            elif stat.S_ISREG(metadata.st_mode):
+                if metadata.st_nlink != 1:
+                    raise GateError(error)
+                total_file_bytes += metadata.st_size
+                records.append({**common, "type": "regular"})
+            else:
+                raise GateError(error)
+    records.sort(key=lambda record: os.fsencode(record["path"]))
+    return records, total_file_bytes
+
+
+def _toolchain_tree_metadata(
+    root: Path,
+    *,
+    allow_relative_symlinks: bool,
+    error: str,
+) -> tuple[str, int, int]:
+    """연속 두 snapshot이 같은 GHC tree만 receipt metadata와 비교한다."""
+
+    canonical_root = _portable_directory_path(
+        str(root),
+        expected_path=root,
+        error=error,
+    )
+    first_records, first_bytes = _toolchain_tree_records(
+        canonical_root,
+        allow_relative_symlinks=allow_relative_symlinks,
+        error=error,
+    )
+    second_records, second_bytes = _toolchain_tree_records(
+        canonical_root,
+        allow_relative_symlinks=allow_relative_symlinks,
+        error=error,
+    )
+    if first_records != second_records or first_bytes != second_bytes:
+        raise GateError(error)
+    return _canonical_sha256(first_records), len(first_records), first_bytes
+
+
+def _validate_haskell_ghc_closure(
+    provenance: dict[str, Any],
+    *,
+    block_directory: Path,
+    stack_root: Path,
+    authoritative_ghc_path: Path,
+    require_live_fds: bool,
+    error: str,
+) -> None:
+    """승인 wrapper, 실제 GHC ELF, install metadata와 output shim을 함께 결속한다."""
+
+    projection = {
+        field: provenance[field] for field in HASKELL_GHC_CLOSURE_PROJECTION_FIELDS
+    }
+    expected_evidence_path = (
+        block_directory / "authoritative-ghc-install-closure.json"
+    )
+    evidence_path_value = provenance["toolchainInstallClosurePath"]
+    if (
+        not isinstance(evidence_path_value, str)
+        or evidence_path_value != str(expected_evidence_path)
+    ):
+        raise GateError(error)
+    _, evidence_value = _snapshot_json_file(
+        expected_evidence_path,
+        role="haskell-authoritative-ghc-install-closure",
+        error=error,
+    )
+    evidence = _exact_object(
+        evidence_value,
+        HASKELL_GHC_CLOSURE_FIELDS,
+        error=error,
+    )
+    evidence_without_hash = {
+        field: value
+        for field, value in evidence.items()
+        if field != "closureSha256"
+    }
+    if (
+        evidence["schemaVersion"] != "s1.4x-haskell-ghc-install-closure-v1"
+        or evidence["status"] != "PASS"
+        or evidence["closureSha256"] != _canonical_sha256(evidence_without_hash)
+        or {
+            field: evidence[field]
+            for field in HASKELL_GHC_CLOSURE_PROJECTION_FIELDS
+        }
+        != projection
+        or provenance["approvedWrapperPath"] != str(authoritative_ghc_path)
+        or provenance["approvedWrapperPinnedFdPath"]
+        != provenance["authoritativeGhcPinnedFdPath"]
+        or provenance["approvedWrapperSha256"]
+        != provenance["authoritativeGhcSha256"]
+        or authoritative_ghc_path.name != "ghc-9.10.3"
+        or authoritative_ghc_path.parent.name != "bin"
+    ):
+        raise GateError(error)
+
+    install_root = authoritative_ghc_path.parent.parent
+    distribution_root = install_root / "lib/ghc-9.10.3"
+    expected_distribution_bin = distribution_root / "bin"
+    expected_libdir = distribution_root / "lib"
+    actual_compiler_path = _portable_regular_path(
+        provenance["actualCompilerElfPath"],
+        sha256_value=provenance["actualCompilerElfSha256"],
+        expected_path=expected_distribution_bin / "ghc-9.10.3",
+        expected_sha256=FROZEN_GHC_910_COMPILER_ELF_SHA256,
+        executable=True,
+        error=error,
+    )
+    libdir = _portable_directory_path(
+        provenance["actualCompilerLibdirPath"],
+        expected_path=expected_libdir,
+        error=error,
+    )
+    distribution_bin = _portable_directory_path(
+        provenance["distributionBinPath"],
+        expected_path=expected_distribution_bin,
+        error=error,
+    )
+    auxiliary_sha256 = _exact_object(
+        provenance["auxiliaryElfSha256"],
+        set(FROZEN_GHC_910_AUXILIARY_ELF_SHA256),
+        error=error,
+    )
+    auxiliary_fd_paths = _exact_object(
+        provenance["auxiliaryElfPinnedFdPath"],
+        set(FROZEN_GHC_910_AUXILIARY_ELF_SHA256),
+        error=error,
+    )
+    auxiliary_filenames = {
+        "ghc-pkg": "ghc-pkg-9.10.3",
+        "runghc": "runghc-9.10.3",
+        "haddock": "haddock-ghc-9.10.3",
+    }
+    for name, expected_sha256 in FROZEN_GHC_910_AUXILIARY_ELF_SHA256.items():
+        _portable_regular_path(
+            str(distribution_bin / auxiliary_filenames[name]),
+            sha256_value=auxiliary_sha256[name],
+            expected_path=distribution_bin / auxiliary_filenames[name],
+            expected_sha256=expected_sha256,
+            executable=True,
+            error=error,
+        )
+
+    libdir_metadata = _toolchain_tree_metadata(
+        libdir,
+        allow_relative_symlinks=False,
+        error=error,
+    )
+    distribution_bin_metadata = _toolchain_tree_metadata(
+        distribution_bin,
+        allow_relative_symlinks=True,
+        error=error,
+    )
+    metadata_values = (
+        provenance["libdirMetadataEntryCount"],
+        provenance["libdirMetadataTotalFileBytes"],
+        provenance["distributionBinMetadataEntryCount"],
+    )
+    if (
+        provenance["actualCompilerElfSha256"]
+        != FROZEN_GHC_910_COMPILER_ELF_SHA256
+        or not all(type(value) is int and value >= 0 for value in metadata_values)
+        or provenance["libdirMetadataSha256"] != libdir_metadata[0]
+        or provenance["libdirMetadataEntryCount"] != libdir_metadata[1]
+        or provenance["libdirMetadataTotalFileBytes"] != libdir_metadata[2]
+        or provenance["distributionBinMetadataSha256"]
+        != distribution_bin_metadata[0]
+        or provenance["distributionBinMetadataEntryCount"]
+        != distribution_bin_metadata[1]
+    ):
+        raise GateError(error)
+
+    expected_tool_bin = stack_root / "tool-bin"
+    _portable_directory_path(
+        str(expected_tool_bin),
+        expected_path=expected_tool_bin,
+        error=error,
+    )
+    output_launcher_sha256 = _exact_object(
+        provenance["outputLauncherSha256"],
+        {"ghc", "ghc-pkg", "runghc", "haddock"},
+        error=error,
+    )
+    expected_launcher_payloads = {
+        "ghc": (
+            "#!/usr/bin/bash\n"
+            "set -euo pipefail\n"
+            f'exec "{provenance["actualCompilerElfPinnedFdPath"]}" '
+            f'"-B{libdir}" "$@"\n'
+        ),
+        "ghc-pkg": (
+            "#!/usr/bin/bash\n"
+            "set -euo pipefail\n"
+            f'exec "{auxiliary_fd_paths["ghc-pkg"]}" '
+            f'"--global-package-db" "{libdir / "package.conf.d"}" "$@"\n'
+        ),
+        "runghc": (
+            "#!/usr/bin/bash\n"
+            "set -euo pipefail\n"
+            f'exec "{auxiliary_fd_paths["runghc"]}" '
+            f'"-f" "{expected_tool_bin / "ghc"}" "$@"\n'
+        ),
+        "haddock": (
+            "#!/usr/bin/bash\n"
+            "set -euo pipefail\n"
+            f'exec "{auxiliary_fd_paths["haddock"]}" '
+            f'"-B{libdir}" "-l{libdir}" "$@"\n'
+        ),
+    }
+    try:
+        tool_bin_names = {entry.name for entry in expected_tool_bin.iterdir()}
+        launcher_fd_paths = {
+            name: os.readlink(expected_tool_bin / name)
+            for name in output_launcher_sha256
+        }
+        launcher_modes = {
+            name: (expected_tool_bin / name).lstat().st_mode
+            for name in output_launcher_sha256
+        }
+    except OSError as exc:
+        raise GateError(error) from exc
+    if (
+        provenance["authoritativeGhcShimPath"] != str(expected_tool_bin / "ghc")
+        or tool_bin_names != set(output_launcher_sha256)
+        or not all(stat.S_ISLNK(mode) for mode in launcher_modes.values())
+        or provenance["scoringCompilerExecutionBinding"]
+        != "sealed-elf-fd-with-validated-install-closure"
+        or provenance["toolchainInstallClosurePolicy"]
+        != "sealed-critical-elf-fds-and-stable-distribution-metadata"
+        or provenance["toolPath"] != f"{expected_tool_bin}:/usr/bin:/bin"
+        or any(
+            output_launcher_sha256[name]
+            != hashlib.sha256(expected_launcher_payloads[name].encode("utf-8")).hexdigest()
+            for name in output_launcher_sha256
+        )
+    ):
+        raise GateError(error)
+
+    fd_witnesses = (
+        (
+            provenance["actualCompilerElfPinnedFdPath"],
+            provenance["actualCompilerElfSha256"],
+            True,
+        ),
+        *(
+            (auxiliary_fd_paths[name], auxiliary_sha256[name], True)
+            for name in auxiliary_fd_paths
+        ),
+        *(
+            (launcher_fd_paths[name], output_launcher_sha256[name], True)
+            for name in launcher_fd_paths
+        ),
+    )
+    for fd_path, sha256_value, executable in fd_witnesses:
+        if require_live_fds:
+            _live_fd_sha256(
+                fd_path,
+                expected_sha256=sha256_value,
+                executable=executable,
+                error=error,
+            )
+        else:
+            _fd_descriptor(fd_path, error=error)
+    if actual_compiler_path != expected_distribution_bin / "ghc-9.10.3":
+        raise GateError(error)
 
 
 def _scala_jmh_runtime_paths(
@@ -2768,6 +3366,7 @@ def _validate_execution_receipt(
     artifact_sha256: str | None = None,
     source_tree_sha256: str | None = None,
     native_toolchain_lock_sha256: str | None = None,
+    require_live_haskell_fds: bool = True,
 ) -> str | None:
     receipt_path_text = item["executionReceiptPath"]
     if (
@@ -3037,38 +3636,7 @@ def _validate_execution_receipt(
     else:
         haskell_provenance = _exact_object(
             candidate_provenance,
-            {
-                "kind",
-                "selectedProfilePath",
-                "selectedProfileSha256",
-                "selectedProfileId",
-                "sourceInputManifestPath",
-                "sourceInputManifestSha256",
-                "effectiveCompilerFlagsSha256",
-                "markerPythonPath",
-                "markerPythonSha256",
-                "markerScriptPath",
-                "markerScriptSha256",
-                "markerArgv",
-                "markerArgvSha256",
-                "ghcupPath",
-                "ghcupSha256",
-                "stackPath",
-                "stackSha256",
-                "stackYamlPath",
-                "stackYamlSha256",
-                "runtimeIdentityPath",
-                "runtimeIdentitySha256",
-                "executedBenchmarkPath",
-                "executedBenchmarkSha256",
-                "authoritativeGhcPath",
-                "authoritativeGhcSha256",
-                "selectedGhcOptions",
-                "toolchainLockPath",
-                "toolchainLockSha256",
-                "mergedToolchainProvenancePath",
-                "mergedToolchainProvenanceSha256",
-            },
+            HASKELL_CANDIDATE_PROVENANCE_FIELDS,
             error=f"NATIVE_EXECUTION_PROVENANCE_INVALID:{case_id}",
         )
         selected_profile_text = haskell_provenance["selectedProfilePath"]
@@ -3082,18 +3650,49 @@ def _validate_execution_receipt(
         runtime_identity_path_text = haskell_provenance["runtimeIdentityPath"]
         executed_benchmark_path_text = haskell_provenance["executedBenchmarkPath"]
         authoritative_ghc_path_text = haskell_provenance["authoritativeGhcPath"]
+        authoritative_ghc_fd_text = haskell_provenance["authoritativeGhcPinnedFdPath"]
+        marker_python_fd_text = haskell_provenance["markerPythonPinnedFdPath"]
+        marker_script_fd_text = haskell_provenance["markerScriptPinnedFdPath"]
+        input_ledger_script_text = haskell_provenance["inputLedgerScriptPath"]
+        input_ledger_script_fd_text = haskell_provenance[
+            "inputLedgerScriptPinnedFdPath"
+        ]
+        native_block_script_text = haskell_provenance["nativeBlockScriptPath"]
+        native_block_script_fd_text = haskell_provenance[
+            "nativeBlockScriptPinnedFdPath"
+        ]
+        ghcup_fd_text = haskell_provenance["ghcupPinnedFdPath"]
+        stack_fd_text = haskell_provenance["stackPinnedFdPath"]
+        latest_ghc_path_text = haskell_provenance["latestGhcPath"]
+        latest_ghc_fd_text = haskell_provenance["latestGhcPinnedFdPath"]
+        hlint_path_text = haskell_provenance["hlintPath"]
+        hlint_fd_text = haskell_provenance["hlintPinnedFdPath"]
+        stylish_path_text = haskell_provenance["stylishPath"]
+        stylish_fd_text = haskell_provenance["stylishPinnedFdPath"]
+        stack_root_text = haskell_provenance["stackRootPath"]
+        stack_work_directory_text = haskell_provenance["stackWorkDirectory"]
+        stack_work_absolute_text = haskell_provenance["stackWorkDirectoryAbsolute"]
+        tool_path_text = haskell_provenance["toolPath"]
         selected_options = haskell_provenance["selectedGhcOptions"]
         s1_4x_root = resolved_plan.parent.parent
         expected_profile_path = s1_4x_root / "haskell/selected-profile.v1.json"
         expected_source_manifest_path = s1_4x_root / "haskell/source-inputs.v1.json"
         expected_marker_script_path = s1_4x_root / "benchmarks/run_rotated_blocks.py"
+        expected_input_ledger_script_path = (
+            s1_4x_root / "integration/benchmark_input_ledger.py"
+        )
+        expected_native_block_script_path = (
+            s1_4x_root / "integration/native_benchmark_block.py"
+        )
         expected_qualification_path = block_directory / "timeout-qualification.json"
         expected_stack_yaml_path = s1_4x_root / "haskell/stack.yaml"
         expected_runtime_identity_path = (
             block_directory / "benchmark-runtime-identity.json"
         )
         expected_toolchain_lock_path = s1_4x_root / "haskell/toolchain-lock.v1.json"
-        expected_merged_provenance_path = s1_4x_root / "contract/toolchain-provenance.v1.json"
+        expected_merged_provenance_path = (
+            s1_4x_root / "contract/toolchain-provenance.v1.json"
+        )
         if (
             haskell_provenance["kind"] != "haskell"
             or not isinstance(selected_profile_text, str)
@@ -3107,49 +3706,58 @@ def _validate_execution_receipt(
             or not isinstance(marker_script_text, str)
             or marker_script_text != str(expected_marker_script_path)
             or not isinstance(marker_argv, list)
+            or not isinstance(input_ledger_script_text, str)
+            or input_ledger_script_text != str(expected_input_ledger_script_path)
+            or not isinstance(native_block_script_text, str)
+            or native_block_script_text != str(expected_native_block_script_path)
             or not isinstance(ghcup_path_text, str)
             or not isinstance(stack_path_text, str)
+            or not isinstance(latest_ghc_path_text, str)
+            or not isinstance(hlint_path_text, str)
+            or not isinstance(stylish_path_text, str)
             or not isinstance(stack_yaml_path_text, str)
             or not isinstance(runtime_identity_path_text, str)
             or not isinstance(executed_benchmark_path_text, str)
             or not isinstance(authoritative_ghc_path_text, str)
             or not Path(ghcup_path_text).is_absolute()
             or not Path(stack_path_text).is_absolute()
+            or not Path(latest_ghc_path_text).is_absolute()
+            or not Path(hlint_path_text).is_absolute()
+            or not Path(stylish_path_text).is_absolute()
             or not Path(stack_yaml_path_text).is_absolute()
             or not Path(runtime_identity_path_text).is_absolute()
             or not Path(executed_benchmark_path_text).is_absolute()
             or not Path(authoritative_ghc_path_text).is_absolute()
             or stack_yaml_path_text != str(expected_stack_yaml_path)
             or runtime_identity_path_text != str(expected_runtime_identity_path)
-            or SHA256.fullmatch(str(haskell_provenance["selectedProfileSha256"])) is None
+            or SHA256.fullmatch(str(haskell_provenance["selectedProfileSha256"]))
+            is None
             or Path(selected_profile_text).is_symlink()
             or not Path(selected_profile_text).is_file()
             or sha256_file(Path(selected_profile_text))
             != haskell_provenance["selectedProfileSha256"]
-            or SHA256.fullmatch(
-                str(haskell_provenance["sourceInputManifestSha256"])
-            )
+            or SHA256.fullmatch(str(haskell_provenance["sourceInputManifestSha256"]))
             is None
             or Path(source_manifest_text).is_symlink()
             or not Path(source_manifest_text).is_file()
             or sha256_file(Path(source_manifest_text))
             != haskell_provenance["sourceInputManifestSha256"]
-            or SHA256.fullmatch(str(haskell_provenance["markerPythonSha256"]))
+            or SHA256.fullmatch(str(haskell_provenance["markerPythonSha256"])) is None
+            or SHA256.fullmatch(str(haskell_provenance["markerScriptSha256"])) is None
+            or SHA256.fullmatch(str(haskell_provenance["inputLedgerScriptSha256"]))
             is None
-            or SHA256.fullmatch(str(haskell_provenance["markerScriptSha256"]))
+            or SHA256.fullmatch(str(haskell_provenance["nativeBlockScriptSha256"]))
             is None
-            or SHA256.fullmatch(str(haskell_provenance["markerArgvSha256"]))
-            is None
+            or SHA256.fullmatch(str(haskell_provenance["markerArgvSha256"])) is None
             or marker_argv
             != [
-                marker_python_text,
-                marker_script_text,
+                marker_python_fd_text,
+                marker_script_fd_text,
                 "mark-measurement-entered",
                 "--qualification",
                 str(expected_qualification_path),
             ]
-            or haskell_provenance["markerArgvSha256"]
-            != _canonical_sha256(marker_argv)
+            or haskell_provenance["markerArgvSha256"] != _canonical_sha256(marker_argv)
             or haskell_provenance["selectedProfileId"] != profile
             or haskell_provenance["effectiveCompilerFlagsSha256"]
             != effective_runtime_arguments_sha256
@@ -3157,6 +3765,9 @@ def _validate_execution_receipt(
             or _canonical_sha256(selected_options) != effective_runtime_arguments_sha256
             or SHA256.fullmatch(str(haskell_provenance["ghcupSha256"])) is None
             or SHA256.fullmatch(str(haskell_provenance["stackSha256"])) is None
+            or SHA256.fullmatch(str(haskell_provenance["latestGhcSha256"])) is None
+            or SHA256.fullmatch(str(haskell_provenance["hlintSha256"])) is None
+            or SHA256.fullmatch(str(haskell_provenance["stylishSha256"])) is None
             or SHA256.fullmatch(str(haskell_provenance["stackYamlSha256"])) is None
             or SHA256.fullmatch(str(haskell_provenance["runtimeIdentitySha256"]))
             is None
@@ -3167,39 +3778,179 @@ def _validate_execution_receipt(
             or haskell_provenance["ghcupSha256"] != FROZEN_GHCUP_SHA256
             or haskell_provenance["stackSha256"] != FROZEN_STACK_SHA256
             or haskell_provenance["authoritativeGhcSha256"] != FROZEN_GHC_910_SHA256
+            or haskell_provenance["latestGhcSha256"] != FROZEN_GHC_914_SHA256
+            or haskell_provenance["hlintSha256"] != FROZEN_HLINT_SHA256
+            or haskell_provenance["stylishSha256"] != FROZEN_STYLISH_HASKELL_SHA256
             or executed_benchmark_path_text != benchmark_executable_text
             or haskell_provenance["executedBenchmarkSha256"]
             != provenance["benchmarkExecutableSha256"]
         ):
             raise GateError(f"NATIVE_EXECUTION_PROVENANCE_INVALID:{case_id}")
-        ghcup_path = Path(ghcup_path_text)
-        stack_path = Path(stack_path_text)
-        stack_yaml_path = Path(stack_yaml_path_text)
-        marker_python_path = Path(marker_python_text)
-        marker_script_path = Path(marker_script_text)
+        provenance_error = f"NATIVE_EXECUTION_PROVENANCE_INVALID:{case_id}"
+        _portable_regular_path(
+            selected_profile_text,
+            sha256_value=haskell_provenance["selectedProfileSha256"],
+            expected_path=expected_profile_path,
+            error=provenance_error,
+        )
+        _portable_regular_path(
+            source_manifest_text,
+            sha256_value=haskell_provenance["sourceInputManifestSha256"],
+            expected_path=expected_source_manifest_path,
+            error=provenance_error,
+        )
+        marker_python_path = _portable_regular_path(
+            marker_python_text,
+            sha256_value=haskell_provenance["markerPythonSha256"],
+            error=provenance_error,
+            executable=True,
+        )
+        marker_script_path = _portable_regular_path(
+            marker_script_text,
+            sha256_value=haskell_provenance["markerScriptSha256"],
+            expected_path=expected_marker_script_path,
+            error=provenance_error,
+        )
+        _portable_regular_path(
+            input_ledger_script_text,
+            sha256_value=haskell_provenance["inputLedgerScriptSha256"],
+            expected_path=expected_input_ledger_script_path,
+            error=provenance_error,
+        )
+        _portable_regular_path(
+            native_block_script_text,
+            sha256_value=haskell_provenance["nativeBlockScriptSha256"],
+            expected_path=expected_native_block_script_path,
+            error=provenance_error,
+        )
+        _portable_regular_path(
+            ghcup_path_text,
+            sha256_value=haskell_provenance["ghcupSha256"],
+            expected_sha256=FROZEN_GHCUP_SHA256,
+            error=provenance_error,
+            executable=True,
+        )
+        _portable_regular_path(
+            stack_path_text,
+            sha256_value=haskell_provenance["stackSha256"],
+            expected_sha256=FROZEN_STACK_SHA256,
+            error=provenance_error,
+            executable=True,
+        )
+        authoritative_ghc_path = _portable_regular_path(
+            authoritative_ghc_path_text,
+            sha256_value=haskell_provenance["authoritativeGhcSha256"],
+            expected_sha256=FROZEN_GHC_910_SHA256,
+            error=provenance_error,
+            executable=True,
+        )
+        _portable_regular_path(
+            latest_ghc_path_text,
+            sha256_value=haskell_provenance["latestGhcSha256"],
+            expected_sha256=FROZEN_GHC_914_SHA256,
+            error=provenance_error,
+            executable=True,
+        )
+        _portable_regular_path(
+            hlint_path_text,
+            sha256_value=haskell_provenance["hlintSha256"],
+            expected_sha256=FROZEN_HLINT_SHA256,
+            error=provenance_error,
+            executable=True,
+        )
+        _portable_regular_path(
+            stylish_path_text,
+            sha256_value=haskell_provenance["stylishSha256"],
+            expected_sha256=FROZEN_STYLISH_HASKELL_SHA256,
+            error=provenance_error,
+            executable=True,
+        )
+        stack_yaml_path = _portable_regular_path(
+            stack_yaml_path_text,
+            sha256_value=haskell_provenance["stackYamlSha256"],
+            expected_path=expected_stack_yaml_path,
+            error=provenance_error,
+        )
+        for fd_path, sha256_value, executable in (
+            (
+                authoritative_ghc_fd_text,
+                haskell_provenance["authoritativeGhcSha256"],
+                True,
+            ),
+            (
+                marker_python_fd_text,
+                haskell_provenance["markerPythonSha256"],
+                True,
+            ),
+            (
+                marker_script_fd_text,
+                haskell_provenance["markerScriptSha256"],
+                False,
+            ),
+            (
+                input_ledger_script_fd_text,
+                haskell_provenance["inputLedgerScriptSha256"],
+                False,
+            ),
+            (
+                native_block_script_fd_text,
+                haskell_provenance["nativeBlockScriptSha256"],
+                False,
+            ),
+            (
+                ghcup_fd_text,
+                haskell_provenance["ghcupSha256"],
+                True,
+            ),
+            (
+                stack_fd_text,
+                haskell_provenance["stackSha256"],
+                True,
+            ),
+            (
+                latest_ghc_fd_text,
+                haskell_provenance["latestGhcSha256"],
+                True,
+            ),
+            (
+                hlint_fd_text,
+                haskell_provenance["hlintSha256"],
+                True,
+            ),
+            (
+                stylish_fd_text,
+                haskell_provenance["stylishSha256"],
+                True,
+            ),
+        ):
+            if require_live_haskell_fds:
+                _live_fd_sha256(
+                    fd_path,
+                    expected_sha256=sha256_value,
+                    error=provenance_error,
+                    executable=executable,
+                )
+            else:
+                # 최종 집계 시점에는 producer process가 종료된다. source path/hash의
+                # portable projection은 계속 검증하고, FD는 producer-time witness의
+                # strict 표기와 source hash 결속만 재검증한다.
+                _fd_descriptor(fd_path, error=provenance_error)
+        # Persistent source paths form the portable marker projection; raw
+        # `/proc/self/fd` values remain a live-only execution witness.
+        portable_marker_argv = [
+            str(marker_python_path),
+            str(marker_script_path),
+            "mark-measurement-entered",
+            "--qualification",
+            str(expected_qualification_path),
+        ]
+        if any(
+            re.fullmatch(r"/proc/(?:self|[0-9]+)/fd/[0-9]+", argument) is not None
+            for argument in portable_marker_argv
+        ):
+            raise GateError(provenance_error)
         runtime_identity_path = Path(runtime_identity_path_text)
         executed_benchmark_path = Path(executed_benchmark_path_text)
-        authoritative_ghc_path = Path(authoritative_ghc_path_text)
-        if (
-            any(
-                path.is_symlink() or not path.is_file()
-                for path in (
-                    ghcup_path,
-                    stack_path,
-                    stack_yaml_path,
-                    marker_python_path,
-                    marker_script_path,
-                )
-            )
-            or sha256_file(ghcup_path) != haskell_provenance["ghcupSha256"]
-            or sha256_file(stack_path) != haskell_provenance["stackSha256"]
-            or sha256_file(stack_yaml_path) != haskell_provenance["stackYamlSha256"]
-            or sha256_file(marker_python_path)
-            != haskell_provenance["markerPythonSha256"]
-            or sha256_file(marker_script_path)
-            != haskell_provenance["markerScriptSha256"]
-        ):
-            raise GateError(f"NATIVE_EXECUTION_PROVENANCE_INVALID:{case_id}")
         runtime_identity_snapshot, runtime_identity_value = _snapshot_json_file(
             runtime_identity_path,
             role=f"haskell-runtime-identity:{case_id}",
@@ -3222,9 +3973,43 @@ def _validate_execution_receipt(
             error=f"NATIVE_EXECUTION_PROVENANCE_INVALID:{case_id}",
             executable=True,
         )
+        derived_root_name = (
+            "stack-root-benchmark-"
+            + hashlib.sha256(os.fsencode(str(block_directory))).hexdigest()[:24]
+        )
+        stack_root = _portable_directory_path(
+            stack_root_text,
+            error=provenance_error,
+        )
+        expected_stack_work_directory = (
+            Path(".stack-work") / "s1-4x" / derived_root_name
+        )
+        if (
+            stack_root.name != derived_root_name
+            or not isinstance(stack_work_directory_text, str)
+            or Path(stack_work_directory_text) != expected_stack_work_directory
+            or Path(stack_work_directory_text).is_absolute()
+            or any(
+                part in {".", ".."} for part in Path(stack_work_directory_text).parts
+            )
+        ):
+            raise GateError(provenance_error)
+        stack_work_directory_absolute = _portable_directory_path(
+            stack_work_absolute_text,
+            expected_path=(s1_4x_root / "haskell" / expected_stack_work_directory),
+            error=provenance_error,
+        )
+        _validate_haskell_ghc_closure(
+            haskell_provenance,
+            block_directory=block_directory,
+            stack_root=stack_root,
+            authoritative_ghc_path=authoritative_ghc_path,
+            require_live_fds=require_live_haskell_fds,
+            error=provenance_error,
+        )
         try:
             artifact_relative = executed_benchmark_path.relative_to(
-                s1_4x_root / "haskell"
+                stack_work_directory_absolute
             )
         except ValueError as exc:
             raise GateError(
@@ -3249,9 +4034,10 @@ def _validate_execution_receipt(
             != haskell_provenance["executedBenchmarkSha256"]
             or authoritative_ghc_snapshot.sha256
             != haskell_provenance["authoritativeGhcSha256"]
-            or len(artifact_parts) != 7
-            or artifact_parts[0:2] != (".stack-work", "dist")
-            or artifact_parts[3:]
+            or len(artifact_parts) != 6
+            or artifact_parts[0] != "dist"
+            or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", artifact_parts[1]) is None
+            or artifact_parts[2:]
             != (
                 "ghc-9.10.3",
                 "build",
@@ -3294,11 +4080,34 @@ def _validate_execution_receipt(
             s1_4x_root / "haskell",
             error=f"NATIVE_EXECUTION_PROVENANCE_INVALID:{case_id}",
         )
+        _portable_regular_path(
+            haskell_provenance["baselineCorrectnessSourcePath"],
+            sha256_value=haskell_provenance["baselineCorrectnessSha256"],
+            error=provenance_error,
+        )
+        _portable_regular_path(
+            haskell_provenance["optimizedCorrectnessSourcePath"],
+            sha256_value=haskell_provenance["optimizedCorrectnessSha256"],
+            error=provenance_error,
+        )
+        _portable_regular_path(
+            haskell_provenance["qualificationArtifactSourcePath"],
+            sha256_value=haskell_provenance["qualificationArtifactSha256"],
+            error=provenance_error,
+        )
+        selected_correctness_sha256 = (
+            haskell_provenance["optimizedCorrectnessSha256"]
+            if profile == "optimized-o2-fasm"
+            else haskell_provenance["baselineCorrectnessSha256"]
+        )
         if (
             selected_profile["profileId"] != profile
             or selected_profile["optionsSha256"] != effective_runtime_arguments_sha256
             or selected_profile["ghcOptions"] != selected_options
             or selected_profile["sourceTreeSha256"] != source_tree_sha256
+            or selected_profile["fullCorrectnessSha256"] != selected_correctness_sha256
+            or selected_profile["qualificationArtifactSha256"]
+            != haskell_provenance["qualificationArtifactSha256"]
         ):
             raise GateError(f"NATIVE_EXECUTION_PROVENANCE_INVALID:{case_id}")
         selector = next(
@@ -3310,10 +4119,12 @@ def _validate_execution_receipt(
             None,
         )
         criterion_prefix = selector.get("criterionPrefix") if isinstance(selector, dict) else None
-        selector_case_ids = selector.get("expectedCaseIds") if isinstance(selector, dict) else None
+        selector_case_ids = (
+            selector.get("expectedCaseIds") if isinstance(selector, dict) else None
+        )
         raw_path = str(block_directory / item["rawEvidencePath"])
         expected_arguments = [
-            str(ghcup_path),
+            str(ghcup_fd_text),
             "--offline",
             "run",
             "--quick",
@@ -3322,7 +4133,13 @@ def _validate_execution_receipt(
             "--stack",
             "3.11.1",
             "--",
-            str(stack_path),
+            "/usr/bin/env",
+            f"PATH={tool_path_text}",
+            str(stack_fd_text),
+            "--stack-root",
+            str(stack_root),
+            "--work-dir",
+            stack_work_directory_text,
             "--stack-yaml",
             str(stack_yaml_path),
             "--no-terminal",
@@ -3330,6 +4147,7 @@ def _validate_execution_receipt(
             "never",
             "--system-ghc",
             "--no-install-ghc",
+            "--hpack-force",
             "bench",
             f"--ghc-options={' '.join(selected_options)}",
             (
@@ -3698,6 +4516,7 @@ def validate_native_contract_evidence(
     _artifact_sha256: str | None = None,
     _source_tree_sha256: str | None = None,
     _native_toolchain_lock_sha256: str | None = None,
+    _require_live_haskell_fds: bool = True,
 ) -> dict[str, Any]:
     """Candidate framework별 frozen timing 설정과 raw evidence bytes를 검증한다."""
 
@@ -3900,6 +4719,7 @@ def validate_native_contract_evidence(
             native_toolchain_lock_sha256=(
                 _native_toolchain_lock_sha256
             ),
+            require_live_haskell_fds=_require_live_haskell_fds,
         )
         if boundary_id == "scala":
             if native_statistics_case is None or not isinstance(
@@ -4024,6 +4844,7 @@ def produce_scala_native_evidence(
     scala_jmh_root: Path,
     input_ledger_path: Path,
     fixture_root_path: Path,
+    large_fixture_root_path: Path,
     selected_profile_result_path: Path,
     selected_profile_source_path: Path,
     source_input_manifest_path: Path,
@@ -4209,6 +5030,7 @@ def produce_scala_native_evidence(
             plan=plan,
             plan_path=sealed_plan_path,
             repo_root=repo,
+            large_fixture_root=large_fixture_root_path,
             boundary_id="scala",
             selector_id=selector_id,
         )
@@ -4690,6 +5512,7 @@ def produce_haskell_native_evidence(
         plan=plan,
         plan_path=plan_file,
         repo_root=repo,
+        large_fixture_root=fixture_root_path,
         boundary_id="haskell",
         selector_id=selector_id,
     )
@@ -5113,6 +5936,12 @@ def _scala_producer_parser() -> argparse.ArgumentParser:
 def _scala_producer_main(argv: list[str]) -> int:
     arguments = _scala_producer_parser().parse_args(argv)
     try:
+        large_fixture_root_text = os.environ.get("S1_4X_LARGE_FIXTURE_ROOT")
+        if (
+            not isinstance(large_fixture_root_text, str)
+            or not Path(large_fixture_root_text).is_absolute()
+        ):
+            raise GateError("SCALA_NATIVE_LARGE_FIXTURE_ROOT_INVALID")
         result = produce_scala_native_evidence(
             repo_root=arguments.repo_root,
             plan_path=arguments.plan,
@@ -5121,6 +5950,7 @@ def _scala_producer_main(argv: list[str]) -> int:
             scala_jmh_root=arguments.scala_jmh_root,
             input_ledger_path=arguments.input_ledger,
             fixture_root_path=arguments.fixture_root,
+            large_fixture_root_path=Path(large_fixture_root_text),
             selected_profile_result_path=(
                 arguments.selected_profile_result
             ),
@@ -5216,6 +6046,13 @@ def main(argv: list[str] | None = None) -> int:
     arguments = _parser().parse_args(command_arguments)
     try:
         repo = arguments.repo_root.resolve(strict=True)
+        large_fixture_root_text = os.environ.get("S1_4X_LARGE_FIXTURE_ROOT")
+        if (
+            not isinstance(large_fixture_root_text, str)
+            or not Path(large_fixture_root_text).is_absolute()
+        ):
+            raise GateError("CANDIDATE_NATIVE_LARGE_FIXTURE_ROOT_INVALID")
+        large_fixture_root = Path(large_fixture_root_text)
         if not arguments.plan.is_absolute():
             raise GateError("CANDIDATE_NATIVE_PLAN_PATH_INVALID")
         plan_path = Path(os.path.abspath(arguments.plan))
@@ -5263,6 +6100,7 @@ def main(argv: list[str] | None = None) -> int:
                 plan=plan,
                 plan_path=sealed_plan_path,
                 repo_root=repo,
+                large_fixture_root=large_fixture_root,
                 boundary_id=arguments.boundary,
                 selector_id=arguments.selector,
             )
@@ -5302,6 +6140,8 @@ def main(argv: list[str] | None = None) -> int:
             fixture_root_path=(
                 repo / "workspaces/decision-platform/research/"
                 "s1-4x-numeric-parity/contract/fixtures"
+                if arguments.boundary == "scala"
+                else large_fixture_root
             ),
             input_ledger_path=input_ledger_path,
             effective_runtime_arguments_sha256=str(native["effectiveRuntimeArgumentsSha256"]),

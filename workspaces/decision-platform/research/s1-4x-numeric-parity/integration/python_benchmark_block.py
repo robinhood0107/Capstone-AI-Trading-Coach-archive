@@ -433,6 +433,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--benchmark-subject-commit", required=True)
     parser.add_argument("--repo-root", type=Path, required=True)
+    parser.add_argument("--large-fixture-root", type=Path, required=True)
     return parser
 
 
@@ -441,6 +442,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         repo = arguments.repo_root.resolve(strict=True)
         block_dir = arguments.block_dir.resolve(strict=True)
+        large_fixture_root = arguments.large_fixture_root
         plan = strict_json_load(arguments.plan.resolve(strict=True))
         qualification = strict_json_load(arguments.qualification.resolve(strict=True))
         if (
@@ -473,15 +475,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 plan=plan,
                 plan_path=arguments.plan.resolve(strict=True),
                 repo_root=repo,
+                large_fixture_root=large_fixture_root,
                 boundary_id=arguments.boundary,
                 selector_id=arguments.selector,
             ),
         )
-        large = (
-            repo
-            / "workspaces/decision-platform/research/s1-4x-numeric-parity/"
-            "contract/fixtures/large"
-        )
+        large = large_fixture_root.resolve(strict=True) / "large"
         prices = _generated_array(large, "large-prices-n100000.f64le", 100000)
         returns = _generated_array(large, "large-returns-n100000.f64le", 100000)
         realized_losses = _generated_array(

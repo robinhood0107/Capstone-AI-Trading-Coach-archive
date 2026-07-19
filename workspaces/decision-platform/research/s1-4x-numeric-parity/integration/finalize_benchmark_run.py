@@ -466,6 +466,7 @@ def finalize_run(
     output_directory: Path,
     benchmark_subject_commit: str,
     audit_ledger_path: Path,
+    large_fixture_root: Path,
 ) -> dict[str, Any]:
     """87 PASS blocks와 3회 case sample을 검증한 뒤 네 portable report를 기록한다."""
 
@@ -537,6 +538,7 @@ def finalize_run(
             plan=plan,
             plan_path=resolved_plan_path,
             repo_root=repo_root,
+            large_fixture_root=large_fixture_root,
             boundary_id=block.boundary_id,
             selector_id=block.selector_id,
         )
@@ -613,12 +615,15 @@ def finalize_run(
                 repo_root
                 / "workspaces/decision-platform/research/"
                 "s1-4x-numeric-parity/contract/fixtures"
+                if block.boundary_id == "scala"
+                else large_fixture_root
             ),
             input_ledger_path=input_ledger_path,
             effective_runtime_arguments_sha256=str(
                 native_document["effectiveRuntimeArgumentsSha256"]
             ),
             profile=str(native_document["profile"]),
+            _require_live_haskell_fds=False,
         )
         report = validate_block_result(
             result_path,
@@ -854,6 +859,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-directory", type=Path, required=True)
     parser.add_argument("--benchmark-subject-commit", required=True)
     parser.add_argument("--audit-ledger", type=Path, required=True)
+    parser.add_argument("--large-fixture-root", type=Path, required=True)
     return parser
 
 
@@ -866,6 +872,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             output_directory=arguments.output_directory,
             benchmark_subject_commit=arguments.benchmark_subject_commit,
             audit_ledger_path=arguments.audit_ledger,
+            large_fixture_root=arguments.large_fixture_root,
         )
         print(json.dumps(result, allow_nan=False, sort_keys=True))
     except (BenchmarkSummaryError, ContractError, OSError, ValueError) as exc:
