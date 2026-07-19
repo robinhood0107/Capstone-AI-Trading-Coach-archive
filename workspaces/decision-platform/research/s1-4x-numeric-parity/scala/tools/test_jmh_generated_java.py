@@ -83,6 +83,7 @@ def main() -> int:
             workspace
             / ".scala-build/project_jmh"
         )
+        (generator_output / "resources").mkdir()
         generator_stdout = (
             f'Processing 147 classes from {generator_input} '
             'with "reflection" generator\n'
