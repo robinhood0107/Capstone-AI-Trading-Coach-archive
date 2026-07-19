@@ -148,6 +148,26 @@ class ProfileSelectionContractTests(unittest.TestCase):
                 descendant["materializationCommit"],
                 materialization_commit,
             )
+            descendant_commit = self._git(repository, "rev-parse", "HEAD")
+            refreshed_evidence = (
+                helper.resolve_selected_profile_commit_fixed_point(
+                    repository,
+                    mode="check",
+                    expected_subject_commit=descendant_commit,
+                    profile_relative_path=(
+                        "haskell/selected-profile.v1.json"
+                    ),
+                    manifest_relative_path="haskell/source-inputs.v1.json",
+                )
+            )
+            self.assertEqual(
+                refreshed_evidence,
+                {
+                    "currentCommit": descendant_commit,
+                    "materializationCommit": materialization_commit,
+                    "preMaterializationSubjectCommit": subject,
+                },
+            )
 
     def test_selected_profile_commit_rejects_extra_or_later_profile_edits(
         self,
