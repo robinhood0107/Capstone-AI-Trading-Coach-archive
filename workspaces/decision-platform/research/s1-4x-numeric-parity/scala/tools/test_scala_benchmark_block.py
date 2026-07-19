@@ -293,7 +293,7 @@ def main() -> int:
 
     print(
         "SCALA_BENCHMARK_BLOCK_CONTRACT_PASS "
-        "rawFiles=9 provenanceFields=20 environmentFields=14"
+        "rawFiles=14 provenanceFields=20 environmentFields=14"
     )
     return 0
 
