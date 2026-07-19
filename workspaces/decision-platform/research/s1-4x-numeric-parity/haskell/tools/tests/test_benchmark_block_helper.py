@@ -728,6 +728,143 @@ class BenchmarkBlockHelperTests(unittest.TestCase):
             finally:
                 os.close(descriptor)
 
+    def test_authoritative_ghc_closure_binds_real_elf_and_detects_aba_tamper(
+        self,
+    ) -> None:
+        helper = load_helper()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            install = root / "ghc" / "9.10.3"
+            wrapper_bin = install / "bin"
+            distribution = install / "lib" / "ghc-9.10.3"
+            distribution_bin = distribution / "bin"
+            libdir = distribution / "lib"
+            package_db = libdir / "package.conf.d"
+            wrapper_bin.mkdir(parents=True)
+            distribution_bin.mkdir(parents=True)
+            package_db.mkdir(parents=True)
+            wrapper = wrapper_bin / "ghc-9.10.3"
+            wrapper.write_text(
+                "#!/bin/bash\n"
+                f'exedir="{distribution_bin}"\n'
+                'exeprog="./ghc-9.10.3"\n'
+                f'executablename="{distribution_bin}/./ghc-9.10.3"\n'
+                f'bindir="{wrapper_bin}"\n'
+                f'libdir="{libdir}"\n'
+                f'docdir="{install}/share/doc/ghc-9.10.3"\n'
+                f'includedir="{install}/include"\n'
+                "\n"
+                'exec "$executablename" -B"$libdir" ${1+"$@"}\n',
+                encoding="utf-8",
+            )
+            wrapper.chmod(0o755)
+            for name in (
+                "ghc-9.10.3",
+                "ghc-pkg-9.10.3",
+                "runghc-9.10.3",
+                "haddock-ghc-9.10.3",
+                "unlit-ghc-9.10.3",
+            ):
+                executable = distribution_bin / name
+                executable.write_text("#!/usr/bin/bash\nexit 0\n", encoding="utf-8")
+                executable.chmod(0o755)
+            settings = libdir / "settings"
+            settings.write_text("frozen settings\n", encoding="utf-8")
+            (package_db / "package.cache").write_bytes(b"frozen package db")
+            descriptor = os.open(wrapper, os.O_RDONLY)
+            opened = os.fstat(descriptor)
+            pinned_wrapper = helper.PinnedExecutable(
+                label="AUTHORITATIVE_GHC",
+                source_path=wrapper,
+                fd_path=Path(f"/proc/self/fd/{descriptor}"),
+                descriptor=descriptor,
+                sha256=hashlib.sha256(wrapper.read_bytes()).hexdigest(),
+                mode=opened.st_mode,
+                identity=(
+                    opened.st_dev,
+                    opened.st_ino,
+                    opened.st_size,
+                    opened.st_mtime_ns,
+                    opened.st_ctime_ns,
+                    opened.st_nlink,
+                ),
+            )
+            stack_root = root / "stack-root"
+            stack_root.mkdir(mode=0o700)
+            try:
+                closure = helper.prepare_authoritative_ghc_closure(
+                    stack_root=stack_root,
+                    authoritative_ghc=pinned_wrapper,
+                )
+                receipt = helper.authoritative_ghc_closure_receipt(closure)
+
+                self.assertEqual(
+                    closure.compiler_elf.source_path,
+                    distribution_bin / "ghc-9.10.3",
+                )
+                self.assertEqual(
+                    receipt["approvedWrapperSha256"],
+                    pinned_wrapper.sha256,
+                )
+                self.assertEqual(
+                    receipt["actualCompilerElfSha256"],
+                    closure.compiler_elf.sha256,
+                )
+                self.assertNotEqual(
+                    receipt["approvedWrapperSha256"],
+                    receipt["actualCompilerElfSha256"],
+                )
+                self.assertEqual(
+                    receipt["scoringCompilerExecutionBinding"],
+                    "sealed-elf-fd-with-validated-install-closure",
+                )
+                self.assertNotEqual(
+                    os.readlink(closure.ghc_shim),
+                    str(pinned_wrapper.fd_path),
+                )
+                self.assertEqual(
+                    receipt["libdirMetadataSha256"],
+                    closure.libdir_snapshot.sha256,
+                )
+                self.assertEqual(
+                    set(receipt["auxiliaryElfSha256"]),
+                    {"ghc-pkg", "haddock", "runghc"},
+                )
+                helper.validate_authoritative_ghc_closure(closure)
+
+                original = settings.read_bytes()
+                settings.write_bytes(b"transient substitution")
+                settings.write_bytes(original)
+                with self.assertRaisesRegex(
+                    helper.BlockError,
+                    "INSTALL_CLOSURE_CHANGED",
+                ):
+                    helper.validate_authoritative_ghc_closure(closure)
+            finally:
+                for pinned in getattr(
+                    locals().get("closure"),
+                    "pinned_objects",
+                    (),
+                ):
+                    if pinned.descriptor != descriptor:
+                        os.close(pinned.descriptor)
+                os.close(descriptor)
+
+    def test_toolchain_metadata_snapshot_rejects_hardlinked_files(self) -> None:
+        helper = load_helper()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            original = root / "settings"
+            alias = root / "settings-alias"
+            original.write_bytes(b"frozen")
+            os.link(original, alias)
+
+            with self.assertRaisesRegex(helper.BlockError, "HARDLINK_FORBIDDEN"):
+                helper.snapshot_toolchain_tree_metadata(
+                    root,
+                    label="TEST_TOOLCHAIN_TREE",
+                )
+
     def test_benchmark_subject_requires_clean_exact_head(self) -> None:
         helper = load_helper()
         with tempfile.TemporaryDirectory() as temporary:
@@ -784,6 +921,19 @@ class BenchmarkBlockHelperTests(unittest.TestCase):
                 self.assertIn(f'"{field}"', source)
         self.assertIn('"S1_4X_BENCHMARK_RUNTIME_IDENTITY"', source)
         self.assertIn('"S1_4X_AUTHORITATIVE_GHC"', source)
+        self.assertNotIn(
+            '"scoringCompilerExecutionBinding": "pinned-fd-path"',
+            source,
+        )
+        for field in (
+            "actualCompilerElfPath",
+            "actualCompilerElfSha256",
+            "libdirMetadataSha256",
+            "distributionBinMetadataSha256",
+            "auxiliaryElfSha256",
+        ):
+            with self.subTest(closure_field=field):
+                self.assertIn(f'"{field}"', source)
 
 
 if __name__ == "__main__":

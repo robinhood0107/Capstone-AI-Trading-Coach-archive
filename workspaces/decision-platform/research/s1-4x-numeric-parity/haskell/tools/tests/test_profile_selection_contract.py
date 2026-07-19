@@ -11,6 +11,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from tools import haskell_benchmark_block as benchmark_helper
 
@@ -475,6 +476,124 @@ class ProfileSelectionContractTests(unittest.TestCase):
             '"S1_4X_BENCHMARK_MARKER_SCRIPT": '
             "str(marker_script.fd_path)",
             workflow,
+        )
+
+    def test_portable_qualification_witness_survives_owner_exit_and_rejects_forgery(
+        self,
+    ) -> None:
+        helper = load_helper()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            python_source = root / "python"
+            marker_source = root / "profile_workflow.py"
+            python_source.write_bytes(b"accepted python bytes")
+            python_source.chmod(0o755)
+            marker_source.write_bytes(b"accepted marker source")
+            python_descriptor = os.open(python_source, os.O_RDONLY)
+            script_descriptor = os.open(marker_source, os.O_RDONLY)
+            try:
+                python_stat = os.fstat(python_descriptor)
+                script_stat = os.fstat(script_descriptor)
+                raw_argv = [
+                    f"/proc/self/fd/{python_descriptor}",
+                    f"/proc/self/fd/{script_descriptor}",
+                    "mark-measurement-entered",
+                    "--qualification",
+                    str(root / "measurement-state.json"),
+                ]
+                marker_path_id = (
+                    "S1_4X_QUALIFICATION_MEASUREMENT_"
+                    "BLOCK_1_BASELINE_O0_FASM"
+                )
+                witness = helper.build_qualification_command_witness(
+                    owner_pid=os.getpid(),
+                    owner_start_ticks=helper._process_start_ticks(os.getpid()),
+                    python_source_path=python_source,
+                    python_source_sha256=helper.sha256_file(python_source),
+                    python_descriptor=python_descriptor,
+                    python_identity=helper._stat_identity(python_stat),
+                    script_source_path=marker_source,
+                    script_source_sha256=helper.sha256_file(marker_source),
+                    script_descriptor=script_descriptor,
+                    script_identity=helper._stat_identity(script_stat),
+                    marker_argv=raw_argv,
+                    marker_path_id=marker_path_id,
+                )
+                normalized = witness["normalizedArgv"]
+                self.assertNotIn("/proc/self/fd/", " ".join(normalized))
+                self.assertNotIn(str(root), " ".join(normalized))
+
+                with mock.patch.object(
+                    helper,
+                    "_process_identity_is_live",
+                    return_value=False,
+                ):
+                    helper.validate_qualification_command_witness(
+                        witness,
+                        marker_argv=raw_argv,
+                        marker_path_id=marker_path_id,
+                        python_source_path=python_source,
+                        python_source_sha256=helper.sha256_file(python_source),
+                        script_source_path=marker_source,
+                        script_source_sha256=helper.sha256_file(marker_source),
+                        require_owner_exit=True,
+                    )
+
+                for path, replacement in (
+                    (
+                        ("owner", "startTicks"),
+                        witness["owner"]["startTicks"] + 1,
+                    ),
+                    (
+                        ("objects", "python", "fdIdentity", "inode"),
+                        witness["objects"]["python"]["fdIdentity"]["inode"] + 1,
+                    ),
+                    (
+                        ("objects", "script", "sourceBytesSha256"),
+                        "f" * 64,
+                    ),
+                    (
+                        ("normalizedArgv", 0),
+                        "FORGED_RUNTIME",
+                    ),
+                ):
+                    forged = json.loads(json.dumps(witness))
+                    target = forged
+                    for key in path[:-1]:
+                        target = target[key]
+                    target[path[-1]] = replacement
+                    with self.subTest(path=path):
+                        with self.assertRaises(helper.WorkflowError):
+                            helper.validate_qualification_command_witness(
+                                forged,
+                                marker_argv=raw_argv,
+                                marker_path_id=marker_path_id,
+                                python_source_path=python_source,
+                                python_source_sha256=helper.sha256_file(
+                                    python_source
+                                ),
+                                script_source_path=marker_source,
+                                script_source_sha256=helper.sha256_file(
+                                    marker_source
+                                ),
+                                require_owner_exit=False,
+                            )
+            finally:
+                os.close(script_descriptor)
+                os.close(python_descriptor)
+
+    def test_selector_uses_portable_witness_not_dead_proc_fd_reopen(self) -> None:
+        source = inspect.getsource(load_helper()._validate_qualification_artifact)
+
+        self.assertIn("validate_qualification_command_witness", source)
+        self.assertIn("require_owner_exit=True", source)
+        self.assertNotIn(
+            "_pinned_fd_number(marker.get(\"pythonPinnedFdPath\"))",
+            source,
+        )
+        self.assertNotIn(
+            "_pinned_fd_number(marker.get(\"scriptPinnedFdPath\"))",
+            source,
         )
 
     def test_qualification_consumes_shared_materialized_large_fixture_root(

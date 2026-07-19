@@ -18,6 +18,9 @@ CONTAINERFILE_PATH = HASKELL_ROOT / "Containerfile"
 BASE_DIGEST = (
     "sha256:417d4bc30ac7d8d5ff04ec97937f86eb508b0c76bfd1a39b5ec225688531aa9d"
 )
+DOCKER_CLIENT_SHA256 = (
+    "834d45bd30c6d08f1045f39a48fda64cf563f89e6f217a0dac53742612634fe2"
+)
 
 
 def load_helper():
@@ -228,6 +231,105 @@ class OciCorrectnessContractTests(unittest.TestCase):
                         context_name=context_name,
                         expected_identity_sha256=expected_daemon_sha256,
                     )
+
+    def test_docker_context_is_exact_desktop_linux(self) -> None:
+        helper = load_helper()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            context_log = root / "context.stdout"
+            context_log.write_bytes(b"desktop-linux\n")
+            record = {
+                "stdoutPath": str(context_log),
+                "stdoutSha256": hashlib.sha256(
+                    context_log.read_bytes()
+                ).hexdigest(),
+            }
+            self.assertEqual(
+                helper._oci_context_name(
+                    context_log,
+                    command_record=record,
+                ),
+                "desktop-linux",
+            )
+            context_log.write_bytes(b"other-context\n")
+            record["stdoutSha256"] = hashlib.sha256(
+                context_log.read_bytes()
+            ).hexdigest()
+            with self.assertRaisesRegex(
+                helper.WorkflowError,
+                "OCI_CONTEXT_NAME_INVALID",
+            ):
+                helper._oci_context_name(
+                    context_log,
+                    command_record=record,
+                )
+
+    def test_empty_output_bound_docker_config_and_client_stage_snapshots(
+        self,
+    ) -> None:
+        helper = load_helper()
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary).resolve() / "evidence"
+            output.mkdir()
+            docker_config = output / "docker-config"
+            docker_config.mkdir(mode=0o700)
+            docker = output / "docker.exe"
+            docker.write_bytes(b"fixture docker executable")
+            docker.chmod(0o755)
+            docker_sha256 = helper.sha256_file(docker)
+
+            before = helper.snapshot_oci_docker_stage(
+                stage="context-before",
+                docker=docker,
+                expected_docker_sha256=docker_sha256,
+                docker_config=docker_config,
+                output_root=output,
+            )
+            self.assertEqual(before["dockerConfigEntryCount"], 0)
+            self.assertEqual(before["dockerClientSha256"], docker_sha256)
+
+            after = helper.snapshot_oci_docker_stage(
+                stage="context-before",
+                docker=docker,
+                expected_docker_sha256=docker_sha256,
+                docker_config=docker_config,
+                output_root=output,
+            )
+            helper.validate_oci_docker_stage_pair(before, after)
+
+            (docker_config / "config.json").write_text(
+                '{"currentContext":"forged"}\n',
+                encoding="utf-8",
+            )
+            changed = helper.snapshot_oci_docker_stage(
+                stage="context-before",
+                docker=docker,
+                expected_docker_sha256=docker_sha256,
+                docker_config=docker_config,
+                output_root=output,
+            )
+            with self.assertRaisesRegex(
+                helper.WorkflowError,
+                "OCI_DOCKER_TRUST_STAGE_CHANGED",
+            ):
+                helper.validate_oci_docker_stage_pair(before, changed)
+
+    def test_oci_flow_uses_exact_client_sha_and_per_command_trust_snapshots(
+        self,
+    ) -> None:
+        helper_source = HELPER_PATH.read_text(encoding="utf-8")
+        wrapper_source = WRAPPER_PATH.read_text(encoding="utf-8")
+
+        self.assertEqual(helper_source.count(DOCKER_CLIENT_SHA256), 1)
+        self.assertEqual(wrapper_source.count(DOCKER_CLIENT_SHA256), 1)
+        self.assertIn('"dockerConfigPath"', helper_source)
+        self.assertIn('"dockerTrustStageSnapshots"', helper_source)
+        self.assertIn("run_docker_stage", helper_source)
+        self.assertIn('docker_config = output / "docker-config"', helper_source)
+        self.assertNotIn(
+            'docker_config = cache_root / f"docker-config-{suffix}"',
+            helper_source,
+        )
 
         base_reference = f"docker.io/library/haskell@{BASE_DIGEST}"
         base_id = f"sha256:{'5' * 64}"

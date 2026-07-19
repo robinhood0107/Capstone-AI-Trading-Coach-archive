@@ -251,6 +251,26 @@ class BenchmarkWrapperContractTests(unittest.TestCase):
         self.assertIn('S1_4X_CACHE_ROOT="$CACHE_ROOT"', source)
         self.assertNotIn('RUNTIME_HOME="${HOME:', source)
 
+    def test_empty_environment_preserves_only_validated_ghcup_install_prefix(
+        self,
+    ) -> None:
+        source = WRAPPER.read_text(encoding="utf-8")
+
+        self.assertIn(
+            'GHCUP_INSTALL_BASE_PREFIX="${GHCUP_INSTALL_BASE_PREFIX:?',
+            source,
+        )
+        self.assertIn("verify_ghcup_install_base_prefix", source)
+        self.assertIn(
+            'GHCUP_INSTALL_BASE_PREFIX="$GHCUP_INSTALL_BASE_PREFIX"',
+            source,
+        )
+        self.assertLess(
+            source.index("verify_ghcup_install_base_prefix"),
+            source.index("exec /usr/bin/env -i"),
+        )
+        self.assertIn('HOME="/nonexistent"', source)
+
     def test_wrapper_rejects_script_alias_as_benchmark_python(self) -> None:
         def write_executable(path: Path, source: str) -> None:
             path.write_text(source, encoding="utf-8")
