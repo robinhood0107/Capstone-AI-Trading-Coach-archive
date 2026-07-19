@@ -107,6 +107,75 @@ class CorrectnessProfileContractTests(unittest.TestCase):
             self.assertEqual(command[1:3], ["-I", "-c"])
             self.assertEqual(command[4], str(comparator.compare_script.fd_path))
             self.assertEqual(command[5], str(comparator.common_module.fd_path))
+            runtime = helper.BenchmarkPythonRuntime(
+                source_path=Path("/tools/python3.12"),
+                fd_path=Path("/proc/self/fd/91"),
+                descriptor=91,
+                sha256="a" * 64,
+                mode=0o100755,
+                identity=(1, 2, 3, 4, 5, 1),
+                configuration_path=Path("/tools/pyvenv.cfg"),
+                configuration_sha256="b" * 64,
+                configuration_identity=(6, 7, 8, 0o100644, 9, 10, 1),
+                dependency_closure=("4.26.0", "2.5.1", "2.5.1"),
+            )
+            portable_command = helper._portable_argv(
+                helper._oracle_compare_command(
+                    python_path=runtime.fd_path,
+                    comparator=comparator,
+                    arguments=["--output", str(output)],
+                ),
+                helper._oracle_compare_path_ids(runtime, comparator),
+            )
+            self.assertFalse(
+                any(
+                    "/proc/self/fd/" in argument
+                    or str(oracle_root) in argument
+                    for argument in portable_command
+                )
+            )
+            self.assertEqual(
+                portable_command[4],
+                helper._pinned_file_path_id(comparator.compare_script),
+            )
+            self.assertEqual(
+                portable_command[5],
+                helper._pinned_file_path_id(comparator.common_module),
+            )
+            self.assertEqual(
+                portable_command[6:8],
+                [
+                    helper.ORACLE_COMPARE_SOURCE_PATH_ID,
+                    helper.ORACLE_COMMON_SOURCE_PATH_ID,
+                ],
+            )
+
+    def test_every_oracle_comparison_uses_shared_pinned_invocation(self) -> None:
+        source = HELPER_PATH.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        shared_calls = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "_oracle_compare_command"
+        ]
+        self.assertEqual(len(shared_calls), 6)
+        for call in shared_calls:
+            with self.subTest(line=call.lineno):
+                self.assertEqual(
+                    {
+                        keyword.arg
+                        for keyword in call.keywords
+                        if keyword.arg is not None
+                    },
+                    {"python_path", "comparator", "arguments"},
+                )
+        self.assertNotIn("str(compare_script.fd_path)", source)
+        self.assertEqual(
+            source.count("str(comparator.compare_script.fd_path)"),
+            2,
+        )
 
     def test_sealed_child_environment_preserves_exact_ghcup_prefix(self) -> None:
         helper = load_helper()
