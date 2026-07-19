@@ -6,7 +6,9 @@ import hashlib
 import os
 import subprocess
 import sys
+import tempfile
 import unittest
+import venv
 from pathlib import Path
 
 
@@ -79,36 +81,62 @@ class PortableToolPathTests(unittest.TestCase):
         self.assertIn('${S1_4X_HLINT_BIN:?', lint)
 
     def test_legacy_aliases_do_not_satisfy_the_readiness_contract(self) -> None:
-        python = Path(sys.executable).resolve(strict=True)
-        descriptor = os.open(python, os.O_RDONLY)
-        try:
-            result = subprocess.run(
-                ["bash", str(TOOLS_ROOT / "assert-toolchain.sh")],
-                check=False,
-                capture_output=True,
-                text=True,
-                env={
-                    "PATH": "/usr/bin:/bin",
-                    "S1_4X_BENCHMARK_PYTHON_BIN": str(python),
-                    "S1_4X_BENCHMARK_PYTHON_SHA256": hashlib.sha256(
-                        python.read_bytes()
-                    ).hexdigest(),
-                    "S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH": (
-                        f"/proc/self/fd/{descriptor}"
-                    ),
-                    "S1_4X_GHCUP_BIN": "/legacy-must-not-run/ghcup",
-                    "S1_4X_GHC_BIN": "/legacy-must-not-run/ghc",
-                    "S1_4X_GHC_914_BIN": "/legacy-must-not-run/ghc-9.14.1",
-                    "S1_4X_STACK_BIN": "/legacy-must-not-run/stack",
-                    "S1_4X_HLINT_BIN": "/legacy-must-not-run/hlint",
-                    "S1_4X_STYLISH_HASKELL_BIN": (
-                        "/legacy-must-not-run/stylish-haskell"
-                    ),
-                },
-                pass_fds=(descriptor,),
+        with tempfile.TemporaryDirectory() as temporary:
+            venv_root = Path(temporary) / "oracle-venv"
+            venv.EnvBuilder(with_pip=False, symlinks=False).create(venv_root)
+            python = venv_root / "bin/python"
+            site_packages = (
+                venv_root / "lib/python3.12/site-packages"
             )
-        finally:
-            os.close(descriptor)
+            for package, version in (
+                ("jsonschema", "4.26.0"),
+                ("numpy", "2.5.1"),
+            ):
+                package_root = site_packages / package
+                package_root.mkdir()
+                (package_root / "__init__.py").write_text(
+                    f'__version__ = "{version}"\n',
+                    encoding="utf-8",
+                )
+                metadata_root = (
+                    site_packages / f"{package}-{version}.dist-info"
+                )
+                metadata_root.mkdir()
+                (metadata_root / "METADATA").write_text(
+                    "Metadata-Version: 2.1\n"
+                    f"Name: {package}\n"
+                    f"Version: {version}\n",
+                    encoding="utf-8",
+                )
+            descriptor = os.open(python, os.O_RDONLY)
+            try:
+                result = subprocess.run(
+                    ["bash", str(TOOLS_ROOT / "assert-toolchain.sh")],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    env={
+                        "PATH": "/usr/bin:/bin",
+                        "S1_4X_BENCHMARK_PYTHON_BIN": str(python),
+                        "S1_4X_BENCHMARK_PYTHON_SHA256": hashlib.sha256(
+                            python.read_bytes()
+                        ).hexdigest(),
+                        "S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH": (
+                            f"/proc/self/fd/{descriptor}"
+                        ),
+                        "S1_4X_GHCUP_BIN": "/legacy-must-not-run/ghcup",
+                        "S1_4X_GHC_BIN": "/legacy-must-not-run/ghc",
+                        "S1_4X_GHC_914_BIN": "/legacy-must-not-run/ghc-9.14.1",
+                        "S1_4X_STACK_BIN": "/legacy-must-not-run/stack",
+                        "S1_4X_HLINT_BIN": "/legacy-must-not-run/hlint",
+                        "S1_4X_STYLISH_HASKELL_BIN": (
+                            "/legacy-must-not-run/stylish-haskell"
+                        ),
+                    },
+                    pass_fds=(descriptor,),
+                )
+            finally:
+                os.close(descriptor)
 
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("S1_4X_AUTHORITATIVE_GHC_BIN", result.stderr)
@@ -116,10 +144,11 @@ class PortableToolPathTests(unittest.TestCase):
     def test_format_gate_scopes_python_module_discovery_to_haskell_root(self) -> None:
         formatter = (TOOLS_ROOT / "check-format.sh").read_text(encoding="utf-8")
         self.assertIn(
-            'PYTHONPATH="$HASKELL_ROOT" '
-            '"$S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH" -m unittest -v',
+            'cd "$HASKELL_ROOT"\n'
+            "  s1_4x_run_benchmark_python -m unittest -v",
             formatter,
         )
+        self.assertNotIn("PYTHONPATH=", formatter)
 
     def test_arbitrary_cwd_runner_covers_all_three_acceptance_wrappers(self) -> None:
         runner = (

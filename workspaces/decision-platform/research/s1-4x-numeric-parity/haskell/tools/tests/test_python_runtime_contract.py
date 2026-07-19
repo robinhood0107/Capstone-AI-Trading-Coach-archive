@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -56,6 +57,44 @@ def runtime_environment(python: Path) -> dict[str, str]:
     )
     environment.pop("S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH", None)
     return environment
+
+
+def copied_test_venv(
+    root: Path,
+    *,
+    numpy_version: str = "2.5.1",
+) -> Path:
+    """stdlib은 base home에서, dependency는 copied venv에서 찾는 launcher를 만든다."""
+
+    venv_root = root / "oracle-venv"
+    venv.EnvBuilder(with_pip=False, symlinks=False).create(venv_root)
+    site_packages = venv_root / "lib/python3.12/site-packages"
+    for package, version in (
+        ("jsonschema", "4.26.0"),
+        ("numpy", numpy_version),
+    ):
+        package_root = site_packages / package
+        package_root.mkdir()
+        (package_root / "__init__.py").write_text(
+            f'__version__ = "{version}"\n',
+            encoding="utf-8",
+        )
+        metadata_root = site_packages / f"{package}-{version}.dist-info"
+        metadata_root.mkdir()
+        (metadata_root / "METADATA").write_text(
+            "Metadata-Version: 2.1\n"
+            f"Name: {package}\n"
+            f"Version: {version}\n",
+            encoding="utf-8",
+        )
+    (site_packages / "s1_4x_venv_sentinel.py").write_text(
+        'VALUE = "external-venv-dependency-closure"\n',
+        encoding="utf-8",
+    )
+    python = venv_root / "bin/python"
+    if not python.is_file() or python.is_symlink():
+        raise AssertionError("copied test venv launcher is not a regular file")
+    return python
 
 
 class PythonRuntimeContractTests(unittest.TestCase):
@@ -131,42 +170,8 @@ class PythonRuntimeContractTests(unittest.TestCase):
         self.assertEqual(sys.version_info[:3], (3, 12, 13))
         with tempfile.TemporaryDirectory() as temporary:
             temporary_root = Path(temporary).resolve()
-            venv_root = temporary_root / "oracle-venv"
-            venv.EnvBuilder(with_pip=False, symlinks=False).create(venv_root)
-            python = venv_root / "bin/python"
-            self.assertTrue(python.is_file())
-            self.assertFalse(python.is_symlink())
-            site_packages = (
-                venv_root
-                / "lib"
-                / "python3.12"
-                / "site-packages"
-            )
-            site_packages.mkdir(parents=True, exist_ok=True)
-            for package, version in (
-                ("jsonschema", "4.26.0"),
-                ("numpy", "2.5.1"),
-            ):
-                package_root = site_packages / package
-                package_root.mkdir()
-                (package_root / "__init__.py").write_text(
-                    f'__version__ = "{version}"\n',
-                    encoding="utf-8",
-                )
-                metadata_root = (
-                    site_packages / f"{package}-{version}.dist-info"
-                )
-                metadata_root.mkdir()
-                (metadata_root / "METADATA").write_text(
-                    "Metadata-Version: 2.1\n"
-                    f"Name: {package}\n"
-                    f"Version: {version}\n",
-                    encoding="utf-8",
-                )
-            (site_packages / "s1_4x_venv_sentinel.py").write_text(
-                'VALUE = "external-venv-dependency-closure"\n',
-                encoding="utf-8",
-            )
+            python = copied_test_venv(temporary_root)
+            venv_root = python.parent.parent
             output_directory = temporary_root / "child-output"
             output_directory.mkdir()
             parent_script = temporary_root / "parent.py"
@@ -222,6 +227,14 @@ class PythonRuntimeContractTests(unittest.TestCase):
                 "}, sort_keys=True))\n",
                 encoding="utf-8",
             )
+            environment = runtime_environment(python)
+            environment.update(
+                {
+                    "PYTHONHOME": "/hostile/python-home",
+                    "PYTHONPATH": "/hostile/python-path",
+                    "VIRTUAL_ENV": "/hostile/virtual-env",
+                }
+            )
             completed = subprocess.run(
                 [
                     "/usr/bin/bash",
@@ -237,7 +250,7 @@ class PythonRuntimeContractTests(unittest.TestCase):
                     str(output_directory),
                     str(TOOLS_ROOT),
                 ],
-                env=runtime_environment(python),
+                env=environment,
                 check=False,
                 capture_output=True,
                 text=True,
@@ -261,6 +274,156 @@ class PythonRuntimeContractTests(unittest.TestCase):
                 "S1_4X_BENCHMARK_CPYTHON_3_12_13_SHA256_"
             )
         )
+
+    def test_python_runtime_rejects_mutable_or_ambient_venv_routes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+
+            symlink_python = copied_test_venv(root / "source-symlink")
+            real_python = symlink_python.with_name("python.real")
+            symlink_python.rename(real_python)
+            symlink_python.symlink_to(real_python.name)
+            symlink_result = subprocess.run(
+                [
+                    "/usr/bin/bash",
+                    "-c",
+                    'set -euo pipefail; source "$1"; '
+                    "s1_4x_pin_benchmark_python",
+                    "python-runtime-contract",
+                    str(RUNTIME_HELPER),
+                ],
+                env=runtime_environment(symlink_python),
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(symlink_result.returncode, 69)
+            self.assertIn("source identity is unsafe", symlink_result.stderr)
+
+            configuration_python = copied_test_venv(root / "config-symlink")
+            configuration = configuration_python.parent.parent / "pyvenv.cfg"
+            real_configuration = configuration.with_suffix(".cfg.real")
+            configuration.rename(real_configuration)
+            configuration.symlink_to(real_configuration.name)
+            configuration_result = subprocess.run(
+                [
+                    "/usr/bin/bash",
+                    "-c",
+                    'set -euo pipefail; source "$1"; '
+                    "s1_4x_pin_benchmark_python",
+                    "python-runtime-contract",
+                    str(RUNTIME_HELPER),
+                ],
+                env=runtime_environment(configuration_python),
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(configuration_result.returncode, 69)
+            self.assertIn(
+                "external venv layout is unsafe",
+                configuration_result.stderr,
+            )
+
+            swapped_python = copied_test_venv(root / "source-swap")
+            replacement = root / "source-swap/replacement-python"
+            shutil.copy2(swapped_python, replacement)
+            swapped_result = subprocess.run(
+                [
+                    "/usr/bin/bash",
+                    "-c",
+                    'set -euo pipefail; source "$1"; '
+                    "s1_4x_pin_benchmark_python; "
+                    '/usr/bin/cp --preserve=mode,timestamps '
+                    '--remove-destination -- "$2" '
+                    '"$S1_4X_BENCHMARK_PYTHON_BIN"; '
+                    "s1_4x_run_benchmark_python -I -c "
+                    "'raise SystemExit(0)'",
+                    "python-runtime-contract",
+                    str(RUNTIME_HELPER),
+                    str(replacement),
+                ],
+                env=runtime_environment(swapped_python),
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(swapped_result.returncode, 69)
+            self.assertIn(
+                "does not match the pinned FD",
+                swapped_result.stderr,
+            )
+
+            drifted_python = copied_test_venv(
+                root / "dependency-drift",
+                numpy_version="2.5.0",
+            )
+            drifted_result = subprocess.run(
+                [
+                    "/usr/bin/bash",
+                    "-c",
+                    'set -euo pipefail; source "$1"; '
+                    "s1_4x_pin_benchmark_python",
+                    "python-runtime-contract",
+                    str(RUNTIME_HELPER),
+                ],
+                env=runtime_environment(drifted_python),
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(drifted_result.returncode, 69)
+            self.assertIn(
+                "dependency closure failed",
+                drifted_result.stderr,
+            )
+
+            ambient_python = copied_test_venv(root / "ambient-shell")
+            bash_environment = root / "ambient-shell/bash-env"
+            bash_environment.write_text("# harmless test hook\n", encoding="utf-8")
+            ambient_environment = runtime_environment(ambient_python)
+            ambient_environment["BASH_ENV"] = str(bash_environment)
+            ambient_result = subprocess.run(
+                [
+                    "/usr/bin/bash",
+                    "-c",
+                    'set -euo pipefail; source "$1"; '
+                    "s1_4x_pin_benchmark_python",
+                    "python-runtime-contract",
+                    str(RUNTIME_HELPER),
+                ],
+                env=ambient_environment,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(ambient_result.returncode, 69)
+            self.assertIn(
+                "ambient shell startup injection is forbidden",
+                ambient_result.stderr,
+            )
+
+            direct_python = copied_test_venv(root / "wrong-argv0")
+            descriptor = os.open(direct_python, os.O_RDONLY)
+            try:
+                direct_result = subprocess.run(
+                    [
+                        f"/proc/self/fd/{descriptor}",
+                        "-I",
+                        "-S",
+                        "-c",
+                        "raise SystemExit(0)",
+                    ],
+                    env=runtime_environment(direct_python),
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    pass_fds=(descriptor,),
+                )
+            finally:
+                os.close(descriptor)
+            self.assertNotEqual(direct_result.returncode, 0)
+            self.assertIn("No module named 'encodings'", direct_result.stderr)
 
 
 if __name__ == "__main__":

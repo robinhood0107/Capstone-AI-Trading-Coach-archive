@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import venv
 from pathlib import Path
 
 from tools import haskell_benchmark_block as benchmark_helper
@@ -262,6 +263,24 @@ class ProfileSelectionContractTests(unittest.TestCase):
         helper = load_helper()
         with tempfile.TemporaryDirectory() as temporary:
             temporary_root = Path(temporary)
+            venv_root = temporary_root / "oracle-venv"
+            venv.EnvBuilder(with_pip=False, symlinks=False).create(venv_root)
+            python_source = venv_root / "bin/python"
+            site_packages = venv_root / "lib/python3.12/site-packages"
+            for package, version in (
+                ("jsonschema", "4.26.0"),
+                ("numpy", "2.5.1"),
+            ):
+                metadata_root = (
+                    site_packages / f"{package}-{version}.dist-info"
+                )
+                metadata_root.mkdir()
+                (metadata_root / "METADATA").write_text(
+                    "Metadata-Version: 2.1\n"
+                    f"Name: {package}\n"
+                    f"Version: {version}\n",
+                    encoding="utf-8",
+                )
             script_source = temporary_root / "profile_workflow.py"
             script_source.write_bytes(HELPER_PATH.read_bytes())
             pinned_script = benchmark_helper.pin_regular_file(
@@ -269,7 +288,6 @@ class ProfileSelectionContractTests(unittest.TestCase):
                 label="PROFILE_MARKER_TEST_SCRIPT",
                 max_bytes=16 * 1024 * 1024,
             )
-            python_source = Path(sys.executable).resolve(strict=True)
             python_descriptor = os.open(
                 python_source,
                 os.O_RDONLY | getattr(os, "O_CLOEXEC", 0),
@@ -309,7 +327,8 @@ class ProfileSelectionContractTests(unittest.TestCase):
             )
             try:
                 completed = subprocess.run(
-                    marker_argv,
+                    [str(python_source), *marker_argv[1:]],
+                    executable=str(python_fd_path),
                     cwd=temporary_root,
                     env={
                         "LC_ALL": "C",
@@ -449,7 +468,7 @@ class ProfileSelectionContractTests(unittest.TestCase):
                 qualification,
             )
         self.assertIn(
-            '"$S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH" '
+            "s1_4x_exec_benchmark_python "
             '"$HASKELL_ROOT/tools/profile_workflow.py"',
             qualification,
         )

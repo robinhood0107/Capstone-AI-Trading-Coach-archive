@@ -162,11 +162,11 @@ class StylishFallbackTests(unittest.TestCase):
     def test_format_gate_reproduces_capability_leaf_before_real_source_check(self) -> None:
         script = (TOOLS_ROOT / "check-format.sh").read_text(encoding="utf-8")
         probe = (
-            '"$S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH" '
+            "s1_4x_run_benchmark_python "
             '"$HASKELL_ROOT/tools/stylish_fallback.py" probe'
         )
         source_inputs = (
-            '"$S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH" '
+            "s1_4x_run_benchmark_python "
             '"$HASKELL_ROOT/tools/haskell_evidence.py" source-inputs'
         )
 
