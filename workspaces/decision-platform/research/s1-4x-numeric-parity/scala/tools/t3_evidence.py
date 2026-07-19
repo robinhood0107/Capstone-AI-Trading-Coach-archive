@@ -1737,9 +1737,19 @@ def validate_jmh_stdout_precompile_binding(
     ):
         raise T3EvidenceError("JMH_RUN_STDOUT_BINDING_INVALID")
 
-    class_input = Path(processing.group(2))
-    source_root = Path(generated.group(1))
-    resource_root = Path(generated.group(2))
+    def canonical_absolute_path(raw_path: str) -> Path:
+        path = Path(raw_path)
+        if (
+            path.anchor != os.sep
+            or path.as_posix() != raw_path
+            or ".." in path.parts
+        ):
+            raise T3EvidenceError("JMH_RUN_STDOUT_BINDING_INVALID")
+        return path
+
+    class_input = canonical_absolute_path(processing.group(2))
+    source_root = canonical_absolute_path(generated.group(1))
+    resource_root = canonical_absolute_path(generated.group(2))
     class_input_id = str(
         runtime_generator.get("classInputPathId", "")
     )
@@ -1758,7 +1768,36 @@ def validate_jmh_stdout_precompile_binding(
     runtime_workspace = Path(
         *class_input.parts[: -len(class_input_relative.parts)]
     )
-    if not runtime_workspace.is_absolute():
+    if (
+        runtime_workspace.anchor != os.sep
+        or runtime_workspace.as_posix() != str(runtime_workspace)
+        or ".." in runtime_workspace.parts
+    ):
+        raise T3EvidenceError("JMH_RUN_STDOUT_BINDING_INVALID")
+    try:
+        resolved_workspace = runtime_workspace.resolve(strict=True)
+        workspace_components = [
+            Path(runtime_workspace.anchor).joinpath(
+                *runtime_workspace.parts[1 : index + 1]
+            )
+            for index in range(1, len(runtime_workspace.parts))
+        ]
+        workspace_metadata = [
+            os.lstat(component) for component in workspace_components
+        ]
+    except (OSError, RuntimeError) as error:
+        raise T3EvidenceError(
+            "JMH_RUN_STDOUT_BINDING_INVALID"
+        ) from error
+    if (
+        resolved_workspace != runtime_workspace
+        or not workspace_metadata
+        or not stat.S_ISDIR(workspace_metadata[-1].st_mode)
+        or any(
+            stat.S_ISLNK(metadata.st_mode)
+            for metadata in workspace_metadata
+        )
+    ):
         raise T3EvidenceError("JMH_RUN_STDOUT_BINDING_INVALID")
 
     def runtime_workspace_path(path_id: Any) -> Path:
