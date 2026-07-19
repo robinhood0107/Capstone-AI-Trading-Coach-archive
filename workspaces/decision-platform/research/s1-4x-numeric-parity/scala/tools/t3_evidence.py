@@ -1767,9 +1767,16 @@ def validate_jmh_stdout_precompile_binding(
             or not path_id.startswith("SCALA_WORKSPACE/")
         ):
             raise T3EvidenceError("JMH_RUN_STDOUT_BINDING_INVALID")
-        return runtime_workspace / path_id.removeprefix(
-            "SCALA_WORKSPACE/"
-        )
+        raw_relative = path_id.removeprefix("SCALA_WORKSPACE/")
+        relative = Path(raw_relative)
+        if (
+            not raw_relative
+            or relative.is_absolute()
+            or ".." in relative.parts
+            or relative.as_posix() != raw_relative
+        ):
+            raise T3EvidenceError("JMH_RUN_STDOUT_BINDING_INVALID")
+        return runtime_workspace / relative
 
     if (
         class_input != runtime_workspace_path(class_input_id)
