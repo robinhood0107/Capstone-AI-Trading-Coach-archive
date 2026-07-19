@@ -176,6 +176,31 @@ def main() -> int:
         if output_dir.exists() or output_dir.is_symlink():
             raise QualificationError("OUTPUT_DIRECTORY_MUST_BE_NEW")
         output_dir.mkdir(parents=True)
+        scala_cli_pin = os.environ.get("S1_4X_SCALA_CLI_EXEC_PATH")
+        if not scala_cli_pin:
+            raise QualificationError("SCALA_CLI_PINNED_FD_PATH_REQUIRED")
+        self_scala_cli_pin = re.fullmatch(
+            r"/proc/self/fd/([0-9]+)",
+            scala_cli_pin,
+        )
+        if self_scala_cli_pin is not None:
+            scala_cli_pin = (
+                f"/proc/{os.getpid()}/fd/{self_scala_cli_pin.group(1)}"
+            )
+            os.environ["S1_4X_SCALA_CLI_EXEC_PATH"] = scala_cli_pin
+        elif re.fullmatch(
+            r"/proc/[1-9][0-9]*/fd/[0-9]+",
+            scala_cli_pin,
+        ) is None:
+            raise QualificationError("SCALA_CLI_PINNED_FD_PATH_INVALID")
+        if (
+            not Path(scala_cli_pin).is_file()
+            or not os.access(scala_cli_pin, os.X_OK)
+            or sha256_file(Path(scala_cli_pin)) != scala_cli_sha
+        ):
+            raise QualificationError(
+                "SCALA_CLI_PINNED_FD_IDENTITY_MISMATCH"
+            )
         java_pin = os.environ.get("S1_4X_SCALA_JAVA_PINNED_FD_PATH")
         if not java_pin:
             raise QualificationError("JAVA_PINNED_FD_PATH_REQUIRED")

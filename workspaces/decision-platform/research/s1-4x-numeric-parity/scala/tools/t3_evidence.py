@@ -837,6 +837,12 @@ JMH_RUN_RESULT_KEYS = {
     "portableArgv",
     "portableArgvSha256",
     "runtimeArgvSha256",
+    "liveRuntimeArgvWitness",
+    "liveRuntimeArgvWitnessSha256",
+    "runtimeExecutionPathIdentities",
+    "runtimeExecutionPathIdentitiesSha256",
+    "liveExecutionPathIdentity",
+    "liveExecutionPathIdentitySha256",
     "commandToolClosure",
     "commandToolClosureSha256",
     "environmentValuesSha256",
@@ -951,6 +957,263 @@ def command_tool_closure(
         }
         for path_id, path, root in paths
     ]
+
+
+def runtime_execution_path_identities(
+    *,
+    scala_cli: Path,
+    java_executable: Path,
+    scala_cli_execution_path_id: str,
+    snapshot: SealedEvidenceSnapshot,
+) -> list[dict[str, str]]:
+    """죽은 proc pathname 대신 실행 tool의 portable path ID와 bytes를 고정한다."""
+
+    if scala_cli_execution_path_id not in {
+        "SCALA_CLI_1_15_0",
+        "PINNED_SCALA_CLI_1_15_0_FD",
+    }:
+        raise T3EvidenceError("SCALA_CLI_EXECUTION_PATH_ID_INVALID")
+    values = [
+        (
+            scala_cli_execution_path_id,
+            "SCALA_CLI_1_15_0",
+            scala_cli,
+            scala_cli.parent,
+        ),
+        (
+            "PINNED_JAVA_FD",
+            "TEMURIN_25_0_3_9_LTS/bin/java",
+            java_executable,
+            java_executable.parent.parent,
+        ),
+        (
+            "PINNED_JAVAC_FD",
+            "TEMURIN_25_0_3_9_LTS/bin/javac",
+            java_executable.parent / "javac",
+            java_executable.parent.parent,
+        ),
+    ]
+    return [
+        {
+            "executionPathId": execution_path_id,
+            "binaryPathId": binary_path_id,
+            "binarySha256": snapshot.sha256(
+                path,
+                root=root,
+                label=f"qualification.runtimeTool.{binary_path_id}",
+            ),
+        }
+        for execution_path_id, binary_path_id, path, root in values
+    ]
+
+
+def _executable_file_identity(path: Path) -> dict[str, int]:
+    """현재 canonical executable의 stat identity를 portable field로 만든다."""
+
+    try:
+        metadata = os.stat(path, follow_symlinks=False)
+    except OSError as error:
+        raise T3EvidenceError("LIVE_RUNTIME_BINARY_STAT_FAILED") from error
+    if (
+        path.is_symlink()
+        or not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_nlink != 1
+        or metadata.st_mode & 0o111 == 0
+    ):
+        raise T3EvidenceError("LIVE_RUNTIME_BINARY_IDENTITY_INVALID")
+    return {
+        "device": metadata.st_dev,
+        "inode": metadata.st_ino,
+        "mode": metadata.st_mode,
+        "linkCount": metadata.st_nlink,
+        "uid": metadata.st_uid,
+        "gid": metadata.st_gid,
+        "size": metadata.st_size,
+        "mtimeNs": metadata.st_mtime_ns,
+        "ctimeNs": metadata.st_ctime_ns,
+    }
+
+
+def validate_live_runtime_execution_witness(
+    *,
+    run: dict[str, Any],
+    expected_normalized_argv: list[str],
+    expected_execution_path_identities: list[dict[str, str]],
+    scala_cli: Path,
+    java_executable: Path,
+    snapshot: SealedEvidenceSnapshot,
+) -> None:
+    """종료된 proc FD를 재개방하지 않고 당시 실행 identity 증언을 검증한다."""
+
+    stable_identity_keys = {
+        "executionPathId",
+        "binaryPathId",
+        "binarySha256",
+    }
+    live_identity_keys = stable_identity_keys | {
+        "procOwnerPid",
+        "procOwnerStartTimeTicks",
+        "procFd",
+        "runtimePathSha256",
+        "fileIdentity",
+    }
+    file_identity_keys = {
+        "device",
+        "inode",
+        "mode",
+        "linkCount",
+        "uid",
+        "gid",
+        "size",
+        "mtimeNs",
+        "ctimeNs",
+    }
+    witness_keys = {
+        "schemaVersion",
+        "normalizedArgv",
+        "normalizedArgvSha256",
+        "physicalArgvSha256",
+        "physicalExecutionPaths",
+        "status",
+    }
+    physical_path_keys = {
+        "argvIndex",
+        "executionPathId",
+        "pathSha256",
+    }
+    if (
+        len(expected_execution_path_identities) != 3
+        or any(
+            not isinstance(identity, dict)
+            or set(identity) != stable_identity_keys
+            for identity in expected_execution_path_identities
+        )
+    ):
+        raise T3EvidenceError("LIVE_RUNTIME_EXPECTED_IDENTITY_INVALID")
+    scala_cli_execution_path_id = expected_execution_path_identities[0].get(
+        "executionPathId"
+    )
+    independently_expected = runtime_execution_path_identities(
+        scala_cli=scala_cli,
+        java_executable=java_executable,
+        scala_cli_execution_path_id=str(scala_cli_execution_path_id),
+        snapshot=snapshot,
+    )
+    stable_identities = run.get("runtimeExecutionPathIdentities")
+    if (
+        expected_execution_path_identities != independently_expected
+        or stable_identities != independently_expected
+        or run.get("runtimeExecutionPathIdentitiesSha256")
+        != canonical_sha256(independently_expected)
+    ):
+        raise T3EvidenceError("LIVE_RUNTIME_STABLE_IDENTITY_DRIFT")
+
+    live_identities = run.get("liveExecutionPathIdentity")
+    binary_paths = [
+        scala_cli,
+        java_executable,
+        java_executable.parent / "javac",
+    ]
+    if (
+        not isinstance(live_identities, list)
+        or len(live_identities) != len(independently_expected)
+    ):
+        raise T3EvidenceError("LIVE_RUNTIME_IDENTITY_WITNESS_INVALID")
+    proc_owners: set[tuple[int, int]] = set()
+    proc_fds: set[int] = set()
+    for live, stable, binary_path in zip(
+        live_identities,
+        independently_expected,
+        binary_paths,
+        strict=True,
+    ):
+        if (
+            not isinstance(live, dict)
+            or set(live) != live_identity_keys
+            or any(live.get(key) != value for key, value in stable.items())
+            or type(live.get("procOwnerPid")) is not int
+            or live["procOwnerPid"] <= 0
+            or type(live.get("procOwnerStartTimeTicks")) is not int
+            or live["procOwnerStartTimeTicks"] <= 0
+            or type(live.get("procFd")) is not int
+            or live["procFd"] < 0
+            or SHA256.fullmatch(str(live.get("runtimePathSha256")))
+            is None
+            or not isinstance(live.get("fileIdentity"), dict)
+            or set(live["fileIdentity"]) != file_identity_keys
+            or any(
+                type(value) is not int
+                for value in live["fileIdentity"].values()
+            )
+            or live["fileIdentity"]
+            != _executable_file_identity(binary_path)
+        ):
+            raise T3EvidenceError("LIVE_RUNTIME_IDENTITY_WITNESS_DRIFT")
+        proc_owners.add(
+            (
+                live["procOwnerPid"],
+                live["procOwnerStartTimeTicks"],
+            )
+        )
+        proc_fds.add(live["procFd"])
+    if len(proc_owners) != 1 or len(proc_fds) != len(live_identities):
+        raise T3EvidenceError("LIVE_RUNTIME_PROC_FD_CLOSURE_DRIFT")
+    if run.get("liveExecutionPathIdentitySha256") != canonical_sha256(
+        live_identities
+    ):
+        raise T3EvidenceError("LIVE_RUNTIME_IDENTITY_HASH_DRIFT")
+
+    witness = run.get("liveRuntimeArgvWitness")
+    if not isinstance(witness, dict) or set(witness) != witness_keys:
+        raise T3EvidenceError("LIVE_RUNTIME_ARGV_WITNESS_INVALID")
+    normalized_argv = witness.get("normalizedArgv")
+    physical_paths = witness.get("physicalExecutionPaths")
+    try:
+        java_index = expected_normalized_argv.index("PINNED_JAVA_FD")
+    except ValueError as error:
+        raise T3EvidenceError(
+            "LIVE_RUNTIME_NORMALIZED_JAVA_PATH_MISSING"
+        ) from error
+    expected_physical_paths = [
+        {
+            "argvIndex": 0,
+            "executionPathId": independently_expected[0][
+                "executionPathId"
+            ],
+            "pathSha256": live_identities[0]["runtimePathSha256"],
+        },
+        {
+            "argvIndex": java_index,
+            "executionPathId": "PINNED_JAVA_FD",
+            "pathSha256": live_identities[1]["runtimePathSha256"],
+        },
+    ]
+    if (
+        witness.get("schemaVersion")
+        != "s1.4x-scala-live-runtime-argv-witness-v1"
+        or witness.get("status") != "PASS"
+        or not isinstance(normalized_argv, list)
+        or any(type(item) is not str for item in normalized_argv)
+        or normalized_argv != expected_normalized_argv
+        or witness.get("normalizedArgvSha256")
+        != canonical_sha256(expected_normalized_argv)
+        or run.get("runtimeArgvSha256")
+        != canonical_sha256(expected_normalized_argv)
+        or SHA256.fullmatch(str(witness.get("physicalArgvSha256")))
+        is None
+        or not isinstance(physical_paths, list)
+        or any(
+            not isinstance(item, dict)
+            or set(item) != physical_path_keys
+            for item in physical_paths
+        )
+        or physical_paths != expected_physical_paths
+    ):
+        raise T3EvidenceError("LIVE_RUNTIME_ARGV_WITNESS_DRIFT")
+    if run.get("liveRuntimeArgvWitnessSha256") != canonical_sha256(witness):
+        raise T3EvidenceError("LIVE_RUNTIME_ARGV_WITNESS_HASH_DRIFT")
+
+
 HOST_VALIDITY_CHECK_IDS = {
     "disk.home-free-bytes",
     "memory.available-bytes",
@@ -1685,12 +1948,6 @@ def validate_qualification_case_artifacts(
     portable_sources = [
         f"SCALA_ROOT/{path}" for path in source_input_paths
     ]
-    absolute_sources = [
-        str(scala_root / path) for path in source_input_paths
-    ]
-    runtime_workspace = isolated_scala_workspace(
-        artifact_root / case_root
-    )
     common_tail = [
         "--workspace",
         "SCALA_WORKSPACE",
@@ -1736,44 +1993,10 @@ def validate_qualification_case_artifacts(
         "EVIDENCE_ROOT/native.json",
         include_regex,
     ]
-    java_pinned_fd_path = os.environ.get(
-        "S1_4X_SCALA_JAVA_PINNED_FD_PATH"
-    )
-    if (
-        not java_pinned_fd_path
-        or re.fullmatch(
-            r"/proc/(?:self|[1-9][0-9]*)/fd/[0-9]+",
-            java_pinned_fd_path,
-        )
-        is None
-    ):
-        raise T3EvidenceError("JAVA_PINNED_FD_PATH_REQUIRED")
-    runtime_tail = [
-        (
-            java_pinned_fd_path
-            if item == "PINNED_JAVA_FD"
-            else str(
-                artifact_root
-                / case_root
-                / jmh_precompile.GENERATED_CLASSES_NAME
-            )
-            if item
-            == f"EVIDENCE_ROOT/{jmh_precompile.GENERATED_CLASSES_NAME}"
-            else item
-        )
-        for item in common_tail
-    ]
-    expected_runtime_argv = [
-        str(scala_cli),
-        "--power",
-        "run",
-        *absolute_sources,
-        "--workspace",
-        str(runtime_workspace),
-        *runtime_tail[2:],
-        "-rff",
-        str(artifact_root / case_root / "native.json"),
-        include_regex,
+    scala_cli_execution_path_id = "PINNED_SCALA_CLI_1_15_0_FD"
+    expected_runtime_identity_argv = [
+        scala_cli_execution_path_id,
+        *expected_portable_argv[1:],
     ]
     java_home_value = os.environ.get("JAVA_HOME")
     if not java_home_value:
@@ -1784,6 +2007,14 @@ def validate_qualification_case_artifacts(
         java_executable=Path(java_home_value) / "bin/java",
         run_mode="qualification",
         snapshot=snapshot,
+    )
+    expected_runtime_execution_identities = (
+        runtime_execution_path_identities(
+            scala_cli=scala_cli,
+            java_executable=Path(java_home_value) / "bin/java",
+            scala_cli_execution_path_id=scala_cli_execution_path_id,
+            snapshot=snapshot,
+        )
     )
     run = snapshot.json_object(
         run_path,
@@ -1834,7 +2065,8 @@ def validate_qualification_case_artifacts(
             root=scala_cli.parent,
             label="qualification.scalaCli",
         )
-        or run.get("scalaCliExecutionPathId") != "SCALA_CLI_1_15_0"
+        or run.get("scalaCliExecutionPathId")
+        != scala_cli_execution_path_id
         or run.get("compilerProfilesSha256")
         != compiler_profiles_sha256
         or run.get("profileOptionsSha256")
@@ -1844,7 +2076,7 @@ def validate_qualification_case_artifacts(
         or run.get("portableArgvSha256")
         != canonical_sha256(expected_portable_argv)
         or run.get("runtimeArgvSha256")
-        != canonical_sha256(expected_runtime_argv)
+        != canonical_sha256(expected_runtime_identity_argv)
         or run.get("commandToolClosure") != expected_tool_closure
         or run.get("commandToolClosureSha256")
         != canonical_sha256(expected_tool_closure)
@@ -1893,6 +2125,16 @@ def validate_qualification_case_artifacts(
         raise T3EvidenceError(
             f"QUALIFICATION_RUN_RECEIPT_DRIFT:{repetition}:{profile}:{case_id}"
         )
+    validate_live_runtime_execution_witness(
+        run=run,
+        expected_normalized_argv=expected_runtime_identity_argv,
+        expected_execution_path_identities=(
+            expected_runtime_execution_identities
+        ),
+        scala_cli=scala_cli,
+        java_executable=Path(java_home_value) / "bin/java",
+        snapshot=snapshot,
+    )
     require_portable_argv(
         run["portableArgv"],
         f"qualification.r{repetition}.{profile}.{case_id}",

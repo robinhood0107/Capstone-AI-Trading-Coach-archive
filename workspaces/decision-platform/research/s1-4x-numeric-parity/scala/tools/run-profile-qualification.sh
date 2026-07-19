@@ -54,26 +54,35 @@ CORRECTNESS_ROOT="$RESULT_DIR/scala/profiles"
 
 "$SCALA_ROOT/tools/assert-toolchain.sh"
 
+SCALA_CLI="${S1_4X_SCALA_CLI_BIN:?Scala CLI is required}"
 JAVA_EXECUTABLE="${JAVA_HOME:?JAVA_HOME is required}/bin/java"
 JAVAC_EXECUTABLE="$JAVA_HOME/bin/javac"
+scala_cli_sha="$(
+  jq -er '.scalaCli.binarySha256' "$SCALA_ROOT/toolchain-lock.v1.json"
+)"
 java_sha="$(jq -er '.jdk.javaExecutableSha256' "$SCALA_ROOT/toolchain-lock.v1.json")"
 javac_sha="$(
   jq -er '.jdk.javacExecutableSha256' "$SCALA_ROOT/toolchain-lock.v1.json"
 )"
-[[ -z "${S1_4X_SCALA_JAVA_PINNED_FD_PATH+x}" \
+[[ -z "${S1_4X_SCALA_CLI_EXEC_PATH+x}" \
+  && -z "${S1_4X_SCALA_JAVA_PINNED_FD_PATH+x}" \
   && -z "${S1_4X_SCALA_JAVAC_PINNED_FD_PATH+x}" ]] || {
-  printf 'qualification wrapper owns the Java and javac pinned FDs\n' >&2
+  printf 'qualification wrapper owns the Scala CLI, Java, and javac pinned FDs\n' >&2
   exit 69
 }
+exec {scala_cli_pin_fd}<"$SCALA_CLI"
 exec {java_pin_fd}<"$JAVA_EXECUTABLE"
 exec {javac_pin_fd}<"$JAVAC_EXECUTABLE"
+export S1_4X_SCALA_CLI_EXEC_PATH="/proc/$$/fd/$scala_cli_pin_fd"
 export S1_4X_SCALA_JAVA_PINNED_FD_PATH="/proc/$$/fd/$java_pin_fd"
 export S1_4X_SCALA_JAVAC_PINNED_FD_PATH="/proc/$$/fd/$javac_pin_fd"
-[[ "$(sha256sum "$S1_4X_SCALA_JAVA_PINNED_FD_PATH" | awk '{print $1}')" \
+[[ "$(sha256sum "$S1_4X_SCALA_CLI_EXEC_PATH" | awk '{print $1}')" \
+  == "$scala_cli_sha" \
+  && "$(sha256sum "$S1_4X_SCALA_JAVA_PINNED_FD_PATH" | awk '{print $1}')" \
   == "$java_sha" \
   && "$(sha256sum "$S1_4X_SCALA_JAVAC_PINNED_FD_PATH" | awk '{print $1}')" \
   == "$javac_sha" ]] || {
-  printf 'qualification Java compiler FD identity mismatch\n' >&2
+  printf 'qualification tool FD identity mismatch\n' >&2
   exit 69
 }
 
@@ -88,10 +97,12 @@ python3 "$SCALA_ROOT/tools/run_profile_qualification.py" \
   --uv "$(readlink -f -- "$UV_BIN")" \
   --jvm-allowlist "$JVM_ALLOWLIST" \
   --output-dir "$OUTPUT_DIR"
-[[ "$(sha256sum "$S1_4X_SCALA_JAVA_PINNED_FD_PATH" | awk '{print $1}')" \
+[[ "$(sha256sum "$S1_4X_SCALA_CLI_EXEC_PATH" | awk '{print $1}')" \
+  == "$scala_cli_sha" \
+  && "$(sha256sum "$S1_4X_SCALA_JAVA_PINNED_FD_PATH" | awk '{print $1}')" \
   == "$java_sha" \
   && "$(sha256sum "$S1_4X_SCALA_JAVAC_PINNED_FD_PATH" | awk '{print $1}')" \
   == "$javac_sha" ]] || {
-  printf 'qualification Java compiler FD identity drift\n' >&2
+  printf 'qualification tool FD identity drift\n' >&2
   exit 69
 }

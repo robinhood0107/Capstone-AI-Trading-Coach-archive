@@ -93,6 +93,10 @@ verify_fixture_root_identity
 
 JAVA_EXECUTABLE="${JAVA_HOME:?JAVA_HOME is required}/bin/java"
 JAVAC_EXECUTABLE="${JAVA_HOME:?JAVA_HOME is required}/bin/javac"
+[[ "$SCALA_CLI" == /* \
+  && -f "$SCALA_CLI" \
+  && -x "$SCALA_CLI" \
+  && ! -L "$SCALA_CLI" ]] || usage
 [[ "$JAVA_EXECUTABLE" == /* \
   && -f "$JAVA_EXECUTABLE" \
   && -x "$JAVA_EXECUTABLE" \
@@ -101,8 +105,34 @@ JAVAC_EXECUTABLE="${JAVA_HOME:?JAVA_HOME is required}/bin/javac"
   && -f "$JAVAC_EXECUTABLE" \
   && -x "$JAVAC_EXECUTABLE" \
   && ! -L "$JAVAC_EXECUTABLE" ]] || usage
+scala_cli_sha="$(sha256sum "$SCALA_CLI" | awk '{print $1}')"
 java_sha="$(sha256sum "$JAVA_EXECUTABLE" | awk '{print $1}')"
 javac_sha="$(sha256sum "$JAVAC_EXECUTABLE" | awk '{print $1}')"
+pinned_scala_cli_input="${S1_4X_SCALA_CLI_EXEC_PATH:-}"
+if [[ -z "$pinned_scala_cli_input" ]]; then
+  [[ "$MODE" == "smoke" ]] || {
+    printf 'qualification/full JMH requires a parent-sealed Scala CLI FD\n' >&2
+    exit 69
+  }
+  # Standalone smoke도 실제 실행한 Scala CLI inode를 receipt 생성까지 유지한다.
+  exec {scala_cli_pin_fd}<"$SCALA_CLI"
+  SCALA_CLI_EXEC="/proc/$$/fd/$scala_cli_pin_fd"
+elif [[ "$pinned_scala_cli_input" =~ ^/proc/self/fd/([0-9]+)$ ]]; then
+  SCALA_CLI_EXEC="/proc/$$/fd/${BASH_REMATCH[1]}"
+elif [[ "$pinned_scala_cli_input" =~ ^/proc/[1-9][0-9]*/fd/[0-9]+$ ]]; then
+  SCALA_CLI_EXEC="$pinned_scala_cli_input"
+else
+  printf 'Scala CLI pinned FD path is invalid\n' >&2
+  exit 69
+fi
+if [[ ! -f "$SCALA_CLI_EXEC" \
+  || ! -x "$SCALA_CLI_EXEC" \
+  || "$(sha256sum "$SCALA_CLI_EXEC" | awk '{print $1}')" \
+    != "$scala_cli_sha" ]]; then
+  printf 'Scala CLI pinned FD identity mismatch\n' >&2
+  exit 69
+fi
+export S1_4X_SCALA_CLI_EXEC_PATH="$SCALA_CLI_EXEC"
 pinned_java_input="${S1_4X_SCALA_JAVA_PINNED_FD_PATH:-}"
 if [[ -z "$pinned_java_input" ]]; then
   [[ "$MODE" == "smoke" ]] || {
@@ -228,7 +258,6 @@ export S1_4X_SCALA_WORKSPACE="$scala_workspace"
 export XDG_CONFIG_HOME="$xdg_config"
 export SCALA_CLI_CONFIG="$scala_cli_config"
 unset COURSIER_REPOSITORIES
-SCALA_CLI_EXEC="${S1_4X_SCALA_CLI_EXEC_PATH:-$SCALA_CLI}"
 [[ "$SCALA_CLI_EXEC" == /* && -x "$SCALA_CLI_EXEC" ]] || {
   printf 'Scala CLI execution path is invalid\n' >&2
   exit 69
@@ -485,6 +514,8 @@ python3 - \
 import hashlib
 import json
 import os
+import re
+import stat
 import sys
 from pathlib import Path
 
@@ -533,7 +564,167 @@ def strict_object(path: Path) -> dict:
 scala_root = manifest.parent
 output_root = output.parent
 scala_workspace = Path(os.environ["S1_4X_SCALA_WORKSPACE"])
+scala_cli_exec = os.environ.get("S1_4X_SCALA_CLI_EXEC_PATH", str(scala_cli))
 java_exec = os.environ["S1_4X_SCALA_JAVA_PINNED_FD_PATH"]
+javac_exec = os.environ["S1_4X_SCALA_JAVAC_PINNED_FD_PATH"]
+proc_fd_pattern = re.compile(
+    r"^/proc/(?P<pid>self|[1-9][0-9]*)/fd/(?P<fd>[0-9]+)$"
+)
+scala_cli_is_pinned = proc_fd_pattern.fullmatch(scala_cli_exec) is not None
+if (
+    runtime_argv[0] != scala_cli_exec
+    or (mode in {"qualification", "full"} and not scala_cli_is_pinned)
+    or proc_fd_pattern.fullmatch(java_exec) is None
+    or proc_fd_pattern.fullmatch(javac_exec) is None
+):
+    raise SystemExit("JMH_RUNTIME_EXECUTION_PATH_DRIFT")
+
+
+def live_executable_identity(
+    *,
+    runtime_path: str,
+    binary_path: Path,
+    execution_path_id: str,
+    binary_path_id: str,
+) -> dict:
+    match = proc_fd_pattern.fullmatch(runtime_path)
+    if match is None:
+        raise SystemExit("JMH_LIVE_EXECUTION_PATH_NOT_PINNED")
+    owner_pid = (
+        os.getpid()
+        if match.group("pid") == "self"
+        else int(match.group("pid"))
+    )
+    proc_fd = int(match.group("fd"))
+    try:
+        process_stat = Path(f"/proc/{owner_pid}/stat").read_text(
+            encoding="utf-8"
+        )
+        comm_end = process_stat.rfind(")")
+        remaining_fields = process_stat[comm_end + 2 :].split()
+        owner_start_time_ticks = int(remaining_fields[19])
+    except (OSError, ValueError, IndexError) as error:
+        raise SystemExit("JMH_PROC_OWNER_IDENTITY_UNAVAILABLE") from error
+    if (
+        owner_pid <= 0
+        or proc_fd < 0
+        or comm_end < 0
+        or owner_start_time_ticks <= 0
+    ):
+        raise SystemExit("JMH_PROC_OWNER_IDENTITY_INVALID")
+    runtime_metadata = os.stat(runtime_path, follow_symlinks=True)
+    binary_metadata = os.stat(binary_path, follow_symlinks=False)
+    identity = (
+        runtime_metadata.st_dev,
+        runtime_metadata.st_ino,
+        runtime_metadata.st_mode,
+        runtime_metadata.st_nlink,
+        runtime_metadata.st_uid,
+        runtime_metadata.st_gid,
+        runtime_metadata.st_size,
+        runtime_metadata.st_mtime_ns,
+        runtime_metadata.st_ctime_ns,
+    )
+    binary_identity = (
+        binary_metadata.st_dev,
+        binary_metadata.st_ino,
+        binary_metadata.st_mode,
+        binary_metadata.st_nlink,
+        binary_metadata.st_uid,
+        binary_metadata.st_gid,
+        binary_metadata.st_size,
+        binary_metadata.st_mtime_ns,
+        binary_metadata.st_ctime_ns,
+    )
+    if (
+        binary_path.is_symlink()
+        or not stat.S_ISREG(runtime_metadata.st_mode)
+        or runtime_metadata.st_nlink != 1
+        or runtime_metadata.st_mode & 0o111 == 0
+        or identity != binary_identity
+        or digest(Path(runtime_path)) != digest(binary_path)
+    ):
+        raise SystemExit("JMH_LIVE_EXECUTION_IDENTITY_DRIFT")
+    return {
+        "executionPathId": execution_path_id,
+        "binaryPathId": binary_path_id,
+        "binarySha256": digest(binary_path),
+        "procOwnerPid": owner_pid,
+        "procOwnerStartTimeTicks": owner_start_time_ticks,
+        "procFd": proc_fd,
+        "runtimePathSha256": hashlib.sha256(
+            runtime_path.encode("utf-8")
+        ).hexdigest(),
+        "fileIdentity": {
+            "device": identity[0],
+            "inode": identity[1],
+            "mode": identity[2],
+            "linkCount": identity[3],
+            "uid": identity[4],
+            "gid": identity[5],
+            "size": identity[6],
+            "mtimeNs": identity[7],
+            "ctimeNs": identity[8],
+        },
+    }
+
+
+scala_cli_execution_path_id = (
+    "PINNED_SCALA_CLI_1_15_0_FD"
+    if scala_cli_is_pinned
+    else "SCALA_CLI_1_15_0"
+)
+runtime_execution_path_identities = [
+    {
+        "executionPathId": scala_cli_execution_path_id,
+        "binaryPathId": "SCALA_CLI_1_15_0",
+        "binarySha256": digest(scala_cli),
+    },
+    {
+        "executionPathId": "PINNED_JAVA_FD",
+        "binaryPathId": "TEMURIN_25_0_3_9_LTS/bin/java",
+        "binarySha256": digest(Path(os.environ["JAVA_HOME"]) / "bin/java"),
+    },
+    {
+        "executionPathId": "PINNED_JAVAC_FD",
+        "binaryPathId": "TEMURIN_25_0_3_9_LTS/bin/javac",
+        "binarySha256": digest(Path(os.environ["JAVA_HOME"]) / "bin/javac"),
+    },
+]
+live_execution_path_identities = [
+    live_executable_identity(
+        runtime_path=scala_cli_exec,
+        binary_path=scala_cli,
+        execution_path_id=scala_cli_execution_path_id,
+        binary_path_id="SCALA_CLI_1_15_0",
+    ),
+    live_executable_identity(
+        runtime_path=java_exec,
+        binary_path=Path(os.environ["JAVA_HOME"]) / "bin/java",
+        execution_path_id="PINNED_JAVA_FD",
+        binary_path_id="TEMURIN_25_0_3_9_LTS/bin/java",
+    ),
+    live_executable_identity(
+        runtime_path=javac_exec,
+        binary_path=Path(os.environ["JAVA_HOME"]) / "bin/javac",
+        execution_path_id="PINNED_JAVAC_FD",
+        binary_path_id="TEMURIN_25_0_3_9_LTS/bin/javac",
+    ),
+]
+proc_owners = {
+    (
+        identity["procOwnerPid"],
+        identity["procOwnerStartTimeTicks"],
+    )
+    for identity in live_execution_path_identities
+}
+proc_fds = {
+    identity["procFd"] for identity in live_execution_path_identities
+}
+if len(proc_owners) != 1 or len(proc_fds) != len(
+    live_execution_path_identities
+):
+    raise SystemExit("JMH_LIVE_EXECUTION_FD_CLOSURE_DRIFT")
 compiler_config = strict_object(compiler_profiles)
 source_manifest = strict_object(manifest)
 native_validation = strict_object(validation)
@@ -653,11 +844,34 @@ environment_values = {
     "S1_4X_SCALA_WORKSPACE": "SCALA_WORKSPACE",
     "XDG_CONFIG_HOME": "SCALA_ISOLATION/xdg-config",
 }
-execution_path_id = (
-    "PINNED_SCALA_CLI_FD"
-    if runtime_argv[0].startswith("/proc/self/fd/")
-    else "SCALA_CLI_1_15_0"
-)
+runtime_identity_argv = [
+    scala_cli_execution_path_id,
+    *portable[1:],
+]
+java_runtime_index = runtime_identity_argv.index("PINNED_JAVA_FD")
+live_runtime_argv_witness = {
+    "schemaVersion": "s1.4x-scala-live-runtime-argv-witness-v1",
+    "normalizedArgv": runtime_identity_argv,
+    "normalizedArgvSha256": canonical(runtime_identity_argv),
+    "physicalArgvSha256": canonical(runtime_argv),
+    "physicalExecutionPaths": [
+        {
+            "argvIndex": 0,
+            "executionPathId": scala_cli_execution_path_id,
+            "pathSha256": live_execution_path_identities[0][
+                "runtimePathSha256"
+            ],
+        },
+        {
+            "argvIndex": java_runtime_index,
+            "executionPathId": "PINNED_JAVA_FD",
+            "pathSha256": live_execution_path_identities[1][
+                "runtimePathSha256"
+            ],
+        },
+    ],
+    "status": "PASS",
+}
 
 result = {
     "schemaVersion": "s1.4x-scala-jmh-run-result-v1",
@@ -674,7 +888,7 @@ result = {
     "benchmarkPlanSha256": digest(plan),
     "sourceInputManifestSha256": digest(manifest),
     "scalaCliBinarySha256": digest(scala_cli),
-    "scalaCliExecutionPathId": execution_path_id,
+    "scalaCliExecutionPathId": scala_cli_execution_path_id,
     "compilerProfilesSha256": digest(compiler_profiles),
     "profileOptionsSha256": canonical(
         compiler_config["profiles"][profile]["additionalOptions"]
@@ -682,7 +896,19 @@ result = {
     "inputPaths": actual_inputs,
     "portableArgv": portable,
     "portableArgvSha256": canonical(portable),
-    "runtimeArgvSha256": canonical(runtime_argv),
+    "runtimeArgvSha256": canonical(runtime_identity_argv),
+    "liveRuntimeArgvWitness": live_runtime_argv_witness,
+    "liveRuntimeArgvWitnessSha256": canonical(
+        live_runtime_argv_witness
+    ),
+    "runtimeExecutionPathIdentities": runtime_execution_path_identities,
+    "runtimeExecutionPathIdentitiesSha256": canonical(
+        runtime_execution_path_identities
+    ),
+    "liveExecutionPathIdentity": live_execution_path_identities,
+    "liveExecutionPathIdentitySha256": canonical(
+        live_execution_path_identities
+    ),
     "commandToolClosure": tool_closure,
     "commandToolClosureSha256": canonical(tool_closure),
     "environmentValuesSha256": canonical(environment_values),
