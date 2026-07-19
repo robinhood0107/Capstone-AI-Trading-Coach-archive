@@ -8,6 +8,7 @@ import stat
 import subprocess
 import tempfile
 import unittest
+import venv
 from pathlib import Path
 
 
@@ -29,6 +30,50 @@ EXPECTED_OPTIONS = (
 )
 
 
+def _sha256_file(path: Path) -> str:
+    """실행 회귀 fixture가 전달할 exact file bytes SHA-256을 계산한다."""
+
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _write_executable(path: Path) -> None:
+    """실행되면 실패하는 regular executable fixture를 만든다."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("#!/usr/bin/bash\nexit 97\n", encoding="utf-8")
+    path.chmod(0o755)
+
+
+def _copied_benchmark_python(root: Path) -> Path:
+    """외부 venv layout과 동결 dependency metadata를 가진 CPython copy를 만든다."""
+
+    venv_root = root / "benchmark-python-venv"
+    venv.EnvBuilder(with_pip=False, symlinks=False).create(venv_root)
+    site_packages = venv_root / "lib/python3.12/site-packages"
+    for package, version in (
+        ("jsonschema", "4.26.0"),
+        ("numpy", "2.5.1"),
+    ):
+        package_root = site_packages / package
+        package_root.mkdir()
+        (package_root / "__init__.py").write_text(
+            f'__version__ = "{version}"\n',
+            encoding="utf-8",
+        )
+        metadata_root = site_packages / f"{package}-{version}.dist-info"
+        metadata_root.mkdir()
+        (metadata_root / "METADATA").write_text(
+            "Metadata-Version: 2.1\n"
+            f"Name: {package}\n"
+            f"Version: {version}\n",
+            encoding="utf-8",
+        )
+    python = venv_root / "bin/python"
+    if not python.is_file() or python.is_symlink():
+        raise AssertionError("benchmark Python fixture must be a regular copy")
+    return python
+
+
 class BenchmarkWrapperContractTests(unittest.TestCase):
     """Outer wrapper가 frozen argv와 self-identity 경계를 바꾸지 못하게 한다."""
 
@@ -37,6 +82,218 @@ class BenchmarkWrapperContractTests(unittest.TestCase):
         self.assertTrue(HELPER.is_file(), "outer benchmark helper is missing")
         mode = WRAPPER.stat().st_mode
         self.assertTrue(mode & stat.S_IXUSR, "outer benchmark wrapper is not executable")
+
+    def test_env_i_executes_shared_runtime_before_benchmark_validation(
+        self,
+    ) -> None:
+        """빈 환경 child에서도 retained helper가 실제 Python 실행까지 도달한다."""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            benchmark_python = _copied_benchmark_python(root)
+            install_prefix = root / "install-prefix"
+            tool_paths = {
+                "S1_4X_GHCUP": root / "tools/ghcup",
+                "S1_4X_STACK": (
+                    install_prefix / ".ghcup/stack/3.11.1/stack"
+                ),
+                "S1_4X_AUTHORITATIVE_GHC": (
+                    install_prefix / ".ghcup/ghc/9.10.3/bin/ghc-9.10.3"
+                ),
+                "S1_4X_LATEST_GHC": root / "tools/ghc-9.14.1",
+                "S1_4X_HLINT": root / "tools/hlint",
+                "S1_4X_STYLISH": root / "tools/stylish-haskell",
+            }
+            for path in tool_paths.values():
+                _write_executable(path)
+
+            cache_root = root / "cache"
+            large_fixture_root = root / "fixtures"
+            cache_root.mkdir()
+            (large_fixture_root / "large").mkdir(parents=True)
+            environment = {
+                "GHCUP_INSTALL_BASE_PREFIX": str(install_prefix),
+                "S1_4X_BENCHMARK_PYTHON_BIN": str(benchmark_python),
+                "S1_4X_BENCHMARK_PYTHON_SHA256": _sha256_file(
+                    benchmark_python
+                ),
+                "S1_4X_CACHE_ROOT": str(cache_root),
+                "S1_4X_LARGE_FIXTURE_ROOT": str(large_fixture_root),
+            }
+            descriptors: list[int] = []
+            try:
+                for prefix, path in tool_paths.items():
+                    descriptor = os.open(path, os.O_RDONLY)
+                    descriptors.append(descriptor)
+                    environment.update(
+                        {
+                            f"{prefix}_BIN": str(path),
+                            f"{prefix}_SHA256": _sha256_file(path),
+                            f"{prefix}_PINNED_FD_PATH": (
+                                f"/proc/self/fd/{descriptor}"
+                            ),
+                        }
+                    )
+                for prefix, name in (
+                    ("S1_4X_HASKELL_BASELINE_CORRECTNESS", "baseline"),
+                    ("S1_4X_HASKELL_OPTIMIZED_CORRECTNESS", "optimized"),
+                    ("S1_4X_HASKELL_QUALIFICATION_ARTIFACT", "qualification"),
+                ):
+                    path = root / f"{name}.json"
+                    path.write_text("{}\n", encoding="utf-8")
+                    descriptor = os.open(path, os.O_RDONLY)
+                    descriptors.append(descriptor)
+                    environment.update(
+                        {
+                            prefix: f"/proc/self/fd/{descriptor}",
+                            f"{prefix}_SHA256": _sha256_file(path),
+                            f"{prefix}_SOURCE_PATH": str(path),
+                        }
+                    )
+
+                run_id = "env-i-runtime-probe"
+                rotation = "rotation-1"
+                family = "probe-family"
+                block_dir = (
+                    root / run_id / rotation / "haskell" / family
+                )
+                block_dir.mkdir(parents=True)
+                completed = subprocess.run(
+                    [
+                        str(WRAPPER),
+                        "--plan",
+                        str(root / "missing-plan.json"),
+                        "--block-dir",
+                        str(block_dir),
+                        "--qualification",
+                        str(root / "missing-qualification.json"),
+                        "--boundary",
+                        "haskell",
+                        "--selector",
+                        f"haskell/{family}",
+                        "--family",
+                        family,
+                        "--rotation",
+                        rotation,
+                        "--outer-repetition",
+                        "1",
+                        "--run-id",
+                        run_id,
+                        "--benchmark-subject-commit",
+                        "a" * 40,
+                    ],
+                    cwd=HASKELL_ROOT.parents[4],
+                    env=environment,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    pass_fds=tuple(descriptors),
+                )
+            finally:
+                for descriptor in descriptors:
+                    os.close(descriptor)
+
+        self.assertEqual(completed.returncode, 2, completed.stderr)
+        self.assertIn(
+            "HASKELL_BENCHMARK_BLOCK_FAIL:"
+            "PLAN_NOT_CANONICAL_REGULAR_FILE",
+            completed.stderr,
+        )
+        self.assertNotIn(
+            "s1_4x_run_benchmark_python",
+            completed.stderr,
+        )
+
+    def test_haskell_marker_command_preserves_venv_source_argv0(self) -> None:
+        """실제 Main.hs marker route가 FD bytes와 venv argv0를 함께 보존한다."""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            benchmark_python = _copied_benchmark_python(root)
+            marker = root / "marker.py"
+            marker.write_text(
+                "import importlib.metadata\n"
+                "import os\n"
+                "import sys\n"
+                "import jsonschema\n"
+                "import numpy\n"
+                "python_fd = os.environ['EXPECTED_PYTHON_FD']\n"
+                "descriptor = int(python_fd.rsplit('/', 1)[1])\n"
+                "pinned = os.fstat(descriptor)\n"
+                "current = os.stat('/proc/self/exe')\n"
+                "if (\n"
+                "    sys.executable != os.environ['EXPECTED_PYTHON_SOURCE']\n"
+                "    or sys.prefix != os.environ['EXPECTED_VENV_PREFIX']\n"
+                "    or __file__ != os.environ['EXPECTED_MARKER_FD']\n"
+                "    or (pinned.st_dev, pinned.st_ino, pinned.st_size)\n"
+                "       != (current.st_dev, current.st_ino, current.st_size)\n"
+                "    or importlib.metadata.version('jsonschema') != '4.26.0'\n"
+                "    or importlib.metadata.version('numpy') != '2.5.1'\n"
+                "    or numpy.__version__ != '2.5.1'\n"
+                "):\n"
+                "    raise SystemExit(91)\n"
+                "print('{\"status\": \"MEASUREMENT_ENTERED\"}')\n",
+                encoding="utf-8",
+            )
+            python_descriptor = os.open(benchmark_python, os.O_RDONLY)
+            marker_descriptor = os.open(marker, os.O_RDONLY)
+            try:
+                python_fd = f"/proc/self/fd/{python_descriptor}"
+                marker_fd = f"/proc/self/fd/{marker_descriptor}"
+                benchmark_source = BENCHMARK_MAIN.read_text(encoding="utf-8")
+                uses_source_argv0_route = all(
+                    token in benchmark_source
+                    for token in (
+                        '"S1_4X_BENCHMARK_MARKER_PYTHON_SOURCE_PATH"',
+                        'readProcessWithExitCode\n      "/usr/bin/env"',
+                        '"-a"',
+                        "pythonSourcePath",
+                    )
+                )
+                if uses_source_argv0_route:
+                    command = [
+                        "/usr/bin/env",
+                        "-a",
+                        str(benchmark_python),
+                        python_fd,
+                        marker_fd,
+                        "mark-measurement-entered",
+                        "--qualification",
+                        str(root / "qualification.json"),
+                    ]
+                else:
+                    command = [
+                        python_fd,
+                        marker_fd,
+                        "mark-measurement-entered",
+                        "--qualification",
+                        str(root / "qualification.json"),
+                    ]
+                completed = subprocess.run(
+                    command,
+                    env={
+                        "LC_ALL": "C",
+                        "PATH": "/usr/bin:/bin",
+                        "EXPECTED_PYTHON_FD": python_fd,
+                        "EXPECTED_PYTHON_SOURCE": str(benchmark_python),
+                        "EXPECTED_VENV_PREFIX": str(benchmark_python.parent.parent),
+                        "EXPECTED_MARKER_FD": marker_fd,
+                    },
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    pass_fds=(python_descriptor, marker_descriptor),
+                )
+            finally:
+                os.close(marker_descriptor)
+                os.close(python_descriptor)
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(
+            completed.stdout,
+            '{"status": "MEASUREMENT_ENTERED"}\n',
+        )
+        self.assertEqual(completed.stderr, "")
 
     def test_outer_wrapper_uses_exact_twenty_argument_order(self) -> None:
         source = WRAPPER.read_text(encoding="utf-8")

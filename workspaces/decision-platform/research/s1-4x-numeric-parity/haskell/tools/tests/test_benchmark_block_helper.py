@@ -11,12 +11,47 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import venv
 from pathlib import Path
 from unittest import mock
 
 
 TOOLS_ROOT = Path(__file__).resolve().parents[1]
 MODULE_PATH = TOOLS_ROOT / "haskell_benchmark_block.py"
+
+
+def copied_benchmark_python(root: Path) -> Path:
+    """실행 route 회귀용 external venv CPython regular copy를 만든다."""
+
+    venv_root = root / "benchmark-python-venv"
+    venv.EnvBuilder(with_pip=False, symlinks=False).create(venv_root)
+    site_packages = venv_root / "lib/python3.12/site-packages"
+    for package, version in (
+        ("jsonschema", "4.26.0"),
+        ("numpy", "2.5.1"),
+    ):
+        package_root = site_packages / package
+        package_root.mkdir()
+        (package_root / "__init__.py").write_text(
+            f'__version__ = "{version}"\n',
+            encoding="utf-8",
+        )
+        metadata_root = site_packages / f"{package}-{version}.dist-info"
+        metadata_root.mkdir()
+        (metadata_root / "METADATA").write_text(
+            "Metadata-Version: 2.1\n"
+            f"Name: {package}\n"
+            f"Version: {version}\n",
+            encoding="utf-8",
+        )
+    (site_packages / "s1_4x_benchmark_sentinel.py").write_text(
+        'VALUE = "external-venv-dependency-closure"\n',
+        encoding="utf-8",
+    )
+    python = venv_root / "bin/python"
+    if not python.is_file() or python.is_symlink():
+        raise AssertionError("benchmark Python fixture must be a regular copy")
+    return python
 
 
 def load_helper():
@@ -371,12 +406,30 @@ class BenchmarkBlockHelperTests(unittest.TestCase):
         helper = load_helper()
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary).resolve()
-            python_source = Path(sys.executable).resolve(strict=True)
+            python_source = copied_benchmark_python(root)
             python_descriptor = os.open(python_source, os.O_RDONLY)
             script = root / "shared.py"
             script.write_text(
                 "import json\n"
-                'print(json.dumps({"status": "PASS"}, sort_keys=True))\n',
+                "import os\n"
+                "import sys\n"
+                "import s1_4x_benchmark_sentinel\n"
+                "python_fd = os.environ['EXPECTED_PYTHON_FD']\n"
+                "descriptor = int(python_fd.rsplit('/', 1)[1])\n"
+                "pinned = os.fstat(descriptor)\n"
+                "current = os.stat('/proc/self/exe')\n"
+                "if (\n"
+                "    sys.executable != os.environ['EXPECTED_PYTHON_SOURCE']\n"
+                "    or sys.prefix != os.environ['EXPECTED_VENV_PREFIX']\n"
+                "    or __file__ != os.environ['EXPECTED_SCRIPT_FD']\n"
+                "    or (pinned.st_dev, pinned.st_ino, pinned.st_size)\n"
+                "       != (current.st_dev, current.st_ino, current.st_size)\n"
+                "    or s1_4x_benchmark_sentinel.VALUE\n"
+                "       != 'external-venv-dependency-closure'\n"
+                "):\n"
+                "    raise SystemExit(91)\n"
+                "print(json.dumps({'route': sys.argv[1], 'status': 'PASS'}, "
+                "sort_keys=True))\n",
                 encoding="utf-8",
             )
             pinned_script = helper.pin_regular_file(
@@ -397,6 +450,10 @@ class BenchmarkBlockHelperTests(unittest.TestCase):
                     f"{prefix}_PINNED_FD_PATH": (
                         f"/proc/self/fd/{python_descriptor}"
                     ),
+                    "EXPECTED_PYTHON_FD": f"/proc/self/fd/{python_descriptor}",
+                    "EXPECTED_PYTHON_SOURCE": str(python_source),
+                    "EXPECTED_VENV_PREFIX": str(python_source.parent.parent),
+                    "EXPECTED_SCRIPT_FD": str(pinned_script.fd_path),
                 }
                 with mock.patch.dict(os.environ, environment, clear=False):
                     pinned_python = helper.pinned_executable_environment(
@@ -409,18 +466,28 @@ class BenchmarkBlockHelperTests(unittest.TestCase):
                     encoding="utf-8",
                 )
                 os.replace(replacement, script)
-                result = helper._run_shared_json_command(
-                    [
-                        str(pinned_python.fd_path),
-                        str(pinned_script.fd_path),
-                    ],
-                    label="SHARED_SCRIPT_PROBE",
-                    cwd=root,
-                    environment=environment,
-                    pinned_executables=(pinned_python,),
-                    pinned_files=(pinned_script,),
-                )
-                self.assertEqual(result, {"status": "PASS"})
+                for label in (
+                    "BENCHMARK_INPUT_LEDGER",
+                    "HASKELL_NATIVE_PRODUCER",
+                    "NATIVE_BENCHMARK_BLOCK",
+                ):
+                    with self.subTest(label=label):
+                        result = helper._run_shared_json_command(
+                            [
+                                str(pinned_python.fd_path),
+                                str(pinned_script.fd_path),
+                                label,
+                            ],
+                            label=label,
+                            cwd=root,
+                            environment=environment,
+                            pinned_executables=(pinned_python,),
+                            pinned_files=(pinned_script,),
+                        )
+                        self.assertEqual(
+                            result,
+                            {"route": label, "status": "PASS"},
+                        )
             finally:
                 os.close(pinned_script.descriptor)
                 os.close(python_descriptor)
