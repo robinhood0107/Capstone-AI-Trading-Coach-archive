@@ -55,6 +55,108 @@ class QualificationDockerTrustTests(unittest.TestCase):
 
         self.assertEqual(hardcoded, [])
 
+    def test_host_validator_executes_pinned_sibling_module_bytes(self) -> None:
+        helper = load_helper()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            numeric_root = root / "numeric"
+            oracle_root = numeric_root / "oracle"
+            home = root / "home"
+            output = root / "host-validity.txt"
+            oracle_root.mkdir(parents=True)
+            home.mkdir()
+            common_source = oracle_root / "oracle_common.py"
+            validator_source = oracle_root / "validate_environment.py"
+            common_source.write_text(
+                "PINNED_VALUE = 'pinned-common'\n",
+                encoding="utf-8",
+            )
+            validator_source.write_text(
+                "import argparse\n"
+                "from pathlib import Path\n"
+                "from oracle_common import PINNED_VALUE\n"
+                "parser = argparse.ArgumentParser()\n"
+                "parser.add_argument('--output', required=True)\n"
+                "arguments, _ = parser.parse_known_args()\n"
+                "Path(arguments.output).write_text(\n"
+                "    '|'.join((PINNED_VALUE, __file__)), encoding='utf-8'\n"
+                ")\n",
+                encoding="utf-8",
+            )
+            with mock.patch.object(
+                sys,
+                "path",
+                [str(TOOLS_ROOT), *sys.path],
+            ):
+                validator = helper._pin_host_validator(numeric_root)
+            try:
+                # Pin 뒤 pathname을 바꿔도 host check는 두 retained FD만 실행한다.
+                common_source.write_text(
+                    "PINNED_VALUE = 'poisoned-common'\n",
+                    encoding="utf-8",
+                )
+                validator_source.write_text(
+                    "raise SystemExit(91)\n",
+                    encoding="utf-8",
+                )
+                plan = {
+                    "execution": {"cpuSet": [0]},
+                    "environmentValidity": {
+                        "minAvailableMemoryGiB": 4,
+                        "maxNormalizedLoad1": 0.1,
+                        "loadSampleCount": 3,
+                        "loadSampleIntervalSeconds": 30,
+                        "maxQuietWaitSeconds": 600,
+                        "runningContainerCount": 4,
+                        "externalProcessCpuPercentThreshold": 5.0,
+                    },
+                }
+                with mock.patch.dict(
+                    os.environ,
+                    {"HOME": str(home)},
+                    clear=True,
+                ):
+                    command = helper._host_validator_command(
+                        numeric_root=numeric_root,
+                        plan=plan,
+                        output=output,
+                        root_pid=os.getpid(),
+                        python_bin=Path(sys.executable),
+                        validator=validator,
+                    )
+                completed = subprocess.run(
+                    command,
+                    env={
+                        "LC_ALL": "C.UTF-8",
+                        "PATH": "/usr/bin:/bin",
+                        "PYTHONPATH": str(root / "hostile-python-path"),
+                    },
+                    check=False,
+                    capture_output=True,
+                    pass_fds=(
+                        validator.validator_script.descriptor,
+                        validator.common_module.descriptor,
+                    ),
+                )
+
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                self.assertEqual(
+                    output.read_text(encoding="utf-8"),
+                    f"pinned-common|{validator_source}",
+                )
+                self.assertEqual(command[1:3], ["-I", "-c"])
+                self.assertEqual(
+                    command[4],
+                    str(validator.validator_script.fd_path),
+                )
+                self.assertEqual(
+                    command[5],
+                    str(validator.common_module.fd_path),
+                )
+            finally:
+                os.close(validator.validator_script.descriptor)
+                os.close(validator.common_module.descriptor)
+
     def test_validator_style_grandchild_executes_retained_parent_fd(
         self,
     ) -> None:
