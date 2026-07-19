@@ -139,6 +139,37 @@ class HLintInventoryTests(unittest.TestCase):
                         altered,
                     )
 
+    def test_suppression_focused_test_name_is_nonempty_and_trim_exact(
+        self,
+    ) -> None:
+        schema = hlint_inventory.strict_json_load(SCHEMA_PATH)
+        manifest = hlint_inventory.strict_json_load(MANIFEST_PATH)
+        focused_path = "tools/tests/test_hlint_inventory.py"
+        invalid_names = {
+            "empty": "",
+            "whitespace-only": " ",
+            "leading-whitespace": (
+                " test_exact_module_allowances_bind_every_import"
+            ),
+            "trailing-whitespace": "def ",
+        }
+
+        for label, focused_name in invalid_names.items():
+            with self.subTest(label=label):
+                altered = deepcopy(manifest)
+                altered["entries"][0]["focusedTest"] = (
+                    f"{focused_path}: {focused_name}"
+                )
+                with self.assertRaisesRegex(
+                    hlint_inventory.InventoryError,
+                    "focused lint test reference",
+                ):
+                    hlint_inventory.validate_suppression_contract(
+                        HASKELL_ROOT,
+                        schema,
+                        altered,
+                    )
+
     def test_hlint_wrapper_uses_no_external_jsonschema_runtime(self) -> None:
         source = WRAPPER_PATH.read_text(encoding="utf-8")
 
