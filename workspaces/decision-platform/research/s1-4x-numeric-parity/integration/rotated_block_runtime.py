@@ -792,7 +792,14 @@ def _benchmark_environment(
             or not Path(pinned.binding["path"]).is_absolute()
         ):
             raise ContractError(f"BENCHMARK_RUNTIME_INPUT_INVALID:{role}")
-    cache_root = Path(home) / ".cache/s1-4x"
+    configured_cache_root = os.environ.get("S1_4X_CACHE_ROOT")
+    cache_root = (
+        Path(configured_cache_root)
+        if configured_cache_root is not None
+        else Path(home) / ".cache/s1-4x"
+    )
+    if not cache_root.is_absolute():
+        raise ContractError("BENCHMARK_CACHE_ROOT_INVALID")
     cache_directories = {
         "TMP": cache_root / "tmp",
         "UV_CACHE_DIR": cache_root / "uv",
