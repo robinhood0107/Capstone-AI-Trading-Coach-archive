@@ -19,7 +19,7 @@ class AuditFixtureContractTests(unittest.TestCase):
         tokens = {
             token
             for fixture in manifest["fixtures"]
-            for token in fixture["expectedTokens"]
+            for token in fixture["policyTokens"]
         }
         required = {
             "unsafePerformIO",
@@ -65,6 +65,16 @@ class AuditFixtureContractTests(unittest.TestCase):
                 path = HASKELL_ROOT / relative
                 self.assertTrue(path.is_file())
                 self.assertFalse(path.is_symlink())
+        for fixture in manifest["fixtures"]:
+            self.assertEqual(
+                set(fixture),
+                {
+                    "fixtureId",
+                    "path",
+                    "expectedTokens",
+                    "policyTokens",
+                },
+            )
 
 
 if __name__ == "__main__":
