@@ -4061,6 +4061,9 @@ JMH_COMPILE_COMMAND_PATH_ID = "JMH_COMPILE_COMMAND_FILE"
 JMH_TMPDIR_PREFIX = "-Djava.io.tmpdir="
 JMH_TMPDIR_PATH_ID = "EVIDENCE_ROOT/jmh-tmp"
 JMH_TMPDIR_PORTABLE_ARGUMENT = f"{JMH_TMPDIR_PREFIX}{JMH_TMPDIR_PATH_ID}"
+SCALA_SOURCES_ARGUMENT_PREFIX = "-Dscala.sources="
+SCALA_SOURCE_NAMES_ARGUMENT_PREFIX = "-Dscala.source.names="
+SCALA_GENERATED_SOURCE_PATH_ID = "SCALA_WORKSPACE/JMH_GENERATED_SOURCES"
 JMH_LAUNCHER_ONLY_ARGUMENTS = (
     "-XX:+UnlockDiagnosticVMOptions",
     "-XX:+UnlockExperimentalVMOptions",
@@ -4079,6 +4082,129 @@ def canonical_pairs_sha256(values: dict[str, str]) -> str:
         for key in sorted(values, key=lambda item: item.encode("utf-8"))
     ).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()
+
+
+def jmh_scala_workspace(tmp_directory: Path) -> Path:
+    """현재 JMH output identity에서 Scala CLI workspace를 재구성한다."""
+
+    output_directory = tmp_directory.parent
+    sealed_environment = os.environ.get(
+        "S1_4X_SCALA_ENVIRONMENT_VALUES_SHA256"
+    )
+    if not sealed_environment:
+        return isolated_scala_workspace(output_directory)
+    if SHA256.fullmatch(sealed_environment) is None:
+        raise T3EvidenceError("JMH_SCALA_WORKSPACE_IDENTITY_INVALID")
+    cache_root = Path(
+        os.environ.get(
+            "S1_4X_CACHE_ROOT",
+            str(Path.home() / ".cache/s1-4x"),
+        )
+    )
+    if not cache_root.is_absolute() or ".." in cache_root.parts:
+        raise T3EvidenceError("JMH_SCALA_WORKSPACE_IDENTITY_INVALID")
+    sealed_block_root = output_directory.parent.parent
+    workspace_key = hashlib.sha256(
+        str(sealed_block_root).encode("utf-8")
+    ).hexdigest()
+    return cache_root / "scala-workspaces" / workspace_key
+
+
+def normalized_scala_source_arguments(
+    arguments: list[str],
+    *,
+    tmp_directory: Path | None,
+) -> list[str]:
+    """Generated JMH source의 실행별 workspace prefix만 role path로 치환한다."""
+
+    source_indexes = [
+        index
+        for index, argument in enumerate(arguments)
+        if argument.startswith(SCALA_SOURCES_ARGUMENT_PREFIX)
+    ]
+    name_indexes = [
+        index
+        for index, argument in enumerate(arguments)
+        if argument.startswith(SCALA_SOURCE_NAMES_ARGUMENT_PREFIX)
+    ]
+    if not source_indexes and not name_indexes:
+        return list(arguments)
+    if (
+        len(source_indexes) != 1
+        or len(name_indexes) != 1
+        or tmp_directory is None
+    ):
+        raise T3EvidenceError("JMH_SCALA_SOURCE_ARGUMENTS_INVALID")
+    source_index = source_indexes[0]
+    name_index = name_indexes[0]
+    raw_sources = arguments[source_index].removeprefix(
+        SCALA_SOURCES_ARGUMENT_PREFIX
+    )
+    raw_names = arguments[name_index].removeprefix(
+        SCALA_SOURCE_NAMES_ARGUMENT_PREFIX
+    )
+    sources = raw_sources.split(":")
+    names = raw_names.split(":")
+    if (
+        not raw_sources
+        or not raw_names
+        or len(sources) != len(names)
+        or any(
+            not source
+            or "\x00" in source
+            or "\r" in source
+            or "\n" in source
+            for source in sources
+        )
+        or any(
+            not name
+            or Path(name).name != name
+            or "\x00" in name
+            or "\r" in name
+            or "\n" in name
+            for name in names
+        )
+    ):
+        raise T3EvidenceError("JMH_SCALA_SOURCE_ARGUMENTS_INVALID")
+
+    workspace = jmh_scala_workspace(tmp_directory)
+    generated_root = workspace / ".scala-build"
+    normalized_sources: list[str] = []
+    generated_count = 0
+    for raw_source, name in zip(sources, names, strict=True):
+        source = Path(raw_source)
+        if (
+            not source.is_absolute()
+            or ".." in source.parts
+            or source.name != name
+        ):
+            raise T3EvidenceError("JMH_SCALA_SOURCE_ARGUMENTS_INVALID")
+        if not source.is_relative_to(workspace):
+            normalized_sources.append(raw_source)
+            continue
+        if not source.is_relative_to(generated_root):
+            raise T3EvidenceError("JMH_SCALA_GENERATED_SOURCE_PATH_INVALID")
+        relative = source.relative_to(generated_root)
+        if (
+            len(relative.parts) < 3
+            or not relative.parts[0].endswith("_jmh")
+            or relative.parts[1] != "sources"
+            or source.suffix != ".java"
+        ):
+            raise T3EvidenceError("JMH_SCALA_GENERATED_SOURCE_PATH_INVALID")
+        generated_relative = Path(*relative.parts[2:])
+        normalized_sources.append(
+            f"{SCALA_GENERATED_SOURCE_PATH_ID}/"
+            f"{generated_relative.as_posix()}"
+        )
+        generated_count += 1
+    if generated_count < 1:
+        raise T3EvidenceError("JMH_SCALA_GENERATED_SOURCE_PATH_INVALID")
+    normalized = list(arguments)
+    normalized[source_index] = (
+        SCALA_SOURCES_ARGUMENT_PREFIX + ":".join(normalized_sources)
+    )
+    return normalized
 
 
 def normalized_jvm_arguments(fork: dict[str, Any]) -> list[str]:
@@ -4167,7 +4293,7 @@ def normalized_jvm_arguments(fork: dict[str, Any]) -> list[str]:
         by_index[index] = item
     if set(by_index) != set(compile_indexes):
         raise T3EvidenceError("JVM_ARGUMENT_FILE_WITNESS_INVALID")
-    return [
+    normalized = [
         (
             f"{JMH_COMPILE_COMMAND_PREFIX}{JMH_COMPILE_COMMAND_PATH_ID}"
             f"#sha256={by_index[index]['sha256']}"
@@ -4178,6 +4304,10 @@ def normalized_jvm_arguments(fork: dict[str, Any]) -> list[str]:
         )
         for index, argument in enumerate(arguments)
     ]
+    return normalized_scala_source_arguments(
+        normalized,
+        tmp_directory=tmp_directory,
+    )
 
 
 def reported_jvm_arguments(
@@ -4254,9 +4384,13 @@ def normalized_native_reported_jvm_arguments(arguments: Any) -> list[str]:
         or tmp_directory.is_relative_to(Path("/tmp"))
     ):
         raise T3EvidenceError("JMH_NATIVE_REPORTED_ARGUMENTS_INVALID")
+    normalized = normalized_scala_source_arguments(
+        arguments,
+        tmp_directory=tmp_directory,
+    )
     return [
         JMH_TMPDIR_PORTABLE_ARGUMENT if index in tmp_indexes else item
-        for index, item in enumerate(arguments)
+        for index, item in enumerate(normalized)
     ]
 
 
