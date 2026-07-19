@@ -1143,7 +1143,228 @@ def verify_classpath_entries(
             raise PrecompileError("CLASSPATH_POST_RUN_IDENTITY_DRIFT")
 
 
-def _strict_json_value(path: Path) -> Any:
+def _classpath_identity_rotation_policy(
+    classpath_entries: Any,
+    *,
+    scala_class_output_path_id: Any,
+    generated_resource_path_id: Any,
+) -> tuple[list[dict[str, str]], set[str]]:
+    """Scala CLI가 합법적으로 rematerialize하는 정확한 두 workspace role을 고정한다."""
+
+    class_output_match = re.fullmatch(
+        r"SCALA_WORKSPACE/\.scala-build/"
+        r"(?P<build>[A-Za-z0-9._-]+)_jmh_[0-9a-f]{10}/classes/main",
+        str(scala_class_output_path_id),
+    )
+    resource_match = re.fullmatch(
+        r"SCALA_WORKSPACE/\.scala-build/"
+        r"(?P<build>[A-Za-z0-9._-]+)_jmh/resources",
+        str(generated_resource_path_id),
+    )
+    if (
+        not isinstance(classpath_entries, list)
+        or not classpath_entries
+        or class_output_match is None
+        or resource_match is None
+        or class_output_match.group("build")
+        != resource_match.group("build")
+        or scala_class_output_path_id == generated_resource_path_id
+    ):
+        raise PrecompileError("CLASSPATH_POST_RUN_EVIDENCE_INVALID")
+    seen: set[str] = set()
+    for item in classpath_entries:
+        if (
+            not isinstance(item, dict)
+            or set(item)
+            != {"pathId", "kind", "sha256", "identitySha256"}
+            or item.get("kind") not in {"file", "directory"}
+            or not isinstance(item.get("pathId"), str)
+            or item["pathId"] in seen
+            or SHA256_PATTERN.fullmatch(str(item.get("sha256"))) is None
+            or SHA256_PATTERN.fullmatch(
+                str(item.get("identitySha256"))
+            )
+            is None
+        ):
+            raise PrecompileError("CLASSPATH_POST_RUN_EVIDENCE_INVALID")
+        seen.add(item["pathId"])
+    allowed = [
+        {
+            "role": "SCALA_CLASS_OUTPUT",
+            "pathId": str(scala_class_output_path_id),
+        },
+        {
+            "role": "JMH_GENERATED_RESOURCES",
+            "pathId": str(generated_resource_path_id),
+        },
+    ]
+    allowed_ids = {item["pathId"] for item in allowed}
+    if (
+        sum(item["pathId"] == allowed[0]["pathId"] for item in classpath_entries)
+        != 1
+        or sum(
+            item["pathId"] == allowed[1]["pathId"]
+            for item in classpath_entries
+        )
+        != 1
+        or any(
+            item["kind"] != "directory"
+            for item in classpath_entries
+            if item["pathId"] in allowed_ids
+        )
+    ):
+        raise PrecompileError("CLASSPATH_POST_RUN_EVIDENCE_INVALID")
+    return allowed, allowed_ids
+
+
+def validate_classpath_post_run_evidence(
+    value: Any,
+    *,
+    classpath_entries: Any,
+    scala_class_output_path_id: Any,
+    generated_resource_path_id: Any,
+) -> None:
+    """Pre/post identity evidence가 exact role과 동일 byte closure만 허용하는지 검증한다."""
+
+    allowed, allowed_ids = _classpath_identity_rotation_policy(
+        classpath_entries,
+        scala_class_output_path_id=scala_class_output_path_id,
+        generated_resource_path_id=generated_resource_path_id,
+    )
+    entries = value.get("entries") if isinstance(value, dict) else None
+    if (
+        not isinstance(value, dict)
+        or set(value)
+        != {
+            "schemaVersion",
+            "allowedIdentityRotations",
+            "entries",
+            "entriesSha256",
+            "rotatedPathIds",
+            "status",
+        }
+        or value.get("schemaVersion") != "s1.4x-classpath-post-run-v1"
+        or value.get("allowedIdentityRotations") != allowed
+        or not isinstance(entries, list)
+        or len(entries) != len(classpath_entries)
+        or value.get("entriesSha256") != canonical_sha256(entries)
+        or value.get("status") != "PASS"
+    ):
+        raise PrecompileError("CLASSPATH_POST_RUN_EVIDENCE_INVALID")
+    rotated_path_ids: list[str] = []
+    for expected, actual in zip(classpath_entries, entries, strict=True):
+        if (
+            not isinstance(actual, dict)
+            or set(actual)
+            != {
+                "pathId",
+                "kind",
+                "sha256",
+                "preRunIdentitySha256",
+                "postRunIdentitySha256",
+                "identityStatus",
+            }
+            or actual.get("pathId") != expected["pathId"]
+            or actual.get("kind") != expected["kind"]
+            or actual.get("sha256") != expected["sha256"]
+            or actual.get("preRunIdentitySha256")
+            != expected["identitySha256"]
+            or SHA256_PATTERN.fullmatch(
+                str(actual.get("postRunIdentitySha256"))
+            )
+            is None
+        ):
+            raise PrecompileError("CLASSPATH_POST_RUN_EVIDENCE_INVALID")
+        rotated = (
+            actual["postRunIdentitySha256"]
+            != actual["preRunIdentitySha256"]
+        )
+        expected_status = "ROTATED_SAME_BYTES" if rotated else "STABLE"
+        if (
+            actual.get("identityStatus") != expected_status
+            or (rotated and actual["pathId"] not in allowed_ids)
+        ):
+            raise PrecompileError("CLASSPATH_POST_RUN_EVIDENCE_INVALID")
+        if rotated:
+            rotated_path_ids.append(actual["pathId"])
+    if value.get("rotatedPathIds") != rotated_path_ids:
+        raise PrecompileError("CLASSPATH_POST_RUN_EVIDENCE_INVALID")
+
+
+def capture_classpath_post_run(
+    values: Any,
+    *,
+    scala_class_output_path_id: Any,
+    generated_resource_path_id: Any,
+    workspace: Path,
+    coursier_cache: Path,
+    evidence_dir: Path,
+) -> dict[str, Any]:
+    """Post-run bytes를 다시 닫고 exact 두 workspace directory만 inode 회전을 허용한다."""
+
+    workspace = _require_absolute_directory(workspace, label="SCALA_WORKSPACE")
+    coursier_cache = _require_absolute_directory(
+        coursier_cache,
+        label="COURSIER_CACHE",
+    )
+    evidence_dir = _require_absolute_directory(
+        evidence_dir,
+        label="EVIDENCE_ROOT",
+    )
+    allowed, allowed_ids = _classpath_identity_rotation_policy(
+        values,
+        scala_class_output_path_id=scala_class_output_path_id,
+        generated_resource_path_id=generated_resource_path_id,
+    )
+    post_entries: list[dict[str, str]] = []
+    rotated_path_ids: list[str] = []
+    for item in values:
+        path = _path_from_id(
+            item["pathId"],
+            workspace=workspace,
+            coursier_cache=coursier_cache,
+            evidence_dir=evidence_dir,
+        )
+        kind, digest, identity_sha256 = _entry_digest(path)
+        if kind != item["kind"] or digest != item["sha256"]:
+            raise PrecompileError("CLASSPATH_POST_RUN_DRIFT")
+        rotated = identity_sha256 != item["identitySha256"]
+        if rotated and item["pathId"] not in allowed_ids:
+            raise PrecompileError("CLASSPATH_POST_RUN_IDENTITY_DRIFT")
+        if rotated:
+            rotated_path_ids.append(item["pathId"])
+        post_entries.append(
+            {
+                "pathId": item["pathId"],
+                "kind": kind,
+                "sha256": digest,
+                "preRunIdentitySha256": item["identitySha256"],
+                "postRunIdentitySha256": identity_sha256,
+                "identityStatus": (
+                    "ROTATED_SAME_BYTES" if rotated else "STABLE"
+                ),
+            }
+        )
+    result = {
+        "schemaVersion": "s1.4x-classpath-post-run-v1",
+        "allowedIdentityRotations": allowed,
+        "entries": post_entries,
+        "entriesSha256": canonical_sha256(post_entries),
+        "rotatedPathIds": rotated_path_ids,
+        "status": "PASS",
+    }
+    validate_classpath_post_run_evidence(
+        result,
+        classpath_entries=values,
+        scala_class_output_path_id=scala_class_output_path_id,
+        generated_resource_path_id=generated_resource_path_id,
+    )
+    return result
+
+
+def _strict_json_payload(payload: bytes) -> Any:
+    """한 번 snapshot한 bytes만 duplicate-key/finite JSON 규칙으로 해석한다."""
+
     def unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
         value: dict[str, Any] = {}
         for key, item in pairs:
@@ -1153,7 +1374,7 @@ def _strict_json_value(path: Path) -> Any:
         return value
 
     return json.loads(
-        path.read_text(encoding="utf-8"),
+        payload.decode("utf-8"),
         object_pairs_hook=unique_object,
         parse_constant=lambda value: (_ for _ in ()).throw(
             PrecompileError(f"NONFINITE_JSON:{value}")
@@ -1161,11 +1382,132 @@ def _strict_json_value(path: Path) -> Any:
     )
 
 
+def _strict_json_value(path: Path) -> Any:
+    return _strict_json_payload(path.read_bytes())
+
+
 def _strict_json(path: Path) -> dict[str, Any]:
     parsed = _strict_json_value(path)
     if not isinstance(parsed, dict):
         raise PrecompileError(f"JSON_OBJECT_REQUIRED:{path}")
     return parsed
+
+
+def _replace_json_object_atomically(
+    path: Path,
+    value: dict[str, Any],
+    *,
+    expected_snapshot: RegularFileSnapshot,
+) -> RegularFileSnapshot:
+    """검증한 receipt inode를 exact canonical JSON으로 원자 교체하고 다시 봉인한다."""
+
+    parent = _require_absolute_directory(
+        path.parent,
+        label="PRECOMPILE_RECEIPT_PARENT",
+    )
+    if (
+        expected_snapshot.path != path
+        or expected_snapshot.payload is None
+        or path.parent != parent
+    ):
+        raise PrecompileError("PRECOMPILE_RECEIPT_FINALIZATION_FAILED")
+    try:
+        payload = (
+            json.dumps(
+                value,
+                allow_nan=False,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            + "\n"
+        ).encode("utf-8")
+    except (TypeError, ValueError) as error:
+        raise PrecompileError(
+            "PRECOMPILE_RECEIPT_FINALIZATION_FAILED"
+        ) from error
+
+    temporary = parent / (
+        f".{path.name}.tmp-{os.getpid()}-{os.urandom(16).hex()}"
+    )
+    descriptor: int | None = None
+    directory_descriptor: int | None = None
+    try:
+        descriptor = os.open(
+            temporary,
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | os.O_NOFOLLOW
+            | os.O_CLOEXEC,
+            0o600,
+        )
+        offset = 0
+        while offset < len(payload):
+            written = os.write(descriptor, payload[offset:])
+            if written <= 0:
+                raise PrecompileError(
+                    "PRECOMPILE_RECEIPT_FINALIZATION_FAILED"
+                )
+            offset += written
+        os.fchmod(
+            descriptor,
+            stat.S_IMODE(expected_snapshot.file_identity[2]),
+        )
+        os.fsync(descriptor)
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_nlink != 1
+            or metadata.st_size != len(payload)
+        ):
+            raise PrecompileError(
+                "PRECOMPILE_RECEIPT_FINALIZATION_FAILED"
+            )
+        os.close(descriptor)
+        descriptor = None
+
+        _verify_regular_file_snapshot(
+            expected_snapshot,
+            label="PRECOMPILE_RECEIPT",
+        )
+        os.replace(temporary, path)
+        directory_descriptor = os.open(
+            parent,
+            os.O_RDONLY
+            | os.O_DIRECTORY
+            | os.O_NOFOLLOW
+            | os.O_CLOEXEC,
+        )
+        os.fsync(directory_descriptor)
+        finalized = _snapshot_regular_file(
+            path,
+            label="PRECOMPILE_RECEIPT_FINAL",
+        )
+        if (
+            finalized.payload != payload
+            or finalized.sha256
+            != hashlib.sha256(payload).hexdigest()
+            or stat.S_IMODE(finalized.file_identity[2])
+            != stat.S_IMODE(expected_snapshot.file_identity[2])
+        ):
+            raise PrecompileError(
+                "PRECOMPILE_RECEIPT_FINALIZATION_FAILED"
+            )
+        return finalized
+    except OSError as error:
+        raise PrecompileError(
+            "PRECOMPILE_RECEIPT_FINALIZATION_FAILED"
+        ) from error
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        if directory_descriptor is not None:
+            os.close(directory_descriptor)
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def _normalized_exec_path(path: Path) -> Path:
@@ -1912,12 +2254,21 @@ def verify(arguments: argparse.Namespace) -> dict[str, Any]:
         evidence_dir / RECEIPT_NAME,
         label="PRECOMPILE_RECEIPT",
     )
-    receipt = _strict_json(receipt_path)
+    receipt_snapshot = _snapshot_regular_file(
+        receipt_path,
+        label="PRECOMPILE_RECEIPT",
+    )
+    receipt_value = _strict_json_payload(receipt_snapshot.payload or b"")
+    if not isinstance(receipt_value, dict):
+        raise PrecompileError("PRECOMPILE_RECEIPT_INVALID")
+    receipt = receipt_value
     if (
         receipt.get("schemaVersion")
         != "s1.4x-scala-jmh-generated-java-precompile-v1"
         or receipt.get("status") != "PASS"
         or receipt.get("aggregateStatus") != "PASS"
+        or "classpathPostRun" in receipt
+        or "classpathPostRunSha256" in receipt
     ):
         raise PrecompileError("PRECOMPILE_RECEIPT_INVALID")
 
@@ -2009,16 +2360,12 @@ def verify(arguments: argparse.Namespace) -> dict[str, Any]:
 
     classpath_values = receipt.get("classpathEntries")
     if (
-        receipt.get("classpathEntriesSha256")
+        not isinstance(classpath_values, list)
+        or not classpath_values
+        or receipt.get("classpathEntriesSha256")
         != canonical_sha256(classpath_values)
     ):
         raise PrecompileError("CLASSPATH_POST_RUN_DRIFT")
-    verify_classpath_entries(
-        classpath_values,
-        workspace=workspace,
-        coursier_cache=coursier_cache,
-        evidence_dir=evidence_dir,
-    )
     external_entries = [
         item
         for item in classpath_values
@@ -2064,6 +2411,16 @@ def verify(arguments: argparse.Namespace) -> dict[str, Any]:
         != f"EVIDENCE_ROOT/{GENERATED_SOURCES_NAME}"
     ):
         raise PrecompileError("JMH_GENERATOR_POST_RUN_DRIFT")
+    classpath_post_run = capture_classpath_post_run(
+        classpath_values,
+        scala_class_output_path_id=class_output_id,
+        generated_resource_path_id=generator[
+            "generatedResourceRootPathId"
+        ],
+        workspace=workspace,
+        coursier_cache=coursier_cache,
+        evidence_dir=evidence_dir,
+    )
     compile_raw = compile_stdout.read_text(encoding="utf-8")
     jmh_raw = jmh_stdout.read_text(encoding="utf-8")
     stdout_runtime_classpath_sha256 = require_jmh_stdout_binding(
@@ -2126,7 +2483,7 @@ def verify(arguments: argparse.Namespace) -> dict[str, Any]:
         }
         for item in actual_classpath.entries
     ]
-    expected_classpath_values = receipt.get("classpathEntries")
+    expected_classpath_values = classpath_post_run["entries"]
     if len(actual_classpath_values) != len(expected_classpath_values):
         raise PrecompileError("JMH_RUN_CLASSPATH_DRIFT")
     for expected_item, actual_item in zip(
@@ -2138,7 +2495,7 @@ def verify(arguments: argparse.Namespace) -> dict[str, Any]:
             expected_item["pathId"] != actual_item["pathId"]
             or expected_item["kind"] != actual_item["kind"]
             or expected_item["sha256"] != actual_item["sha256"]
-            or expected_item["identitySha256"]
+            or expected_item["postRunIdentitySha256"]
             != actual_item["identitySha256"]
         ):
             raise PrecompileError("JMH_RUN_CLASSPATH_DRIFT")
@@ -2169,9 +2526,18 @@ def verify(arguments: argparse.Namespace) -> dict[str, Any]:
     except PrecompileError as error:
         raise PrecompileError("JDK_COMPILER_POST_RUN_DRIFT") from error
 
+    receipt["classpathPostRun"] = classpath_post_run
+    receipt["classpathPostRunSha256"] = canonical_sha256(
+        classpath_post_run
+    )
+    finalized_receipt = _replace_json_object_atomically(
+        receipt_path,
+        receipt,
+        expected_snapshot=receipt_snapshot,
+    )
     return {
         "status": "PASS",
-        "receiptSha256": sha256_file(receipt_path),
+        "receiptSha256": finalized_receipt.sha256,
         "generatedSourcesSha256": receipt["generatedSourcesSha256"],
         "generatedClassesSha256": receipt["generatedClassesSha256"],
         "classpathEntriesSha256": receipt["classpathEntriesSha256"],
