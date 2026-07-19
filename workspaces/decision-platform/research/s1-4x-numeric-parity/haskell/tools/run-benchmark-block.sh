@@ -214,7 +214,7 @@ exec /usr/bin/env -i \
   S1_4X_HASKELL_QUALIFICATION_ARTIFACT_SOURCE_PATH="$QUALIFICATION_ARTIFACT_SOURCE_PATH" \
   S1_4X_CACHE_ROOT="$CACHE_ROOT" \
   S1_4X_LARGE_FIXTURE_ROOT="$LARGE_FIXTURE_ROOT" \
-  "$S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH" "$HELPER" \
+  s1_4x_run_benchmark_python "$HELPER" \
   --repo-root "$REPO_ROOT" \
   --plan "$2" \
   --block-dir "$4" \

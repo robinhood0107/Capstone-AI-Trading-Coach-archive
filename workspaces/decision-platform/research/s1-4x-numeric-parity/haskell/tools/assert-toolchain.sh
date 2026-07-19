@@ -116,7 +116,7 @@ LOCK="$HASKELL_ROOT/toolchain-lock.v1.json"
 COMPATIBILITY_EVIDENCE="$HASKELL_ROOT/ghc-compatibility-solve-failure.v1.json"
 
 compatibility_status="$(
-"$S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH" - \
+s1_4x_run_benchmark_python - \
   "$LOCK" \
   "$PROVENANCE" \
   "$PROVENANCE_SCHEMA" \

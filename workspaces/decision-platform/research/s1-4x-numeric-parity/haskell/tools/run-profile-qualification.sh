@@ -78,7 +78,7 @@ if [[ "$LARGE_FIXTURE_ROOT" != /* \
   exit 69
 fi
 
-exec "$S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH" "$HASKELL_ROOT/tools/profile_workflow.py" qualification \
+s1_4x_exec_benchmark_python "$HASKELL_ROOT/tools/profile_workflow.py" qualification \
   --plan "$2" \
   --profiles "$4" \
   --enforce-order-plan \

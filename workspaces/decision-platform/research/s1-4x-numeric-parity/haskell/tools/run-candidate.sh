@@ -84,7 +84,7 @@ fi
 
 "$HASKELL_ROOT/tools/assert-toolchain.sh" >/dev/null
 PROFILE_ID="$(
-  "$S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH" "$PROFILE_HELPER" candidate-runtime \
+  s1_4x_run_benchmark_python "$PROFILE_HELPER" candidate-runtime \
     --profile "$PROFILE_PATH" \
     --source-manifest "$SOURCE_MANIFEST" \
     --qualification-plan "$QUALIFICATION_PLAN"
@@ -103,7 +103,7 @@ case "$PROFILE_ID" in
 esac
 
 STACK_ROOT_PATH="$(
-  "$S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH" "$PROFILE_HELPER" candidate-stack-root \
+  s1_4x_run_benchmark_python "$PROFILE_HELPER" candidate-stack-root \
     --cache-root "$CACHE_ROOT" \
     --output "$OUTPUT_PATH"
 )"

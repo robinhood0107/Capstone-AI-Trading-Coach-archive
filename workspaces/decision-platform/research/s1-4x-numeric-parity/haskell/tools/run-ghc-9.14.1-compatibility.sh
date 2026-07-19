@@ -46,7 +46,7 @@ EXPECTED_STACK_YAML="$(realpath "$HASKELL_ROOT/stack-ghc-9.14.1.yaml")"
 
 OUTPUT_DIRECTORY="$5"
 STACK_ROOT_PATH="$(
-  "$S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH" "$HASKELL_ROOT/tools/profile_workflow.py" \
+  s1_4x_run_benchmark_python "$HASKELL_ROOT/tools/profile_workflow.py" \
     isolated-stack-root \
     --cache-root "$S1_4X_CACHE_ROOT" \
     --purpose compatibility \
@@ -92,7 +92,7 @@ ENDED_AT="$(date -u +%Y-%m-%dT%H:%M:%S.000000Z)"
 PANTRY_DB="$STACK_ROOT_PATH/pantry/pantry.sqlite3"
 
 if [[ "$SOLVE_EXIT_CODE" -eq 0 ]]; then
-  exec "$S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH" "$HASKELL_ROOT/tools/profile_workflow.py" \
+  s1_4x_exec_benchmark_python "$HASKELL_ROOT/tools/profile_workflow.py" \
     replay-compatibility-success \
     --stack-yaml "$EXPECTED_STACK_YAML" \
     --stack-root "$STACK_ROOT_PATH" \
@@ -111,7 +111,7 @@ if [[ "$SOLVE_EXIT_CODE" -ne 1 ]]; then
   exit 2
 fi
 
-exec "$S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH" "$HASKELL_ROOT/tools/profile_workflow.py" \
+s1_4x_exec_benchmark_python "$HASKELL_ROOT/tools/profile_workflow.py" \
   capture-compatibility-failure \
   --stack-yaml "$EXPECTED_STACK_YAML" \
   --stack-root "$STACK_ROOT_PATH" \

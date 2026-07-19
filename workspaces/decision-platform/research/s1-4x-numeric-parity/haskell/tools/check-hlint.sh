@@ -39,7 +39,7 @@ else
 fi
 trap 'if [[ "${REMOVE_OUTPUT:-0}" -eq 1 ]]; then rm -rf -- "$OUTPUT_DIRECTORY"; fi' EXIT
 
-"$S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH" "$HASKELL_ROOT/tools/haskell_evidence.py" source-inputs \
+s1_4x_run_benchmark_python "$HASKELL_ROOT/tools/haskell_evidence.py" source-inputs \
   --haskell-root "$HASKELL_ROOT" \
   --manifest "$SOURCE_MANIFEST" \
   >"$OUTPUT_DIRECTORY/source-inputs.before.stdout" \
@@ -60,7 +60,7 @@ set -e
   exit 2
 }
 
-"$S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH" "$HASKELL_ROOT/tools/hlint_inventory.py" \
+s1_4x_run_benchmark_python "$HASKELL_ROOT/tools/hlint_inventory.py" \
   --haskell-root "$HASKELL_ROOT" \
   --configuration "$HLINT_CONFIGURATION" \
   --schema "$EXCEPTION_SCHEMA" \
@@ -70,7 +70,7 @@ set -e
   2>"$OUTPUT_DIRECTORY/managed-inventory.stderr"
 
 mapfile -t FIXTURE_ROWS < <(
-  "$S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH" - "$FIXTURE_MANIFEST" <<'PY'
+  s1_4x_run_benchmark_python - "$FIXTURE_MANIFEST" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -133,7 +133,7 @@ for row in "${FIXTURE_ROWS[@]}"; do
     printf 'HLint negative fixture exit drift: %s:%s\n' "$fixture_id" "$exit_code" >&2
     exit 2
   }
-  "$S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH" - \
+  s1_4x_run_benchmark_python - \
     "$expected_tokens_json" \
     "$OUTPUT_DIRECTORY/$fixture_id.stdout" \
     "$OUTPUT_DIRECTORY/$fixture_id.stderr" <<'PY'
@@ -151,13 +151,13 @@ if missing:
 PY
 done
 
-"$S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH" "$HASKELL_ROOT/tools/haskell_evidence.py" source-inputs \
+s1_4x_run_benchmark_python "$HASKELL_ROOT/tools/haskell_evidence.py" source-inputs \
   --haskell-root "$HASKELL_ROOT" \
   --manifest "$SOURCE_MANIFEST" \
   >"$OUTPUT_DIRECTORY/source-inputs.after.stdout" \
   2>"$OUTPUT_DIRECTORY/source-inputs.after.stderr"
 
-"$S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH" - \
+s1_4x_run_benchmark_python - \
   "$OUTPUT_DIRECTORY" \
   "$SOURCE_MANIFEST" \
   "$FIXTURE_MANIFEST" \

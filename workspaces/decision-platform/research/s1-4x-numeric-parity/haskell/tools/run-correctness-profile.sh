@@ -38,6 +38,6 @@ source "$HASKELL_ROOT/tools/python-runtime.sh"
 s1_4x_pin_benchmark_python
 "$HASKELL_ROOT/tools/assert-toolchain.sh" >/dev/null
 
-exec "$S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH" "$HASKELL_ROOT/tools/profile_workflow.py" correctness \
+s1_4x_exec_benchmark_python "$HASKELL_ROOT/tools/profile_workflow.py" correctness \
   --profile "$1" \
   --output-dir "$3"

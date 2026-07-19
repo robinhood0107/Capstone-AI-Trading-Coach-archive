@@ -50,7 +50,7 @@ if [[ "$CACHE_ROOT_CONFIGURED" != /* \
 fi
 CACHE_ROOT="$CACHE_ROOT_CONFIGURED"
 STACK_ROOT_PATH="$(
-  "$S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH" "$HASKELL_ROOT/tools/profile_workflow.py" \
+  s1_4x_run_benchmark_python "$HASKELL_ROOT/tools/profile_workflow.py" \
     isolated-stack-root \
     --cache-root "$CACHE_ROOT" \
     --purpose property \
@@ -84,21 +84,21 @@ validate_execution_closure() {
   local profile_result
   local closure_result
   source_result="$(
-    "$S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH" "$HASKELL_ROOT/tools/haskell_evidence.py" source-inputs \
+    s1_4x_run_benchmark_python "$HASKELL_ROOT/tools/haskell_evidence.py" source-inputs \
       --haskell-root "$HASKELL_ROOT" \
       --manifest "$SOURCE_MANIFEST"
   )"
   profile_result="$(
-    "$S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH" "$HASKELL_ROOT/tools/haskell_evidence.py" selected-profile \
+    s1_4x_run_benchmark_python "$HASKELL_ROOT/tools/haskell_evidence.py" selected-profile \
       --haskell-root "$HASKELL_ROOT" \
       --profile "$SELECTED_PROFILE" \
       --qualification-plan "$QUALIFICATION_PLAN"
   )"
   closure_result="$(
-    "$S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH" "$HASKELL_ROOT/tools/haskell_evidence.py" property-closure \
+    s1_4x_run_benchmark_python "$HASKELL_ROOT/tools/haskell_evidence.py" property-closure \
       --haskell-root "$HASKELL_ROOT"
   )"
-  "$S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH" - "$phase" "$source_result" "$profile_result" "$closure_result" <<'PY'
+  s1_4x_run_benchmark_python - "$phase" "$source_result" "$profile_result" "$closure_result" <<'PY'
 import json
 import sys
 
@@ -149,7 +149,7 @@ STACK_ARGUMENTS=(
 )
 
 BUILD_ARGV_SHA256="$(
-  "$S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH" - \
+  s1_4x_run_benchmark_python - \
     "$STACK_BIN" \
     "${STACK_ARGUMENTS[@]}" \
     build \

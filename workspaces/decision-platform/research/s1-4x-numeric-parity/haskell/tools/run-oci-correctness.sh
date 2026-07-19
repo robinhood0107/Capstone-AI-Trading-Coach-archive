@@ -43,6 +43,6 @@ s1_4x_pin_benchmark_python
 
 # profile_workflow owns exact `docker build --network none` and
 # `docker run --network none`; this outer wrapper never accepts arbitrary argv.
-exec "$S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH" "$HASKELL_ROOT/tools/profile_workflow.py" \
+s1_4x_exec_benchmark_python "$HASKELL_ROOT/tools/profile_workflow.py" \
   oci-correctness \
   --output-dir "$2"
