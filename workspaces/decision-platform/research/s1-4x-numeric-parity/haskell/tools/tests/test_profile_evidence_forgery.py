@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import importlib.util
+import inspect
 import json
 import sys
 import tempfile
@@ -48,6 +49,71 @@ def raw_reports(multiplier: float) -> list[object]:
 
 
 class ProfileEvidenceForgeryTests(unittest.TestCase):
+    def test_profile_selection_reuses_same_fd_artifact_digests(self) -> None:
+        helper = load_helper()
+        correctness_source = inspect.getsource(
+            helper._validate_correctness_receipt
+        )
+        qualification_source = inspect.getsource(
+            helper._validate_qualification_artifact
+        )
+        qualification_producer_source = inspect.getsource(
+            helper._qualification
+        )
+        selection_source = inspect.getsource(helper._select_profile)
+
+        self.assertIn(
+            "receipt_sha256 = hashlib.sha256(receipt_payload).hexdigest()",
+            correctness_source,
+        )
+        self.assertIn("return receipt, receipt_sha256", correctness_source)
+        self.assertIn(
+            "artifact_sha256 = hashlib.sha256(artifact_payload).hexdigest()",
+            qualification_source,
+        )
+        self.assertIn(
+            "return artifact, selection, artifact_sha256",
+            qualification_source,
+        )
+        self.assertNotIn(
+            "sha256_file(selected_correctness_path)",
+            selection_source,
+        )
+        self.assertNotIn("sha256_file(qualification_path)", selection_source)
+        self.assertIn(
+            "full_correctness_sha256=selected_correctness_sha256",
+            selection_source,
+        )
+        self.assertIn(
+            "qualification_artifact_sha256=qualification_artifact_sha256",
+            selection_source,
+        )
+        self.assertNotIn(
+            "strict_json_load(raw_report)",
+            qualification_producer_source,
+        )
+        self.assertNotIn(
+            "sha256_file(raw_report)",
+            qualification_producer_source,
+        )
+        self.assertIn(
+            "raw_payload, raw, _ = _same_fd_json_value(",
+            qualification_producer_source,
+        )
+        self.assertIn(
+            "raw_sha256 = hashlib.sha256(raw_payload).hexdigest()",
+            qualification_producer_source,
+        )
+        self.assertNotIn("sha256_file(plan_path)", selection_source)
+        self.assertIn(
+            "plan_sha256 = hashlib.sha256(plan_payload).hexdigest()",
+            selection_source,
+        )
+        self.assertIn(
+            "expected_plan_sha256=plan_sha256",
+            selection_source,
+        )
+
     def test_receipt_and_qualification_require_exact_top_level_schema(
         self,
     ) -> None:
@@ -85,6 +151,7 @@ class ProfileEvidenceForgeryTests(unittest.TestCase):
                 helper._validate_qualification_artifact(
                     qualification,
                     plan=helper.strict_json_load(PLAN_PATH),
+                    expected_plan_sha256=helper.sha256_file(PLAN_PATH),
                     expected_source_tree_sha256="1" * 64,
                     expected_commit="2" * 40,
                 )
