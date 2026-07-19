@@ -221,9 +221,26 @@ main = do
     [ env
         (setupBenchmarkEnvironment fixtureRoot qualificationPath selectedCases)
         ( \ ~preparedCases ->
-            bgroup "" (zipWith benchmark selectedCases preparedCases)
+            bgroup "" (benchmarkPreparedCases selectedCases preparedCases)
         )
     ]
+
+benchmarkPreparedCases :: [BenchmarkCase] -> [PreparedCase] -> [Benchmark]
+benchmarkPreparedCases [] _ = []
+benchmarkPreparedCases
+  (benchmarkCase : benchmarkCases)
+  preparedCases =
+    let ~(preparedCase, remainingPreparedCases) =
+          unconsPreparedCases preparedCases
+     in benchmark benchmarkCase preparedCase
+          : benchmarkPreparedCases benchmarkCases remainingPreparedCases
+
+unconsPreparedCases :: [PreparedCase] -> (PreparedCase, [PreparedCase])
+unconsPreparedCases preparedCases =
+  case preparedCases of
+    preparedCase : remainingPreparedCases ->
+      (preparedCase, remainingPreparedCases)
+    [] -> error "prepared benchmark case closure mismatch"
 
 -- | Full rotation에서만 설정되는 출력 경로에 실제 Criterion process identity를 기록한다.
 -- Profile qualification은 이 경계를 설정하지 않으므로 기존 4x2x7 argv와 실행을 바꾸지 않는다.
