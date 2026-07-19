@@ -2258,6 +2258,130 @@ def main() -> int:
             expected_prefix="JMH_RUN_STDOUT_BINDING_INVALID",
         )
 
+    def self_consistent_path_forgery(
+        *,
+        absolute_runtime_roles: bool,
+    ) -> tuple[dict, list, bytes]:
+        value = runtime_receipt_tamper()
+        closure = value["jmhRuntimeClosure"]
+        generator = closure["generator"]
+        if absolute_runtime_roles:
+            class_input_id = generator["classInputPathId"]
+            source_id = "SCALA_WORKSPACE//forged/sources"
+            resource_id = "SCALA_WORKSPACE//forged/resources"
+            class_id = "SCALA_WORKSPACE//forged/classes/main"
+        else:
+            class_input_id = (
+                "SCALA_WORKSPACE/.scala-build/../classes/main"
+            )
+            source_id = (
+                "SCALA_WORKSPACE/.scala-build/.._jmh/sources"
+            )
+            resource_id = (
+                "SCALA_WORKSPACE/.scala-build/.._jmh/resources"
+            )
+            class_id = (
+                "SCALA_WORKSPACE/.scala-build/"
+                ".._jmh_cafebabe00/classes/main"
+            )
+        generator.update(
+            {
+                "classInputPathId": class_input_id,
+                "generatedSourceRootPathId": source_id,
+                "generatedResourceRootPathId": resource_id,
+            }
+        )
+        closure["roleMappings"][0]["runtimePathId"] = class_id
+        closure["roleMappings"][1]["runtimePathId"] = source_id
+        closure["roleMappings"][2]["runtimePathId"] = resource_id
+        closure["runtimeClasspathEntries"][0]["pathId"] = class_id
+        closure["runtimeClasspathEntries"][1]["pathId"] = resource_id
+
+        physical_workspace = Path("/sealed/scala-workspace")
+
+        def physical(path_id: str) -> Path:
+            return physical_workspace / path_id.removeprefix(
+                "SCALA_WORKSPACE/"
+            )
+
+        precompile_paths = binding_compile_stdout.read_text(
+            encoding="utf-8"
+        ).splitlines()[2].split(os.pathsep)
+        runtime_paths = [
+            (
+                str(physical(runtime_item["pathId"]))
+                if runtime_item["pathId"] != precompile_item["pathId"]
+                else precompile_path
+            )
+            for precompile_path, precompile_item, runtime_item in zip(
+                precompile_paths,
+                value["classpathEntries"],
+                closure["runtimeClasspathEntries"],
+                strict=True,
+            )
+        ]
+        runtime_sha256 = hashlib.sha256(
+            os.pathsep.join(runtime_paths).encode("utf-8")
+        ).hexdigest()
+        closure["runtimeClasspathSha256"] = runtime_sha256
+        value["runtimeClasspathSha256"] = runtime_sha256
+        close_runtime_tamper(value)
+        forks = json.loads(json.dumps(binding_forks))
+        for fork in forks:
+            fork["runtimeClasspathSha256"] = runtime_sha256
+        stdout = (
+            f"Processing 149 classes from {physical(class_input_id)} "
+            'with "reflection" generator\n'
+            f"Writing out Java source to {physical(source_id)} "
+            f"and resources to {physical(resource_id)}\n"
+            "# JMH version: 1.37\n"
+        ).encode("utf-8")
+        return value, forks, stdout
+
+    for absolute_roles, label in (
+        (False, "dot-dot runtime build component"),
+        (True, "absolute runtime role"),
+    ):
+        forged_receipt, forged_forks, forged_stdout = (
+            self_consistent_path_forgery(
+                absolute_runtime_roles=absolute_roles,
+            )
+        )
+        binding_jmh_stdout.write_bytes(forged_stdout)
+        try:
+            expect_t3_error(
+                module,
+                lambda: validate_binding(
+                    receipt_value=forged_receipt,
+                    forks_value=forged_forks,
+                ),
+                f"self-consistent {label} passed",
+                expected_prefix="JMH_RUN_STDOUT_BINDING_INVALID",
+            )
+            original_runtime_validator = (
+                module.jmh_precompile
+                .validate_jmh_runtime_closure_evidence
+            )
+            module.jmh_precompile.validate_jmh_runtime_closure_evidence = (
+                lambda *args, **kwargs: None
+            )
+            try:
+                expect_t3_error(
+                    module,
+                    lambda: validate_binding(
+                        receipt_value=forged_receipt,
+                        forks_value=forged_forks,
+                    ),
+                    f"T3 physical path guard accepted {label}",
+                    expected_prefix="JMH_RUN_STDOUT_BINDING_INVALID",
+                )
+            finally:
+                module.jmh_precompile.validate_jmh_runtime_closure_evidence = (
+                    original_runtime_validator
+                )
+        finally:
+            binding_jmh_stdout.write_bytes(binding_stdout_bytes)
+
     exact_qualification_owner_gate_contract(
         module,
         root=selector_root / "exact-owner-gate",

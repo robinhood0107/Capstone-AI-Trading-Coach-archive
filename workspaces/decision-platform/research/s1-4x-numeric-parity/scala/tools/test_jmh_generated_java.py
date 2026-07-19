@@ -923,6 +923,73 @@ def main() -> int:
                     generated_sources_sha256=generated_sources_sha256,
                 ),
             )
+            for forged_build in (".", ".."):
+                forged_runtime_traversal = json.loads(
+                    json.dumps(runtime_evidence)
+                )
+                forged_input_id = (
+                    "SCALA_WORKSPACE/.scala-build/"
+                    f"{forged_build}/classes/main"
+                )
+                forged_source_id = (
+                    "SCALA_WORKSPACE/.scala-build/"
+                    f"{forged_build}_jmh/sources"
+                )
+                forged_resource_id = (
+                    "SCALA_WORKSPACE/.scala-build/"
+                    f"{forged_build}_jmh/resources"
+                )
+                forged_class_id = (
+                    "SCALA_WORKSPACE/.scala-build/"
+                    f"{forged_build}_jmh_cafebabe00/classes/main"
+                )
+                forged_runtime_traversal["generator"].update(
+                    {
+                        "classInputPathId": forged_input_id,
+                        "generatedSourceRootPathId": forged_source_id,
+                        "generatedResourceRootPathId": (
+                            forged_resource_id
+                        ),
+                    }
+                )
+                forged_runtime_traversal["roleMappings"][0][
+                    "runtimePathId"
+                ] = forged_class_id
+                forged_runtime_traversal["roleMappings"][1][
+                    "runtimePathId"
+                ] = forged_source_id
+                forged_runtime_traversal["roleMappings"][2][
+                    "runtimePathId"
+                ] = forged_resource_id
+                forged_runtime_traversal["runtimeClasspathEntries"][0][
+                    "pathId"
+                ] = forged_class_id
+                forged_runtime_traversal["runtimeClasspathEntries"][1][
+                    "pathId"
+                ] = forged_resource_id
+                forged_runtime_traversal[
+                    "runtimeClasspathEntriesSha256"
+                ] = helper.canonical_sha256(
+                    forged_runtime_traversal[
+                        "runtimeClasspathEntries"
+                    ]
+                )
+                expect_error(
+                    helper,
+                    "JMH_RUNTIME_CLOSURE_EVIDENCE_INVALID",
+                    lambda value=forged_runtime_traversal: (
+                        helper.validate_jmh_runtime_closure_evidence(
+                            value,
+                            classpath_entries=entry_values,
+                            classpath_post_run=post_run,
+                            scala_class_output_path_id=class_output_id,
+                            jmh_generator=precompile_generator,
+                            generated_sources_sha256=(
+                                generated_sources_sha256
+                            ),
+                        )
+                    ),
+                )
             swapped_roles = json.loads(json.dumps(post_run))
             swapped_roles["allowedIdentityRotations"][0]["pathId"] = (
                 generated_resource_id
