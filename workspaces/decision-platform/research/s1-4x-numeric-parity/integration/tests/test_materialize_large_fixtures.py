@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import hashlib
+import importlib
 import json
 import os
 import subprocess
 import sys
 from collections.abc import Iterator
 from pathlib import Path
+from types import ModuleType
 from typing import Any
 
 import pytest
@@ -65,6 +67,11 @@ def _canonical_bytes(value: Any) -> bytes:
 
 def _sha256(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
+
+
+def _materializer_module() -> ModuleType:
+    sys.path.insert(0, str(S1_4X_ROOT / "integration"))
+    return importlib.import_module("materialize_large_fixtures")
 
 
 def _expected_receipt() -> dict[str, Any]:
@@ -224,6 +231,91 @@ def test_materialize_rejects_preexisting_output_receipt_and_symlink(
         _run("materialize", output_root=output_root, receipt=receipt),
         "OUTPUT_ROOT_ALREADY_EXISTS",
     )
+
+
+def test_generator_executes_the_verified_fd_and_rechecks_identity(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    materializer = _materializer_module()
+    generator = S1_4X_ROOT / "oracle" / "generate_large_fixtures.py"
+    identity_checks: list[tuple[int, Path]] = []
+    original_verify = materializer._verify_generator_fd_and_path
+
+    def counting_verify(descriptor: int, path: Path) -> tuple[int, int]:
+        identity_checks.append((descriptor, path))
+        return original_verify(descriptor, path)
+
+    def fake_run(
+        command: list[str],
+        **kwargs: Any,
+    ) -> subprocess.CompletedProcess[bytes]:
+        passed_descriptors = kwargs["pass_fds"]
+        assert isinstance(passed_descriptors, tuple)
+        assert len(passed_descriptors) == 1
+        descriptor = passed_descriptors[0]
+        assert command[:2] == ["/proc/self/exe", f"/proc/self/fd/{descriptor}"]
+        assert os.fstat(descriptor).st_size == generator.stat().st_size
+        return subprocess.CompletedProcess(command, 0, b"verified-report\n", b"")
+
+    monkeypatch.setattr(
+        materializer,
+        "_verify_generator_fd_and_path",
+        counting_verify,
+    )
+    monkeypatch.setattr(materializer, "_validate_generator_report", lambda _: None)
+    monkeypatch.setattr(materializer.subprocess, "run", fake_run)
+
+    materializer._run_generator(
+        generator=generator,
+        manifest_root=SOURCE_LARGE,
+        s1_4x_root=S1_4X_ROOT,
+        generated_root=tmp_path,
+    )
+
+    assert [path for _, path in identity_checks] == [generator, generator]
+    assert identity_checks[0][0] == identity_checks[1][0]
+
+
+def test_materialized_manifest_is_validated_against_static_bytes_and_contract(
+    tmp_path: Path,
+) -> None:
+    materializer = _materializer_module()
+    fixture = next(
+        item
+        for item in materializer.FIXTURES
+        if item.manifest_name == "large-prices-n100000.manifest.json"
+    )
+    manifest_path = tmp_path / fixture.manifest_name
+    valid_bytes = (SOURCE_LARGE / fixture.manifest_name).read_bytes()
+    manifest_path.write_bytes(valid_bytes)
+
+    materializer._validate_materialized_manifest(manifest_path, fixture)
+
+    manifest_path.write_bytes(valid_bytes + b" ")
+    with pytest.raises(
+        materializer.MaterializationError,
+        match="^MANIFEST_BYTES_MISMATCH$",
+    ):
+        materializer._validate_materialized_manifest(manifest_path, fixture)
+
+    invalid_contract = json.loads(valid_bytes)
+    invalid_contract["fileName"] = "wrong-payload.f64le"
+    invalid_bytes = _canonical_bytes(invalid_contract)
+    contract_fixture = materializer.FixtureExpectation(
+        manifest_name=fixture.manifest_name,
+        manifest_byte_length=len(invalid_bytes),
+        manifest_sha256=_sha256(invalid_bytes),
+        payload_name=fixture.payload_name,
+        payload_byte_length=fixture.payload_byte_length,
+        payload_sha256=fixture.payload_sha256,
+    )
+    manifest_path.write_bytes(invalid_bytes)
+    with pytest.raises(
+        materializer.MaterializationError,
+        match="^MANIFEST_CONTRACT_MISMATCH$",
+    ):
+        materializer._validate_materialized_manifest(manifest_path, contract_fixture)
 
 
 def test_check_rejects_extra_and_tampered_output(
