@@ -180,6 +180,24 @@ class StylishFallbackTests(unittest.TestCase):
             script,
         )
 
+    def test_negative_gate_asserts_only_frozen_formatter_output(self) -> None:
+        contract = self.load_contract()
+        script = (TOOLS_ROOT / "check-format.sh").read_text(encoding="utf-8")
+
+        self.assertEqual(
+            contract["derivedCapabilityProbe"]["stdoutSha256"],
+            "6aeb47fa182fcae71756433963017d80d7b649e00e879f5e8af2c6ca53f8b5ba",
+        )
+        for emitted_token in (
+            "import           Data.Maybe (maybe)",
+            "value::Maybe Int->Int",
+            "value=maybe 0 id",
+        ):
+            with self.subTest(emitted_token=emitted_token):
+                self.assertIn(emitted_token, script)
+        self.assertNotIn('"value :: Maybe Int -> Int"', script)
+        self.assertNotIn('"value = maybe 0 id"', script)
+
     def test_benchmark_aeson_import_matches_frozen_formatter_layout(self) -> None:
         source = BENCHMARK_PATH.read_text(encoding="utf-8")
 
