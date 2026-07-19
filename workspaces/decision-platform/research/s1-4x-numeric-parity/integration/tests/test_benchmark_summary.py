@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import math
 import sys
 import tempfile
@@ -30,6 +31,34 @@ PLAN = BENCHMARKS / "benchmark-plan.v1.json"
 
 
 class BenchmarkSummaryTests(TestCase):
+    def test_finalizer_marks_native_receipts_as_historical_fd_evidence(self) -> None:
+        module = ast.parse(
+            (INTEGRATION / "finalize_benchmark_run.py").read_text(encoding="utf-8")
+        )
+        finalize_run = next(
+            node
+            for node in module.body
+            if isinstance(node, ast.FunctionDef) and node.name == "finalize_run"
+        )
+        validation_calls = [
+            node
+            for node in ast.walk(finalize_run)
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "validate_native_contract_evidence"
+            )
+        ]
+        self.assertEqual(len(validation_calls), 1)
+        keyword_values = {
+            keyword.arg: keyword.value
+            for keyword in validation_calls[0].keywords
+            if keyword.arg is not None
+        }
+        historical_flag = keyword_values.get("_require_live_haskell_fds")
+        self.assertIsInstance(historical_flag, ast.Constant)
+        self.assertIs(historical_flag.value, False)
+
     def test_three_repetition_distribution_has_no_synthetic_p95(self) -> None:
         summary = distribution([3.0, 1.0, 2.0])
         self.assertEqual(

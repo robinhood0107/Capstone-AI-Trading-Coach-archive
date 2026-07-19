@@ -35,6 +35,53 @@ from native_benchmark_block import (  # noqa: E402
 
 PLAN = BENCHMARKS / "benchmark-plan.v1.json"
 EFFECTIVE_RUNTIME_ARGUMENTS_SHA256 = "e" * 64
+EXPECTED_HASKELL_WORKFLOW_INPUT_PATHS = (
+    ".hlint.yaml",
+    "Containerfile",
+    "ghc-compatibility-solve-failure.v1.json",
+    "lint-exceptions.v1.json",
+    "stack-ghc-9.14.1.yaml",
+    "stack-ghc-9.14.1.yaml.lock",
+    "stylish-ghc2024-fallback.v1.json",
+    "toolchain-lock.v1.json",
+    "tools/assert-toolchain.sh",
+    "tools/check-format.sh",
+    "tools/check-hlint.sh",
+    "tools/compatibility_evidence.py",
+    "tools/fixtures/hlint-negative.v1.json",
+    "tools/fixtures/hlint/aliased-from-left.hs",
+    "tools/fixtures/hlint/aliased-from-right.hs",
+    "tools/fixtures/hlint/core-system-io.hs",
+    "tools/fixtures/hlint/debug-trace.hs",
+    "tools/fixtures/hlint/forbidden-deriving.hs",
+    "tools/fixtures/hlint/forbidden-extension.hs",
+    "tools/fixtures/hlint/foreign-interface.hs",
+    "tools/fixtures/hlint/partial-and-unsafe.hs",
+    "tools/fixtures/hlint/qualified-from-just.hs",
+    "tools/fixtures/hlint/qualified-throw-io.hs",
+    "tools/fixtures/hlint/qualified-throw.hs",
+    "tools/fixtures/hlint/unchecked-folds.hs",
+    "tools/fixtures/hlint/unsafe-module.hs",
+    "tools/fixtures/hlint/unsafe-modules.hs",
+    "tools/fixtures/process/large/unicode-digit-path.manifest.json",
+    "tools/fixtures/process/large/unicode-digit-sha.manifest.json",
+    "tools/fixtures/stylish/misformatted.hs",
+    "tools/haskell_benchmark_block.py",
+    "tools/haskell_evidence.py",
+    "tools/hlint_inventory.py",
+    "tools/profile_workflow.py",
+    "tools/python-runtime.sh",
+    "tools/run-benchmark-block.sh",
+    "tools/run-candidate.sh",
+    "tools/run-correctness-profile.sh",
+    "tools/run-ghc-9.14.1-compatibility.sh",
+    "tools/run-oci-correctness.sh",
+    "tools/run-profile-qualification.sh",
+    "tools/run-property-evidence.sh",
+    "tools/select-proven-profile.sh",
+    "tools/stylish_fallback.py",
+    "tools/validate-ghc-9.14.1-compatibility.sh",
+)
 
 
 def _canonical_sha256(value: Any) -> str:
@@ -676,7 +723,7 @@ class NativeBenchmarkBlockTests(TestCase):
         )
         stack_root = temporary / "cache" / stack_root_name
         stack_root.mkdir(parents=True)
-        stack_work_directory = Path(".stack-work") / "s1-4x" / stack_root_name
+        stack_work_directory = Path(f".stack-work-s1-4x-{stack_root_name}")
         stack_work_directory_absolute = haskell_root / stack_work_directory
         benchmark_executable = (
             stack_work_directory_absolute / "dist/x86_64-linux/ghc-9.10.3/build/"
@@ -795,6 +842,17 @@ class NativeBenchmarkBlockTests(TestCase):
         stack_yaml.write_text("resolver: ghc-9.10.3\n", encoding="utf-8")
         stack_lock = haskell_root / "stack.yaml.lock"
         stack_lock.write_text("snapshots: []\npackages: []\n", encoding="utf-8")
+        for index, relative_path in enumerate(EXPECTED_HASKELL_WORKFLOW_INPUT_PATHS):
+            workflow_input = haskell_root / relative_path
+            workflow_input.parent.mkdir(parents=True, exist_ok=True)
+            workflow_input.write_text(
+                f"workflow input fixture {index}\n",
+                encoding="utf-8",
+            )
+        self.assertEqual(
+            native_block_module.HASKELL_WORKFLOW_INPUT_PATHS,
+            EXPECTED_HASKELL_WORKFLOW_INPUT_PATHS,
+        )
         selected_options = ["-O0", "-fasm"]
         effective_options_sha256 = _canonical_sha256(selected_options)
         source_tree_paths = [
@@ -803,6 +861,7 @@ class NativeBenchmarkBlockTests(TestCase):
             "s1-4x-haskell.cabal",
             "stack.yaml",
             "stack.yaml.lock",
+            *EXPECTED_HASKELL_WORKFLOW_INPUT_PATHS,
         ]
         source_tree_sha256 = _canonical_sha256(
             [
@@ -993,6 +1052,9 @@ class NativeBenchmarkBlockTests(TestCase):
             name: inherited_fd_path(path) for name, path in auxiliary_elves.items()
         }
         marker_argv = [
+            "/usr/bin/env",
+            "-a",
+            str(marker_python),
             pinned_fd_paths["markerPython"],
             pinned_fd_paths["markerScript"],
             "mark-measurement-entered",
@@ -1704,6 +1766,28 @@ class NativeBenchmarkBlockTests(TestCase):
             profile="baseline-o0-fasm",
         )
 
+        profile_workflow = haskell_root / "tools/profile_workflow.py"
+        profile_workflow_bytes = profile_workflow.read_bytes()
+        profile_workflow.write_bytes(profile_workflow_bytes + b"# tampered\n")
+        with self.assertRaisesRegex(
+            GateError,
+            "NATIVE_EXECUTION_PROVENANCE_INVALID",
+        ):
+            validate_native_contract_evidence(
+                evidence,
+                boundary_id="haskell",
+                selector_id=selector_id,
+                block_directory=temporary,
+                native_cases=cases,
+                native_statistics_cases=statistics_cases,
+                plan_path=plan_path,
+                fixture_root_path=haskell_fixture_root,
+                input_ledger_path=input_ledger,
+                effective_runtime_arguments_sha256=effective_options_sha256,
+                profile="baseline-o0-fasm",
+            )
+        profile_workflow.write_bytes(profile_workflow_bytes)
+
         candidate_provenance = receipt_document["provenance"]["candidateProvenance"]
         self.assertEqual(len(candidate_provenance), 80)
         self.assertEqual(
@@ -1794,6 +1878,71 @@ class NativeBenchmarkBlockTests(TestCase):
                         effective_runtime_arguments_sha256=(effective_options_sha256),
                         profile="baseline-o0-fasm",
                     )
+        install_receipt(receipt_document)
+
+        legacy_stack_work_directory = (
+            Path(".stack-work") / "s1-4x" / stack_root_name
+        )
+        legacy_stack_work_absolute = haskell_root / legacy_stack_work_directory
+        legacy_benchmark_executable = (
+            legacy_stack_work_absolute / "dist/x86_64-linux/ghc-9.10.3/build/"
+            "s1-4x-haskell-benchmark/s1-4x-haskell-benchmark"
+        )
+        legacy_benchmark_executable.parent.mkdir(parents=True)
+        legacy_benchmark_executable.write_bytes(benchmark_executable.read_bytes())
+        legacy_benchmark_executable.chmod(0o700)
+        legacy_runtime_identity = {
+            **runtime_identity_document,
+            "executedBenchmarkPath": str(legacy_benchmark_executable.resolve()),
+        }
+        runtime_identity.write_text(
+            json.dumps(legacy_runtime_identity, sort_keys=True),
+            encoding="utf-8",
+        )
+        legacy_workdir_receipt = copy.deepcopy(receipt_document)
+        legacy_workdir_command = legacy_workdir_receipt["commandArgv"]
+        legacy_workdir_command[legacy_workdir_command.index("--work-dir") + 1] = str(
+            legacy_stack_work_directory
+        )
+        legacy_workdir_provenance = legacy_workdir_receipt["provenance"]
+        legacy_workdir_candidate = legacy_workdir_provenance["candidateProvenance"]
+        legacy_workdir_provenance["benchmarkExecutablePath"] = str(
+            legacy_benchmark_executable.resolve()
+        )
+        legacy_workdir_candidate["executedBenchmarkPath"] = str(
+            legacy_benchmark_executable.resolve()
+        )
+        legacy_workdir_candidate["runtimeIdentitySha256"] = hashlib.sha256(
+            runtime_identity.read_bytes()
+        ).hexdigest()
+        legacy_workdir_candidate["stackWorkDirectory"] = str(
+            legacy_stack_work_directory
+        )
+        legacy_workdir_candidate["stackWorkDirectoryAbsolute"] = str(
+            legacy_stack_work_absolute.resolve()
+        )
+        install_receipt(legacy_workdir_receipt)
+        with self.assertRaisesRegex(
+            GateError,
+            "NATIVE_EXECUTION_PROVENANCE_INVALID",
+        ):
+            validate_native_contract_evidence(
+                evidence,
+                boundary_id="haskell",
+                selector_id=selector_id,
+                block_directory=temporary,
+                native_cases=cases,
+                native_statistics_cases=statistics_cases,
+                plan_path=plan_path,
+                fixture_root_path=haskell_fixture_root,
+                input_ledger_path=input_ledger,
+                effective_runtime_arguments_sha256=effective_options_sha256,
+                profile="baseline-o0-fasm",
+            )
+        runtime_identity.write_text(
+            json.dumps(runtime_identity_document, sort_keys=True),
+            encoding="utf-8",
+        )
         install_receipt(receipt_document)
 
         closure_semantic_mutations = {
@@ -1953,10 +2102,38 @@ class NativeBenchmarkBlockTests(TestCase):
             )
         install_receipt(receipt_document)
 
+        legacy_marker_receipt = copy.deepcopy(receipt_document)
+        legacy_marker_candidate = legacy_marker_receipt["provenance"][
+            "candidateProvenance"
+        ]
+        legacy_marker_candidate["markerArgv"] = legacy_marker_candidate["markerArgv"][3:]
+        legacy_marker_candidate["markerArgvSha256"] = _canonical_sha256(
+            legacy_marker_candidate["markerArgv"]
+        )
+        install_receipt(legacy_marker_receipt)
+        with self.assertRaisesRegex(
+            GateError,
+            "NATIVE_EXECUTION_PROVENANCE_INVALID",
+        ):
+            validate_native_contract_evidence(
+                evidence,
+                boundary_id="haskell",
+                selector_id=selector_id,
+                block_directory=temporary,
+                native_cases=cases,
+                native_statistics_cases=statistics_cases,
+                plan_path=plan_path,
+                fixture_root_path=haskell_fixture_root,
+                input_ledger_path=input_ledger,
+                effective_runtime_arguments_sha256=effective_options_sha256,
+                profile="baseline-o0-fasm",
+            )
+        install_receipt(receipt_document)
+
         dead_fd_receipt = copy.deepcopy(receipt_document)
         dead_fd_candidate = dead_fd_receipt["provenance"]["candidateProvenance"]
         dead_fd_candidate["markerPythonPinnedFdPath"] = "/proc/self/fd/2147483647"
-        dead_fd_candidate["markerArgv"][0] = "/proc/self/fd/2147483647"
+        dead_fd_candidate["markerArgv"][3] = "/proc/self/fd/2147483647"
         dead_fd_candidate["markerArgvSha256"] = _canonical_sha256(
             dead_fd_candidate["markerArgv"]
         )
@@ -1978,6 +2155,20 @@ class NativeBenchmarkBlockTests(TestCase):
                 effective_runtime_arguments_sha256=effective_options_sha256,
                 profile="baseline-o0-fasm",
             )
+        validate_native_contract_evidence(
+            evidence,
+            boundary_id="haskell",
+            selector_id=selector_id,
+            block_directory=temporary,
+            native_cases=cases,
+            native_statistics_cases=statistics_cases,
+            plan_path=plan_path,
+            fixture_root_path=haskell_fixture_root,
+            input_ledger_path=input_ledger,
+            effective_runtime_arguments_sha256=effective_options_sha256,
+            profile="baseline-o0-fasm",
+            _require_live_haskell_fds=False,
+        )
         install_receipt(receipt_document)
 
         generic_artifact = (
