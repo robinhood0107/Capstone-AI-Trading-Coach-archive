@@ -106,10 +106,6 @@ FORBIDDEN_STACK_ENVIRONMENT = (
     "STACK_CONFIG",
 )
 OCI_PLATFORM = "linux/amd64"
-OCI_CONTEXT_NAME = "desktop-linux"
-OCI_DOCKER_CLIENT_SHA256 = (
-    "834d45bd30c6d08f1045f39a48fda64cf563f89e6f217a0dac53742612634fe2"
-)
 OCI_BASE_IMAGE = (
     "docker.io/library/haskell@sha256:"
     "417d4bc30ac7d8d5ff04ec97937f86eb508b0c76bfd1a39b5ec225688531aa9d"
@@ -135,6 +131,19 @@ class BenchmarkPythonRuntime:
     sha256: str
     mode: int
     identity: tuple[int, int, int, int, int, int]
+
+
+@dataclass(frozen=True)
+class PinnedDockerClient:
+    """Caller가 승인한 Docker bytes를 retained executable FD와 path ID로 결속한다."""
+
+    source_path: Path
+    fd_path: Path
+    descriptor: int
+    sha256: str
+    mode: int
+    identity: Mapping[str, int]
+    path_id: str
 
 
 def _load_pinned_runtime_helpers() -> tuple[Any, Any, type[Exception]]:
@@ -1918,17 +1927,13 @@ def validate_oci_daemon_identity(
     document: object,
     *,
     context_name: str,
-    expected_identity_sha256: str,
 ) -> dict[str, str]:
     """Docker daemon이 동일한 Linux amd64 endpoint인지 portable subset으로 고정한다."""
 
-    _require_sha256(
-        expected_identity_sha256,
-        label="oci-daemon-identity",
-    )
     if (
         not isinstance(document, dict)
-        or context_name != OCI_CONTEXT_NAME
+        or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", context_name)
+        is None
         or document.get("OSType") != "linux"
         or document.get("Architecture") not in {"amd64", "x86_64"}
         or any(
@@ -1946,9 +1951,34 @@ def validate_oci_daemon_identity(
         "architecture": "amd64",
         "platform": OCI_PLATFORM,
     }
-    if canonical_sha256(identity) != expected_identity_sha256:
-        raise WorkflowError("OCI_DAEMON_IDENTITY_SHA256_MISMATCH")
     return identity
+
+
+def validate_oci_daemon_identity_pair(
+    before: object,
+    after: object,
+) -> str:
+    """Runtime-derived daemon identity의 exact before/after 동등성과 SHA를 반환한다."""
+
+    expected_fields = {
+        "contextName",
+        "daemonId",
+        "serverVersion",
+        "operatingSystem",
+        "osType",
+        "architecture",
+        "platform",
+    }
+    if any(
+        not isinstance(value, dict)
+        or set(value) != expected_fields
+        or any(type(field) is not str or not field for field in value.values())
+        for value in (before, after)
+    ):
+        raise WorkflowError("OCI_DAEMON_IDENTITY_PAIR_INVALID")
+    if before != after:
+        raise WorkflowError("OCI_DAEMON_CHANGED_DURING_RUN")
+    return canonical_sha256(before)
 
 
 def validate_oci_base_image_inspection(
@@ -2419,8 +2449,16 @@ def _sealed_child_environment(
     if home is None:
         raise WorkflowError("HOME_MISSING")
     home_path = _absolute_existing_directory(Path(home), label="HOME")
+    ghcup_prefix = os.environ.get("GHCUP_INSTALL_BASE_PREFIX")
+    if ghcup_prefix is None:
+        raise WorkflowError("GHCUP_INSTALL_BASE_PREFIX_MISSING")
+    ghcup_prefix_path = _absolute_existing_directory(
+        Path(ghcup_prefix),
+        label="GHCUP_INSTALL_BASE_PREFIX",
+    )
     environment = {
         "HOME": str(home_path),
+        "GHCUP_INSTALL_BASE_PREFIX": str(ghcup_prefix_path),
         "PATH": (
             f"{ghc_bin.parent}:{stack_bin.parent}:"
             "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
@@ -6037,6 +6075,163 @@ def _regular_tree_sha256(root: Path, *, label: str) -> str:
     return hashlib.sha256(b"".join(entries)).hexdigest()
 
 
+def _snapshot_pinned_oci_docker_client(
+    client: PinnedDockerClient,
+) -> tuple[bytes, os.stat_result]:
+    """Retained Docker FD의 exact bytes/stat을 pathname 재개방 없이 검증한다."""
+
+    expected_path_id = (
+        f"S1_4X_DOCKER_CLIENT_SHA256_{client.sha256.upper()}"
+        if isinstance(client, PinnedDockerClient)
+        and SHA256_PATTERN.fullmatch(client.sha256) is not None
+        else None
+    )
+    if (
+        not isinstance(client, PinnedDockerClient)
+        or client.descriptor < 3
+        or client.fd_path != Path(f"/proc/self/fd/{client.descriptor}")
+        or client.path_id != expected_path_id
+    ):
+        raise WorkflowError("OCI_DOCKER_CLIENT_PIN_INVALID")
+    try:
+        before = os.fstat(client.descriptor)
+    except OSError as exc:
+        raise WorkflowError("OCI_DOCKER_CLIENT_FD_NOT_LIVE") from exc
+    if (
+        not stat.S_ISREG(before.st_mode)
+        or before.st_mode & 0o111 == 0
+        or before.st_size < 0
+        or before.st_size > 64 * 1024 * 1024
+        or before.st_nlink != 1
+        or _stat_identity(before) != dict(client.identity)
+        or before.st_mode != client.mode
+    ):
+        raise WorkflowError("OCI_DOCKER_CLIENT_FD_IDENTITY_INVALID")
+    digest = hashlib.sha256()
+    chunks: list[bytes] = []
+    offset = 0
+    while offset < before.st_size:
+        try:
+            chunk = os.pread(
+                client.descriptor,
+                min(1024 * 1024, before.st_size - offset),
+                offset,
+            )
+        except OSError as exc:
+            raise WorkflowError("OCI_DOCKER_CLIENT_FD_READ_FAILED") from exc
+        if not chunk:
+            raise WorkflowError("OCI_DOCKER_CLIENT_FD_SHORT_READ")
+        digest.update(chunk)
+        chunks.append(chunk)
+        offset += len(chunk)
+    try:
+        after = os.fstat(client.descriptor)
+    except OSError as exc:
+        raise WorkflowError("OCI_DOCKER_CLIENT_FD_NOT_LIVE") from exc
+    if (
+        _stat_identity(after) != dict(client.identity)
+        or digest.hexdigest() != client.sha256
+    ):
+        raise WorkflowError("OCI_DOCKER_CLIENT_FD_CHANGED")
+    return b"".join(chunks), before
+
+
+def pin_oci_docker_client(
+    path: Path,
+    *,
+    expected_sha256: str,
+) -> PinnedDockerClient:
+    """Caller SHA와 일치하는 executable inode를 OCI 종료까지 retained FD로 연다."""
+
+    expected = _require_sha256(expected_sha256, label="docker")
+    source = _absolute_regular(
+        path,
+        label="S1_4X_DOCKER_BIN",
+        executable=True,
+    )
+    try:
+        descriptor = os.open(
+            source,
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+        )
+    except OSError as exc:
+        raise WorkflowError("OCI_DOCKER_CLIENT_PIN_OPEN_FAILED") from exc
+    try:
+        before = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_mode & 0o111 == 0
+            or before.st_size < 0
+            or before.st_size > 64 * 1024 * 1024
+            or before.st_nlink != 1
+        ):
+            raise WorkflowError("OCI_DOCKER_CLIENT_PIN_INVALID")
+        digest = hashlib.sha256()
+        offset = 0
+        while offset < before.st_size:
+            chunk = os.pread(
+                descriptor,
+                min(1024 * 1024, before.st_size - offset),
+                offset,
+            )
+            if not chunk:
+                raise WorkflowError("OCI_DOCKER_CLIENT_PIN_SHORT_READ")
+            digest.update(chunk)
+            offset += len(chunk)
+        after = os.fstat(descriptor)
+        current = os.stat(source, follow_symlinks=False)
+        identity = _stat_identity(before)
+        if (
+            _stat_identity(after) != identity
+            or _stat_identity(current) != identity
+        ):
+            raise WorkflowError("OCI_DOCKER_CLIENT_CHANGED_DURING_PIN")
+        actual_sha256 = digest.hexdigest()
+        if actual_sha256 != expected:
+            raise WorkflowError("DOCKER_SHA256_MISMATCH")
+        return PinnedDockerClient(
+            source_path=source,
+            fd_path=Path(f"/proc/self/fd/{descriptor}"),
+            descriptor=descriptor,
+            sha256=actual_sha256,
+            mode=before.st_mode,
+            identity=identity,
+            path_id=(
+                f"S1_4X_DOCKER_CLIENT_SHA256_{actual_sha256.upper()}"
+            ),
+        )
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _run_pinned_oci_docker_logged(
+    client: PinnedDockerClient,
+    command: Sequence[str],
+    *,
+    cwd: Path,
+    environment: Mapping[str, str],
+    phase: str,
+    output_directory: Path,
+) -> dict[str, Any]:
+    """Docker command를 retained FD로만 실행하고 receipt에는 portable ID를 남긴다."""
+
+    _snapshot_pinned_oci_docker_client(client)
+    if not command or command[0] != str(client.fd_path):
+        raise WorkflowError(f"OCI_DOCKER_STAGE_COMMAND_INVALID:{phase}")
+    return _run_logged(
+        command,
+        cwd=cwd,
+        environment=environment,
+        phase=phase,
+        output_directory=output_directory,
+        pass_fds=(client.descriptor,),
+        portable_path_ids={str(client.fd_path): client.path_id},
+    )
+
+
 def _docker_config_tree_snapshot(
     docker_config: Path,
 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
@@ -6089,17 +6284,12 @@ def _docker_config_tree_snapshot(
 def snapshot_oci_docker_stage(
     *,
     stage: str,
-    docker: Path,
-    expected_docker_sha256: str,
+    docker_client: PinnedDockerClient,
     docker_config: Path,
     output_root: Path,
 ) -> dict[str, Any]:
     """각 Docker command 직전/직후 client bytes와 output-bound config를 snapshot한다."""
 
-    expected_sha256 = _require_sha256(
-        expected_docker_sha256,
-        label="oci-docker-stage-client",
-    )
     if (
         type(stage) is not str
         or re.fullmatch(r"[a-z0-9][a-z0-9-]{0,127}", stage) is None
@@ -6113,14 +6303,12 @@ def snapshot_oci_docker_stage(
         or docker_config.resolve(strict=True) != docker_config
     ):
         raise WorkflowError("OCI_DOCKER_TRUST_STAGE_INPUT_INVALID")
-    docker_payload, docker_stat = _same_fd_bytes_snapshot(
-        docker,
-        label="OCI_DOCKER_CLIENT_STAGE",
-        max_bytes=64 * 1024 * 1024,
+    docker_payload, docker_stat = _snapshot_pinned_oci_docker_client(
+        docker_client
     )
     docker_sha256 = hashlib.sha256(docker_payload).hexdigest()
     if (
-        docker_sha256 != expected_sha256
+        docker_sha256 != docker_client.sha256
         or docker_stat.st_mode & 0o111 == 0
         or docker_stat.st_nlink != 1
     ):
@@ -6129,7 +6317,8 @@ def snapshot_oci_docker_stage(
         docker_config
     )
     trust_identity = {
-        "dockerClientPath": str(docker),
+        "dockerClientPath": str(docker_client.source_path),
+        "dockerClientPathId": docker_client.path_id,
         "dockerClientSha256": docker_sha256,
         "dockerClientByteLength": len(docker_payload),
         "dockerClientIdentity": _stat_identity(docker_stat),
@@ -6158,6 +6347,7 @@ def validate_oci_docker_stage_pair(
         "schemaVersion",
         "stage",
         "dockerClientPath",
+        "dockerClientPathId",
         "dockerClientSha256",
         "dockerClientByteLength",
         "dockerClientIdentity",
@@ -6199,9 +6389,17 @@ def _oci_context_name(
         value = payload.decode("utf-8")
     except UnicodeError as exc:
         raise WorkflowError("OCI_CONTEXT_NAME_INVALID") from exc
-    if value != f"{OCI_CONTEXT_NAME}\n":
+    if (
+        not value.endswith("\n")
+        or value.count("\n") != 1
+        or re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}",
+            value[:-1],
+        )
+        is None
+    ):
         raise WorkflowError("OCI_CONTEXT_NAME_INVALID")
-    return OCI_CONTEXT_NAME
+    return value[:-1]
 
 
 def _oci_correctness(arguments: argparse.Namespace) -> None:
@@ -6239,20 +6437,17 @@ def _oci_correctness(arguments: argparse.Namespace) -> None:
     )
     profile_id = profile["profileId"]
     options = profile_options(profile_id)
-    docker = _required_environment_path("S1_4X_DOCKER_BIN")
+    docker_source = _required_environment_path("S1_4X_DOCKER_BIN")
     expected_docker_sha256 = _require_sha256(
         os.environ.get("S1_4X_DOCKER_SHA256"),
         label="docker",
     )
-    if expected_docker_sha256 != OCI_DOCKER_CLIENT_SHA256:
-        raise WorkflowError("DOCKER_TRUST_ANCHOR_NOT_FROZEN")
-    expected_daemon_identity_sha256 = _require_sha256(
-        os.environ.get("S1_4X_DOCKER_DAEMON_IDENTITY_SHA256"),
-        label="docker-daemon-identity",
+    docker_client = pin_oci_docker_client(
+        docker_source,
+        expected_sha256=expected_docker_sha256,
     )
-    docker_sha256 = sha256_file(docker)
-    if docker_sha256 != expected_docker_sha256:
-        raise WorkflowError("DOCKER_SHA256_MISMATCH")
+    docker = docker_client.fd_path
+    docker_sha256 = docker_client.sha256
     ghcup = _required_environment_path("S1_4X_GHCUP_BIN")
     stack = _required_environment_path("S1_4X_STACK_BIN")
     ghc = _required_environment_path("S1_4X_AUTHORITATIVE_GHC_BIN")
@@ -6287,8 +6482,7 @@ def _oci_correctness(arguments: argparse.Namespace) -> None:
     environment["DOCKER_CONFIG"] = str(docker_config)
     docker_trust_baseline = snapshot_oci_docker_stage(
         stage="baseline",
-        docker=docker,
-        expected_docker_sha256=expected_docker_sha256,
+        docker_client=docker_client,
         docker_config=docker_config,
         output_root=output,
     )
@@ -6307,8 +6501,7 @@ def _oci_correctness(arguments: argparse.Namespace) -> None:
             raise WorkflowError(f"OCI_DOCKER_STAGE_COMMAND_INVALID:{phase}")
         before = snapshot_oci_docker_stage(
             stage=phase,
-            docker=docker,
-            expected_docker_sha256=expected_docker_sha256,
+            docker_client=docker_client,
             docker_config=docker_config,
             output_root=output,
         )
@@ -6317,7 +6510,8 @@ def _oci_correctness(arguments: argparse.Namespace) -> None:
             != docker_trust_baseline["dockerTrustIdentitySha256"]
         ):
             raise WorkflowError("OCI_DOCKER_TRUST_BASELINE_DRIFT")
-        record = _run_logged(
+        record = _run_pinned_oci_docker_logged(
+            docker_client,
             command,
             cwd=cache_root,
             environment=environment,
@@ -6326,8 +6520,7 @@ def _oci_correctness(arguments: argparse.Namespace) -> None:
         )
         after = snapshot_oci_docker_stage(
             stage=phase,
-            docker=docker,
-            expected_docker_sha256=expected_docker_sha256,
+            docker_client=docker_client,
             docker_config=docker_config,
             output_root=output,
         )
@@ -6402,7 +6595,6 @@ def _oci_correctness(arguments: argparse.Namespace) -> None:
     daemon_identity_before = validate_oci_daemon_identity(
         daemon_before_document,
         context_name=context_name,
-        expected_identity_sha256=expected_daemon_identity_sha256,
     )
     base_inspect_command = [
         str(docker),
@@ -6683,15 +6875,12 @@ def _oci_correctness(arguments: argparse.Namespace) -> None:
     daemon_identity_after = validate_oci_daemon_identity(
         daemon_after_document,
         context_name=context_name_after,
-        expected_identity_sha256=expected_daemon_identity_sha256,
     )
-    if (
-        context_name_after != context_name
-        or daemon_identity_after != daemon_identity_before
-    ):
-        raise WorkflowError("OCI_DAEMON_CHANGED_DURING_RUN")
-    if sha256_file(docker) != docker_sha256:
-        raise WorkflowError("OCI_DOCKER_CLIENT_CHANGED_DURING_RUN")
+    daemon_identity_sha256 = validate_oci_daemon_identity_pair(
+        daemon_identity_before,
+        daemon_identity_after,
+    )
+    _snapshot_pinned_oci_docker_client(docker_client)
     if evidence.benchmark_source_tree_sha256(haskell_root) != source_tree_sha256:
         raise WorkflowError("SOURCE_TREE_CHANGED_DURING_OCI")
     if _repo_commit(repo_root) != candidate_commit:
@@ -6715,15 +6904,14 @@ def _oci_correctness(arguments: argparse.Namespace) -> None:
         "contextSnapshot": context_snapshot,
         "fixtureTreeSha256": fixture_tree_sha256,
         "candidateBinarySha256": binary_sha256,
-        "dockerPath": str(docker),
+        "dockerPath": str(docker_source),
+        "dockerPathId": docker_client.path_id,
         "dockerSha256": docker_sha256,
         "expectedDockerSha256": expected_docker_sha256,
         "dockerConfigPath": str(docker_config),
         "dockerTrustBaseline": docker_trust_baseline,
         "dockerTrustStageSnapshots": docker_trust_stage_snapshots,
-        "expectedDaemonIdentitySha256": (
-            expected_daemon_identity_sha256
-        ),
+        "daemonIdentitySha256": daemon_identity_sha256,
         "dockerContextName": context_name,
         "daemonIdentityBefore": daemon_identity_before,
         "daemonIdentityAfter": daemon_identity_after,
