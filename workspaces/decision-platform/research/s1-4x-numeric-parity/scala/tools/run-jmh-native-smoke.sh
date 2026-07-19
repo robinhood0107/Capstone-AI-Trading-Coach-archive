@@ -325,6 +325,10 @@ export S1_4X_JMH_TMPDIR="$jmh_tmpdir"
 export TMPDIR="$jmh_tmpdir"
 export TEMP="$jmh_tmpdir"
 export TMP="$jmh_tmpdir"
+export S1_4X_BENCHMARK_CASE_ID="$CASE_ID"
+export S1_4X_BENCHMARK_PLAN="$PLAN"
+export S1_4X_BENCHMARK_PROFILE="$PROFILE"
+export S1_4X_BENCHMARK_RUN_MODE="$MODE"
 list_file="$OUTPUT_DIR/jmh-list.txt"
 "$SCALA_ROOT/tools/compile-benchmarks.sh" \
   --profile "$PROFILE" \
@@ -411,10 +415,6 @@ command=(
   "$include_regex"
 )
 
-export S1_4X_BENCHMARK_CASE_ID="$CASE_ID"
-export S1_4X_BENCHMARK_PLAN="$PLAN"
-export S1_4X_BENCHMARK_PROFILE="$PROFILE"
-export S1_4X_BENCHMARK_RUN_MODE="$MODE"
 verify_fixture_root_identity
 export S1_4X_FIXTURE_ROOT="$FIXTURE_ROOT"
 export S1_4X_EFFECTIVE_JVM_EVIDENCE_DIR="$OUTPUT_DIR/fork-evidence"
