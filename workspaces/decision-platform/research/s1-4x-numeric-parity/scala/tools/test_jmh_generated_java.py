@@ -3,7 +3,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
+import os
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -34,6 +37,64 @@ def expect_error(helper, expected: str, action) -> None:
         raise AssertionError(f"expected PrecompileError: {expected}")
 
 
+def verify_parent_owned_proc_fd(
+    *,
+    helper_path: Path,
+    binary: Path,
+    expected_sha256: str,
+    fd: int,
+) -> None:
+    """실제 child에서 parent-owned proc FD가 sealed 실행 경계로 유지되는지 검증한다."""
+
+    script = """
+import importlib.util
+import os
+import pathlib
+import sys
+
+helper_path, binary, expected_sha256, owner_pid, fd = sys.argv[1:]
+sys.path.insert(0, str(pathlib.Path(helper_path).parent))
+specification = importlib.util.spec_from_file_location(
+    "precompile_jmh_generated_java_child",
+    helper_path,
+)
+module = importlib.util.module_from_spec(specification)
+sys.modules[specification.name] = module
+specification.loader.exec_module(module)
+verified_path, execution_id, identity = module._verified_executable(
+    binary=pathlib.Path(binary),
+    execution_path=pathlib.Path(f"/proc/{owner_pid}/fd/{fd}"),
+    expected_sha256=expected_sha256,
+    label="PARENT_TEST",
+)
+assert verified_path == pathlib.Path(f"/proc/{owner_pid}/fd/{fd}")
+assert execution_id == "PINNED_PARENT_TEST_FD"
+assert identity.proc_owner_pid == int(owner_pid)
+assert identity.proc_owner_start_time is not None
+module._verify_executable_stability(identity, label="PARENT_TEST")
+"""
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            script,
+            str(helper_path),
+            str(binary),
+            expected_sha256,
+            str(os.getpid()),
+            str(fd),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        pass_fds=(fd,),
+    )
+    assert completed.returncode == 0, (
+        completed.stdout,
+        completed.stderr,
+    )
+
+
 def main() -> int:
     helper = load_helper()
     expected = helper.expected_generated_source_paths()
@@ -44,6 +105,80 @@ def main() -> int:
 
     with tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary)
+        executable = root / "executable"
+        executable.write_bytes(Path("/usr/bin/dash").read_bytes())
+        executable.chmod(0o755)
+        executable_sha256 = hashlib.sha256(
+            executable.read_bytes()
+        ).hexdigest()
+        executable_fd = os.open(executable, os.O_RDONLY | os.O_NOFOLLOW)
+        try:
+            regular_path, regular_id, regular_identity = (
+                helper._verified_executable(
+                    binary=executable,
+                    execution_path=executable,
+                    expected_sha256=executable_sha256,
+                    label="REGULAR_TEST",
+                )
+            )
+            assert regular_path == executable
+            assert regular_id == "REGULAR_TEST"
+            assert regular_identity.proc_owner_pid is None
+            helper._verify_executable_stability(
+                regular_identity,
+                label="REGULAR_TEST",
+            )
+
+            self_path = Path(f"/proc/self/fd/{executable_fd}")
+            verified_path, execution_id, identity = (
+                helper._verified_executable(
+                    binary=executable,
+                    execution_path=self_path,
+                    expected_sha256=executable_sha256,
+                    label="SELF_TEST",
+                )
+            )
+            assert verified_path == Path(
+                f"/proc/{os.getpid()}/fd/{executable_fd}"
+            )
+            assert execution_id == "PINNED_SELF_TEST_FD"
+            assert identity.proc_owner_pid == os.getpid()
+            assert identity.proc_owner_start_time is not None
+            helper._verify_executable_stability(
+                identity,
+                label="SELF_TEST",
+            )
+            verify_parent_owned_proc_fd(
+                helper_path=TOOLS_ROOT
+                / "precompile_jmh_generated_java.py",
+                binary=executable,
+                expected_sha256=executable_sha256,
+                fd=executable_fd,
+            )
+
+            executable_link = root / "executable-link"
+            executable_link.symlink_to(executable)
+            expect_error(
+                helper,
+                "LINK_TEST_EXECUTION_IDENTITY_MISMATCH",
+                lambda: helper._verified_executable(
+                    binary=executable,
+                    execution_path=executable_link,
+                    expected_sha256=executable_sha256,
+                    label="LINK_TEST",
+                ),
+            )
+        finally:
+            os.close(executable_fd)
+        expect_error(
+            helper,
+            "SELF_TEST_EXECUTION_POST_EXEC_IDENTITY_MISMATCH",
+            lambda: helper._verify_executable_stability(
+                identity,
+                label="SELF_TEST",
+            ),
+        )
+
         workspace = root / "workspace"
         coursier = root / "coursier"
         generated_root = (
