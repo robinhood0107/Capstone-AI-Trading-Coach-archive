@@ -769,7 +769,10 @@ def selector_fixture(
                 ],
                 "status": "PASS",
             }
-            physical_workspace = Path("/sealed/scala-workspace")
+            physical_workspace = (
+                root / "_physical-scala-workspace"
+            ).resolve()
+            physical_workspace.mkdir(parents=True, exist_ok=True)
             physical_coursier = Path("/sealed/coursier")
             runtime_class_output_id = (
                 "SCALA_WORKSPACE/.scala-build/"
@@ -878,6 +881,17 @@ def selector_fixture(
                 / ".scala-build/"
                 "selector_runtime_jmh_feedface00/classes/main"
             )
+            for workspace_directory in (
+                generator_input_path,
+                generated_source_path,
+                generated_resource_path,
+                class_output_path,
+                runtime_generator_input_path,
+                runtime_generated_source_path,
+                runtime_generated_resource_path,
+                runtime_class_output_path,
+            ):
+                workspace_directory.mkdir(parents=True, exist_ok=True)
             dependency_path = (
                 physical_coursier
                 / "https/repo.example/org/openjdk/jmh/"
@@ -2152,6 +2166,45 @@ def main() -> int:
         finally:
             binding_jmh_stdout.write_bytes(binding_stdout_bytes)
 
+    binding_stdout_lines = binding_stdout_text.splitlines()
+    class_input_raw = binding_stdout_lines[0].removeprefix(
+        "Processing 149 classes from "
+    ).removesuffix(' with "reflection" generator')
+    generated_paths_raw = binding_stdout_lines[1].removeprefix(
+        "Writing out Java source to "
+    ).split(" and resources to ", maxsplit=1)
+    source_root_raw, resource_root_raw = generated_paths_raw
+
+    def dot_component_spelling(raw_path: str) -> str:
+        path = Path(raw_path)
+        return f"{path.parent}/./{path.name}"
+
+    accepted_raw_path_labels: list[str] = []
+    for label, raw_path in (
+        ("class input", class_input_raw),
+        ("generated source root", source_root_raw),
+        ("generated resource root", resource_root_raw),
+    ):
+        forged_stdout = binding_stdout_text.replace(
+            raw_path,
+            dot_component_spelling(raw_path),
+            1,
+        ).encode("utf-8")
+        binding_jmh_stdout.write_bytes(forged_stdout)
+        try:
+            try:
+                validate_binding()
+            except module.T3EvidenceError as error:
+                if not str(error).startswith(
+                    "JMH_RUN_STDOUT_BINDING_INVALID"
+                ):
+                    raise AssertionError(
+                        f"{label}: unexpected leaf {error}"
+                    ) from error
+            else:
+                accepted_raw_path_labels.append(label)
+        finally:
+            binding_jmh_stdout.write_bytes(binding_stdout_bytes)
     def runtime_receipt_tamper() -> dict:
         return json.loads(json.dumps(binding_receipt))
 
@@ -2381,6 +2434,129 @@ def main() -> int:
                 )
         finally:
             binding_jmh_stdout.write_bytes(binding_stdout_bytes)
+
+    def self_consistent_physical_workspace_forgery(
+        physical_workspace: Path,
+    ) -> tuple[dict, list, bytes]:
+        value = runtime_receipt_tamper()
+        closure = value["jmhRuntimeClosure"]
+        generator = closure["generator"]
+
+        def physical(path_id: str) -> Path:
+            return physical_workspace / path_id.removeprefix(
+                "SCALA_WORKSPACE/"
+            )
+
+        runtime_path_ids = [
+            generator["classInputPathId"],
+            generator["generatedSourceRootPathId"],
+            generator["generatedResourceRootPathId"],
+            *[
+                item["pathId"]
+                for item in closure["runtimeClasspathEntries"]
+                if item["pathId"].startswith("SCALA_WORKSPACE/")
+            ],
+        ]
+        for runtime_path_id in runtime_path_ids:
+            physical(runtime_path_id).mkdir(
+                parents=True,
+                exist_ok=True,
+            )
+
+        precompile_paths = binding_compile_stdout.read_text(
+            encoding="utf-8"
+        ).splitlines()[2].split(os.pathsep)
+        runtime_paths = [
+            (
+                str(physical(runtime_item["pathId"]))
+                if runtime_item["pathId"] != precompile_item["pathId"]
+                else precompile_path
+            )
+            for precompile_path, precompile_item, runtime_item in zip(
+                precompile_paths,
+                value["classpathEntries"],
+                closure["runtimeClasspathEntries"],
+                strict=True,
+            )
+        ]
+        runtime_sha256 = hashlib.sha256(
+            os.pathsep.join(runtime_paths).encode("utf-8")
+        ).hexdigest()
+        closure["runtimeClasspathSha256"] = runtime_sha256
+        value["runtimeClasspathSha256"] = runtime_sha256
+        close_runtime_tamper(value)
+        forks = json.loads(json.dumps(binding_forks))
+        for fork in forks:
+            fork["runtimeClasspathSha256"] = runtime_sha256
+        stdout = (
+            f"Processing 149 classes from "
+            f"{physical(generator['classInputPathId'])} "
+            'with "reflection" generator\n'
+            f"Writing out Java source to "
+            f"{physical(generator['generatedSourceRootPathId'])} "
+            f"and resources to "
+            f"{physical(generator['generatedResourceRootPathId'])}\n"
+            "# JMH version: 1.37\n"
+        ).encode("utf-8")
+        return value, forks, stdout
+
+    real_workspace = selector_root / "physical-workspace"
+    real_workspace.mkdir()
+    (real_workspace / "sentinel").mkdir()
+    noncanonical_workspace = real_workspace / "sentinel" / ".."
+    symlink_target_parent = selector_root / "symlink-target-parent"
+    symlink_target_workspace = symlink_target_parent / "workspace"
+    symlink_target_workspace.mkdir(parents=True)
+    symlink_parent = selector_root / "symlink-parent"
+    symlink_parent.symlink_to(symlink_target_parent, target_is_directory=True)
+    ancestor_symlink_workspace = symlink_parent / "workspace"
+    accepted_physical_workspace_labels: list[str] = []
+    for physical_workspace, label in (
+        (
+            noncanonical_workspace,
+            "noncanonical physical runtime workspace",
+        ),
+        (
+            ancestor_symlink_workspace,
+            "ancestor-symlink physical runtime workspace",
+        ),
+    ):
+        forged_receipt, forged_forks, forged_stdout = (
+            self_consistent_physical_workspace_forgery(
+                physical_workspace
+            )
+        )
+        binding_jmh_stdout.write_bytes(forged_stdout)
+        try:
+            try:
+                validate_binding(
+                    receipt_value=forged_receipt,
+                    forks_value=forged_forks,
+                )
+            except module.T3EvidenceError as error:
+                if not str(error).startswith(
+                    "JMH_RUN_STDOUT_BINDING_INVALID"
+                ):
+                    raise AssertionError(
+                        f"{label}: unexpected leaf {error}"
+                    ) from error
+            else:
+                accepted_physical_workspace_labels.append(label)
+        finally:
+            binding_jmh_stdout.write_bytes(binding_stdout_bytes)
+    if accepted_raw_path_labels or accepted_physical_workspace_labels:
+        raise AssertionError(
+            "T3 accepted noncanonical physical paths: "
+            + ", ".join(
+                [
+                    *[
+                        f"raw {label}"
+                        for label in accepted_raw_path_labels
+                    ],
+                    *accepted_physical_workspace_labels,
+                ]
+            )
+        )
 
     exact_qualification_owner_gate_contract(
         module,
