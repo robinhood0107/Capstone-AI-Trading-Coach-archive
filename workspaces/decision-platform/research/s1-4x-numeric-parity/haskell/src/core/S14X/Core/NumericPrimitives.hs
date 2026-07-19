@@ -24,7 +24,7 @@ where
 
 import           Numeric.SpecFunctions (erfc, log1p)
 
-import qualified Data.List           as List
+import qualified Data.List as List
 import qualified Data.Vector.Unboxed as U
 
 import           S14X.Core.Error (StableError (LikelihoodInvalid, ResearchResultNonFinite, ResultNonFinite))
