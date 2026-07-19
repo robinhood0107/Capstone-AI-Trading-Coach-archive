@@ -108,16 +108,18 @@ object JvmForkEvidence:
       attributes: java.util.Map[String, Object],
       name: String
   ): Option[Long] =
-    Option(attributes.get(name)).collect { case number: Number =>
-      number.longValue
+    Option(attributes.get(name)).flatMap {
+      case number: Number => Some(number.longValue)
+      case _              => None
     }
 
   private def unixTime(
       attributes: java.util.Map[String, Object],
       name: String
   ): Option[Long] =
-    Option(attributes.get(name)).collect { case value: FileTime =>
-      value.to(TimeUnit.NANOSECONDS)
+    Option(attributes.get(name)).flatMap {
+      case value: FileTime => Some(value.to(TimeUnit.NANOSECONDS))
+      case _               => None
     }
 
   private def unixIdentity(path: Path, noFollowLinks: Boolean): Option[UnixFileIdentity] =
