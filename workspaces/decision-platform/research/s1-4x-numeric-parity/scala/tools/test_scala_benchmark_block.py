@@ -42,6 +42,7 @@ def main() -> int:
         "S1_4X_SCALA_QUALIFICATION_RESULT",
         "S1_4X_SCALA_CORRECTNESS_ROOT",
         "S1_4X_SCALA_JVM_ALLOWLIST_RESULT",
+        "S1_4X_LARGE_FIXTURE_ROOT",
         "S1_4X_BENCHMARK_SUBJECT_COMMIT",
         "JAVA_HOME",
         "--benchmark-subject-commit",
@@ -56,6 +57,19 @@ def main() -> int:
         assert forbidden not in wrapper
     assert '"$BENCHMARK_PYTHON_EXEC" "$HELPER"' in wrapper
     assert '"$BENCHMARK_PYTHON" "$HELPER"' not in wrapper
+    env_boundary = wrapper.index("exec /usr/bin/env -i")
+    for marker in (
+        'LARGE_FIXTURE_ROOT="${S1_4X_LARGE_FIXTURE_ROOT:?',
+        "LARGE_FIXTURE_ROOT_IDENTITY=",
+        "verify_large_fixture_root_identity",
+        'verify_directory "large fixture root" "$LARGE_FIXTURE_ROOT"',
+    ):
+        assert marker in wrapper
+        assert wrapper.index(marker) < env_boundary
+    assert (
+        'S1_4X_LARGE_FIXTURE_ROOT="$LARGE_FIXTURE_ROOT"'
+        in wrapper[env_boundary:]
+    )
 
     runner = Path("/repo/numeric/scala/tools/run-jmh-native-full.sh")
     plan = Path("/repo/numeric/benchmarks/benchmark-plan.v1.json")
