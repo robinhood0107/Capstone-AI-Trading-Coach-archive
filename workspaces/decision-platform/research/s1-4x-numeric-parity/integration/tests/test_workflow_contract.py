@@ -261,6 +261,9 @@ class NumericParityCorrectnessWorkflowTests(unittest.TestCase):
             "haskell_evidence.py",
             "module-safety",
             "S1_4X_VECTOR_SOURCE_ARCHIVE",
+            "S1_4X_BENCHMARK_PYTHON_BIN",
+            "python-runtime.sh",
+            "s1_4x_pin_benchmark_python",
         ):
             self.assertIn(token, authoritative)
         self.assertIn(
@@ -284,6 +287,8 @@ class NumericParityCorrectnessWorkflowTests(unittest.TestCase):
             "validate-ghc-9.14.1-compatibility.sh",
             "nonScoring",
             "FAIL_FROZEN_DEPENDENCY",
+            "python-runtime.sh",
+            "s1_4x_pin_benchmark_python",
         ):
             self.assertIn(token, compatibility)
 
@@ -318,22 +323,24 @@ class NumericParityCorrectnessWorkflowTests(unittest.TestCase):
         self.assertRegex(scala_oci, r"docker\.io/library/eclipse-temurin@sha256:[0-9a-f]{64}")
         haskell_oci = self.jobs["haskell-oci-correctness"]
         self.assertRegex(haskell_oci, r"docker\.io/library/haskell@sha256:[0-9a-f]{64}")
+        self.assertIn("python-runtime.sh", haskell_oci)
+        self.assertIn("s1_4x_pin_benchmark_python", haskell_oci)
 
         regression = self.jobs["frozen-python-regressions"]
         for token in (
-            "workspaces/decision-platform/python-services",
-            "workspaces/decision-platform/research/s1-4r-jax-risk",
-            "ruff check .",
-            "mypy app",
-            "mypy src benchmarks",
-            "pytest -q",
-            "test_s1_4r_regression_boundary.py",
-            (
-                "--deselect=tests/test_production_isolation.py::"
-                "test_branch_diff_is_confined_to_the_research_project_and_two_workflows"
-            ),
+            "regression_gate.py",
+            "--repo-root",
+            "--output-root",
+            "--uv-bin",
+            "--uv-sha256",
+            "--benchmark-subject-commit",
+            "production-compound-receipt.v1.json",
+            "research-compound-receipt.v1.json",
+            "actions/upload-artifact",
         ):
             self.assertIn(token, regression)
+        for token in ("ruff check .", "mypy app", "mypy src benchmarks"):
+            self.assertNotIn(token, regression)
         self.assertNotIn("S1_4R_EXECUTION_BOUNDARY=oci", regression)
         self.assertNotIn('generate_large_fixtures.py" --check', self.text)
 
@@ -394,6 +401,8 @@ class NumericParityBenchmarkWorkflowTests(unittest.TestCase):
             "regression_gate.py",
             "assemble_final_candidate_evidence.py",
             "final_candidate_audit.py",
+            "seal_correctness_run.py",
+            "correctness-run-manifest.v1.json",
             "materialize_large_fixtures.py",
         ):
             self.assertIn(token, source)
@@ -414,6 +423,23 @@ class NumericParityBenchmarkWorkflowTests(unittest.TestCase):
         )
         self.assertEqual(source.count("materialize_large_fixtures.py"), 2)
         self.assertNotIn('generate_large_fixtures.py" --check', source)
+        correctness = self.jobs["correctness-before-timing"]
+        for token in (
+            "S1_4X_BENCHMARK_PYTHON_BIN",
+            "python-runtime.sh",
+            "s1_4x_pin_benchmark_python",
+            "s1-4x-correctness-final-audit",
+            "final-candidate-audit.json",
+        ):
+            self.assertIn(token, correctness)
+        self.assertIn(
+            "vector-0.13.2.0/vector-0.13.2.0.tar.gz",
+            correctness,
+        )
+        self.assertIn(
+            "28f203c786cbf8ac6dc3fea3378ec36f34173d505fb4a1dd60fc8418ad91c423",
+            correctness,
+        )
 
     def test_full_mode_binds_exact_v3_runtime_and_evidence_roles(self) -> None:
         timing = self.jobs["bounded-timing"]
