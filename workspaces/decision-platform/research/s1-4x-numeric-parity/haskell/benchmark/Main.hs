@@ -220,7 +220,9 @@ main = do
   defaultMain
     [ env
         (setupBenchmarkEnvironment fixtureRoot qualificationPath selectedCases)
-        (bgroup "" . zipWith benchmark selectedCases)
+        ( \ ~preparedCases ->
+            bgroup "" (zipWith benchmark selectedCases preparedCases)
+        )
     ]
 
 -- | Full rotation에서만 설정되는 출력 경로에 실제 Criterion process identity를 기록한다.
