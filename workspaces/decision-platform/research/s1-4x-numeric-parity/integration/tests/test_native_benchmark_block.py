@@ -1006,10 +1006,36 @@ class NativeBenchmarkBlockTests(TestCase):
         launcher_root.mkdir()
         launcher_fd_paths: dict[str, str] = {}
         launcher_sha256: dict[str, str] = {}
-        for launcher_name in ("ghc", "ghc-pkg", "runghc", "haddock"):
+        launcher_payloads = {
+            "ghc": (
+                "#!/usr/bin/bash\n"
+                "set -euo pipefail\n"
+                f'exec "{pinned_fd_paths["actualCompilerElf"]}" '
+                f'"-B{ghc_libdir}" "$@"\n'
+            ),
+            "ghc-pkg": (
+                "#!/usr/bin/bash\n"
+                "set -euo pipefail\n"
+                f'exec "{auxiliary_fd_paths["ghc-pkg"]}" '
+                f'"--global-package-db" "{ghc_package_db}" "$@"\n'
+            ),
+            "runghc": (
+                "#!/usr/bin/bash\n"
+                "set -euo pipefail\n"
+                f'exec "{auxiliary_fd_paths["runghc"]}" '
+                f'"-f" "{tool_bin / "ghc"}" "$@"\n'
+            ),
+            "haddock": (
+                "#!/usr/bin/bash\n"
+                "set -euo pipefail\n"
+                f'exec "{auxiliary_fd_paths["haddock"]}" '
+                f'"-B{ghc_libdir}" "-l{ghc_libdir}" "$@"\n'
+            ),
+        }
+        for launcher_name, launcher_payload in launcher_payloads.items():
             launcher = launcher_root / launcher_name
             launcher.write_text(
-                f"#!/usr/bin/bash\n# sealed {launcher_name} launcher fixture\n",
+                launcher_payload,
                 encoding="utf-8",
             )
             launcher.chmod(0o500)
