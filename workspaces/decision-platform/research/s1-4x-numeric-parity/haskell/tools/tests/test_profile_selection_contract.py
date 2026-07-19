@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import inspect
 import json
 import os
 import subprocess
@@ -472,6 +473,7 @@ class ProfileSelectionContractTests(unittest.TestCase):
     def test_qualification_consumes_shared_materialized_large_fixture_root(
         self,
     ) -> None:
+        helper = load_helper()
         workflow = HELPER_PATH.read_text(encoding="utf-8")
         wrapper = QUALIFICATION_WRAPPER.read_text(encoding="utf-8")
         for source in (workflow, wrapper):
@@ -489,6 +491,23 @@ class ProfileSelectionContractTests(unittest.TestCase):
             'LARGE_FIXTURE_ROOT="${S1_4X_LARGE_FIXTURE_ROOT:?',
             wrapper,
         )
+        self.assertNotIn(
+            'numeric_root / "contract/fixtures"',
+            inspect.getsource(helper._qualification),
+        )
+        for tracked_fixture_consumer in (
+            helper._correctness,
+            helper._validate_correctness_receipt,
+            helper._replay_compatibility_success,
+            helper._oci_correctness,
+        ):
+            with self.subTest(
+                tracked_fixture_consumer=tracked_fixture_consumer.__name__,
+            ):
+                self.assertIn(
+                    'numeric_root / "contract/fixtures"',
+                    inspect.getsource(tracked_fixture_consumer),
+                )
 
     def test_final_profile_binds_selected_correctness_and_qualification(self) -> None:
         helper = load_helper()
