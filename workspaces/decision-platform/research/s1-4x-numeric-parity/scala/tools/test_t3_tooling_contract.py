@@ -59,6 +59,12 @@ def load_tool(name: str):
 
 
 def main() -> int:
+    toolchain_lock = json.loads(
+        (SCALA_ROOT / "toolchain-lock.v1.json").read_text(encoding="utf-8")
+    )
+    assert toolchain_lock["jdk"]["javacExecutableSha256"] == (
+        "5dc287a983c41c8cee0c00e621d87a46ff9dd77202885814b39645074d714dd9"
+    )
     profiles = json.loads(
         (SCALA_ROOT / "compiler-profiles.v1.json").read_text(encoding="utf-8")
     )
@@ -233,10 +239,28 @@ def main() -> int:
     assert property_evidence_main.count(".set[JsonNode]") == 5
 
     qualification = script("run-profile-qualification.sh")
+    qualification_runner = (
+        TOOLS_ROOT / "run_profile_qualification.py"
+    ).read_text(encoding="utf-8")
     selector = script("select-proven-profile.sh")
     selected_assertion = script("assert-selected-profile.sh")
     assert "profileOrderBlocks" in qualification
     assert "hostValidityBeforeEachProfileBlock" in qualification
+    for marker in (
+        'exec {java_pin_fd}<"$JAVA_EXECUTABLE"',
+        'exec {javac_pin_fd}<"$JAVAC_EXECUTABLE"',
+        "S1_4X_SCALA_JAVA_PINNED_FD_PATH",
+        "S1_4X_SCALA_JAVAC_PINNED_FD_PATH",
+        "javacExecutableSha256",
+    ):
+        assert marker in qualification
+    for marker in (
+        "JAVA_PINNED_FD_PATH_REQUIRED",
+        "JAVAC_PINNED_FD_PATH_REQUIRED",
+        "JAVAC_PINNED_FD_IDENTITY_MISMATCH",
+        "generatedJavaPrecompileReceiptSha256",
+    ):
+        assert marker in qualification_runner
     assert "select-profile" in selector and "--check" in selector
     assert "selected-profile.scala" in selected_assertion
     assert "source-inputs.v1.json" in selected_assertion
