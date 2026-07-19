@@ -6,6 +6,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -212,8 +213,39 @@ def main() -> int:
         for index, relative in enumerate(expected, start=1):
             source = generated_root / relative
             source.parent.mkdir(parents=True, exist_ok=True)
+            package_name = ".".join(Path(relative).parent.parts)
+            class_name = Path(relative).stem
+            if class_name.endswith("_benchmark_jmhTest"):
+                declaration = (
+                    "import org.openjdk.jmh.runner.InfraControl;\n"
+                    f"public final class {class_name} {{}}\n"
+                )
+            elif class_name.endswith("_jmhType"):
+                declaration = (
+                    f"public class {class_name} extends "
+                    f"{class_name}_B3 {{}}\n"
+                )
+            elif class_name.endswith("_jmhType_B1"):
+                benchmark_name = class_name.removesuffix("_jmhType_B1")
+                declaration = (
+                    f"public class {class_name} extends "
+                    f"s1_4x.benchmarks.{Path(relative).parts[2]}."
+                    f"{benchmark_name} {{}}\n"
+                )
+            elif class_name.endswith("_jmhType_B2"):
+                declaration = (
+                    f"public class {class_name} extends "
+                    f"{class_name.removesuffix('_B2')}_B1 {{}}\n"
+                )
+            else:
+                declaration = (
+                    f"public class {class_name} extends "
+                    f"{class_name.removesuffix('_B3')}_B2 {{}}\n"
+                )
             source.write_text(
-                f"// generated {index}\n",
+                f"package {package_name};\n"
+                f"// generated {index}\n"
+                f"{declaration}",
                 encoding="utf-8",
                 newline="\n",
             )
@@ -280,16 +312,17 @@ def main() -> int:
             evidence_dir=generated_classes.parent,
         )
         post_run_stdout = (
-            f'Processing 147 classes from {generator_input} '
-            'with "reflection" generator\n'
-            f"Writing out Java source to {generator_output / 'sources'} "
-            f"and resources to {generator_output / 'resources'}"
-            + "\n# JMH version: 1.37\n"
+            generator_stdout
+            + "# JMH version: 1.37\n"
         )
-        post_run = helper.generator_output_closure(
+        post_run = helper.classpath_closure(
             post_run_stdout,
             workspace=workspace,
+            coursier_cache=coursier,
+            evidence_dir=generated_classes.parent,
+            allow_trailing=True,
         )
+        helper.require_matching_classpath(classpath, post_run)
         assert (
             post_run.generator_class_input_sha256
             == classpath.generator_class_input_sha256
@@ -297,6 +330,24 @@ def main() -> int:
         assert (
             post_run.generated_resource_root_sha256
             == classpath.generated_resource_root_sha256
+        )
+        alternate_dependency = dependency.with_name("jmh-core-copy.jar")
+        alternate_dependency.write_bytes(b"other-jar-bytes\n")
+        forged_run = helper.classpath_closure(
+            post_run_stdout.replace(
+                f":{dependency}\n",
+                f":{dependency}:{alternate_dependency}\n",
+            ),
+            workspace=workspace,
+            coursier_cache=coursier,
+            evidence_dir=generated_classes.parent,
+            allow_trailing=True,
+        )
+        alternate_dependency.unlink()
+        expect_error(
+            helper,
+            "JMH_RUN_CLASSPATH_DRIFT",
+            lambda: helper.require_matching_classpath(classpath, forged_run),
         )
         dependency.write_bytes(b"tampered\n")
         expect_error(
@@ -311,14 +362,38 @@ def main() -> int:
         )
         dependency.write_bytes(b"jar-bytes\n")
 
+        dependency_snapshot = helper._snapshot_regular_file(
+            dependency,
+            label="TEST_DEPENDENCY",
+        )
+        dependency.write_bytes(b"temporary tamper\n")
+        dependency.write_bytes(b"jar-bytes\n")
+        expect_error(
+            helper,
+            "TEST_DEPENDENCY_IDENTITY_DRIFT",
+            lambda: helper._verify_regular_file_snapshot(
+                dependency_snapshot,
+                label="TEST_DEPENDENCY",
+            ),
+        )
+        hardlink = dependency.with_name("jmh-core-hardlink.jar")
+        os.link(dependency, hardlink)
+        expect_error(
+            helper,
+            f"UNSAFE_OR_MISSING_FILE:{hardlink}",
+            lambda: helper.sha256_file(hardlink),
+        )
+        hardlink.unlink()
+
         missing = generated_root / expected[0]
+        missing_bytes = missing.read_bytes()
         missing.unlink()
         expect_error(
             helper,
             "GENERATED_SOURCE_CLOSURE_MISMATCH",
             lambda: helper.generated_source_closure(workspace),
         )
-        missing.write_text("// restored\n", encoding="utf-8", newline="\n")
+        missing.write_bytes(missing_bytes)
         extra = (
             generated_root
             / "s1_4x/benchmarks/path_transform/jmh_generated/Extra.java"
@@ -330,6 +405,54 @@ def main() -> int:
             lambda: helper.generated_source_closure(workspace),
         )
         extra.unlink()
+
+        original_source = generated_root / expected[1]
+        source_copy = root / "source-copy.java"
+        shutil.copyfile(original_source, source_copy)
+        original_source.unlink()
+        os.link(source_copy, original_source)
+        expect_error(
+            helper,
+            f"UNSAFE_OR_MISSING_FILE:{original_source}",
+            lambda: helper.generated_source_closure(workspace),
+        )
+        original_source.unlink()
+        shutil.copyfile(source_copy, original_source)
+        source_copy.unlink()
+
+        forged_source = generated_root / expected[2]
+        original_bytes = forged_source.read_bytes()
+        forged_source.write_text(
+            "// filenames alone are not generated Java evidence\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+        expect_error(
+            helper,
+            "GENERATED_SOURCE_CONTENT_INVALID",
+            lambda: helper.generated_source_closure(workspace),
+        )
+        forged_source.write_bytes(original_bytes)
+
+        class_destination = root / "class-output"
+        for relative in expected:
+            class_relative = f"{relative.removesuffix('.java')}.class"
+            class_file = class_destination / class_relative
+            class_file.parent.mkdir(parents=True, exist_ok=True)
+            internal_name = class_relative.removesuffix(".class").encode()
+            class_file.write_bytes(
+                b"\xca\xfe\xba\xbe\x00\x00\x00\x45" + internal_name
+            )
+        assert len(helper._generated_class_closure(class_destination)) == 30
+        forged_class = class_destination / (
+            f"{expected[0].removesuffix('.java')}.class"
+        )
+        forged_class.write_bytes(b"not-a-real-class\n")
+        expect_error(
+            helper,
+            "GENERATED_CLASS_MAGIC_INVALID",
+            lambda: helper._generated_class_closure(class_destination),
+        )
 
         second_output = (
             workspace

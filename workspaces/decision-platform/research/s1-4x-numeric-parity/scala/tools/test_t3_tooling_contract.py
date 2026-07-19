@@ -323,6 +323,7 @@ def main() -> int:
         "S1_4X_LARGE_FIXTURE_ROOT",
         '--coursier-cache "$COURSIER_CACHE"',
         '--jmh-stdout "$OUTPUT_DIR/jmh.stdout"',
+        "--print-classpath",
     ):
         assert marker in native_smoke
     assert "$S1_ROOT/contract/fixtures" not in native_smoke
@@ -374,6 +375,9 @@ def main() -> int:
         "S1_4X_EFFECTIVE_JVM_EVIDENCE_DIR",
         "CREATE_NEW",
         "TEMURIN_25_0_3_9_LTS",
+        "inputArgumentFiles",
+        "JMH_COMPILE_COMMAND_FILE",
+        "CompileCommandFile=",
     ):
         assert marker in jvm_evidence
 

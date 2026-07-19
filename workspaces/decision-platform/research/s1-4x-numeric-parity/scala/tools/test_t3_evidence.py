@@ -360,6 +360,7 @@ def selector_fixture(
             "vendor": "Eclipse Adoptium",
             "javaHomePathId": "TEMURIN_25_0_3_9_LTS",
             "inputArguments": effective_arguments,
+            "inputArgumentFiles": [],
             "stableSystemProperties": stable_properties,
             "ambientJvmOptionVariables": ambient_options,
             "systemPropertiesSha256": module.canonical_pairs_sha256(
@@ -511,10 +512,38 @@ def selector_fixture(
             generated_source_paths = list(
                 module.jmh_precompile.expected_generated_source_paths()
             )
-            generated_sources = [
-                {"path": path, "sha256": f"{index + 500:064x}"}
-                for index, path in enumerate(generated_source_paths)
-            ]
+            generated_source_root = (
+                case_root / module.jmh_precompile.GENERATED_SOURCES_NAME
+            )
+            generated_sources = []
+            for index, source_path in enumerate(
+                generated_source_paths,
+                start=1,
+            ):
+                source = generated_source_root / source_path
+                source.parent.mkdir(parents=True, exist_ok=True)
+                class_name = Path(source_path).stem
+                package_name = ".".join(Path(source_path).parent.parts)
+                if class_name.endswith("_benchmark_jmhTest"):
+                    declaration = (
+                        "import org.openjdk.jmh.runner.InfraControl;\n"
+                        f"public final class {class_name} {{}}\n"
+                    )
+                else:
+                    declaration = f"public class {class_name} {{}}\n"
+                source.write_text(
+                    f"package {package_name};\n"
+                    f"// generated fixture {index}\n"
+                    f"{declaration}",
+                    encoding="utf-8",
+                    newline="\n",
+                )
+                generated_sources.append(
+                    {
+                        "path": source_path,
+                        "sha256": module.sha256_file(source),
+                    }
+                )
             generated_class_root = (
                 case_root / module.jmh_precompile.GENERATED_CLASSES_NAME
             )
@@ -528,7 +557,11 @@ def selector_fixture(
                 )
                 class_path = generated_class_root / relative_class
                 class_path.parent.mkdir(parents=True, exist_ok=True)
-                class_path.write_bytes(f"class-{index}\n".encode())
+                class_path.write_bytes(
+                    b"\xca\xfe\xba\xbe\x00\x00\x00\x45"
+                    + relative_class.removesuffix(".class").encode()
+                    + f":{index}\n".encode()
+                )
                 generated_classes.append(
                     {
                         "path": relative_class,
@@ -570,7 +603,7 @@ def selector_fixture(
                     f"{module.jmh_precompile.GENERATED_CLASSES_NAME}"
                 ),
                 *[
-                    f"SCALA_WORKSPACE_GENERATED/{path}"
+                    f"EVIDENCE_ROOT_GENERATED/{path}"
                     for path in generated_source_paths
                 ],
             ]
@@ -611,6 +644,44 @@ def selector_fixture(
                     "sha256": generated_classes_sha,
                 },
             ]
+            physical_workspace = Path("/sealed/scala-workspace")
+            physical_coursier = Path("/sealed/coursier")
+            generator_input_path = (
+                physical_workspace / ".scala-build/selector/classes/main"
+            )
+            generated_source_path = (
+                physical_workspace / ".scala-build/selector_jmh/sources"
+            )
+            generated_resource_path = (
+                physical_workspace / ".scala-build/selector_jmh/resources"
+            )
+            class_output_path = (
+                physical_workspace
+                / ".scala-build/selector_jmh_deadbeef00/classes/main"
+            )
+            dependency_path = (
+                physical_coursier
+                / "https/repo.example/org/openjdk/jmh/"
+                "jmh-core/1.37/jmh-core-1.37.jar"
+            )
+            generator_classpath_prefix = (
+                f'Processing 147 classes from {generator_input_path} '
+                'with "reflection" generator\n'
+                f"Writing out Java source to {generated_source_path} "
+                f"and resources to {generated_resource_path}\n"
+                f"{class_output_path}:{generated_resource_path}:"
+                f"{dependency_path}:{generated_class_root}\n"
+            )
+            precompile_stdout.write_text(
+                generator_classpath_prefix,
+                encoding="utf-8",
+                newline="\n",
+            )
+            stdout_path.write_text(
+                generator_classpath_prefix + "# JMH version: 1.37\n",
+                encoding="utf-8",
+                newline="\n",
+            )
             precompile_receipt = {
                 "schemaVersion": (
                     "s1.4x-scala-jmh-generated-java-precompile-v1"
@@ -640,7 +711,12 @@ def selector_fixture(
                     "portableArgvSha256": canonical_sha256(
                         precompile_portable
                     ),
-                    "runtimeArgvSha256": "c" * 64,
+                    "runtimeArgvSha256": canonical_sha256(
+                        [
+                            "PINNED_SCALA_CLI_1_15_0_FD",
+                            *precompile_portable[1:],
+                        ]
+                    ),
                     "stdoutSha256": module.sha256_file(
                         precompile_stdout
                     ),
@@ -666,8 +742,8 @@ def selector_fixture(
                     "generatedResourceClosureSha256": "e" * 64,
                 },
                 "generatedSourceRootPathId": (
-                    "SCALA_WORKSPACE/.scala-build/"
-                    "selector_jmh/sources"
+                    "EVIDENCE_ROOT/"
+                    f"{module.jmh_precompile.GENERATED_SOURCES_NAME}"
                 ),
                 "generatedSources": generated_sources,
                 "generatedSourcesSha256": canonical_sha256(
@@ -686,7 +762,9 @@ def selector_fixture(
                     "portableArgvSha256": canonical_sha256(
                         javac_portable
                     ),
-                    "runtimeArgvSha256": "d" * 64,
+                    "runtimeArgvSha256": canonical_sha256(
+                        ["PINNED_JAVAC_FD", *javac_portable[1:]]
+                    ),
                     "stdoutSha256": module.sha256_file(javac_stdout),
                     "stderrSha256": module.sha256_file(javac_stderr),
                     "exitCode": 0,
@@ -1900,7 +1978,18 @@ def main() -> int:
         "java.vm.name": "OpenJDK 64-Bit Server VM",
     }
     benchmark_environment = dict(module.EXPECTED_BENCHMARK_ENVIRONMENT)
-    observed_jmh_arguments = ["-Djmh.separateClasspathJAR=true"]
+    reported_jmh_arguments = [
+        "-Dscala.sources=/sealed/source.scala",
+        "-Dscala.source.names=source.scala",
+    ]
+    compile_command_sha256 = "8" * 64
+    observed_jmh_arguments = [
+        *reported_jmh_arguments,
+        "-XX:+UnlockDiagnosticVMOptions",
+        "-XX:+UnlockExperimentalVMOptions",
+        "-DcompilerBlackholesEnabled=true",
+        "-XX:CompileCommandFile=/tmp/jmh-smoke-123.compilecommand",
+    ]
     fork_evidence = [
         {
             "schemaVersion": "s1.4x-scala-jvm-fork-evidence-v1",
@@ -1910,7 +1999,15 @@ def main() -> int:
             "runtimeVersion": "25.0.3+9-LTS",
             "vendor": "Eclipse Adoptium",
             "javaHomePathId": "TEMURIN_25_0_3_9_LTS",
-            "inputArguments": observed_jmh_arguments,
+            "inputArguments": list(observed_jmh_arguments),
+            "inputArgumentFiles": [
+                {
+                    "argumentIndex": len(observed_jmh_arguments) - 1,
+                    "argumentPrefix": "-XX:CompileCommandFile=",
+                    "pathId": "JMH_COMPILE_COMMAND_FILE",
+                    "sha256": compile_command_sha256,
+                }
+            ],
             "stableSystemProperties": stable_properties,
             "ambientJvmOptionVariables": {
                 "JAVA_TOOL_OPTIONS": "UNSET",
@@ -1937,7 +2034,17 @@ def main() -> int:
         java_executable_sha256="9" * 64,
     )
     assert jvm_allowlist["plannedCliJvmArguments"] == []
-    assert jvm_allowlist["effectiveJvmArguments"] == observed_jmh_arguments
+    assert jvm_allowlist["effectiveJvmArguments"] == [
+        *observed_jmh_arguments[:-1],
+        (
+            "-XX:CompileCommandFile=JMH_COMPILE_COMMAND_FILE"
+            f"#sha256={compile_command_sha256}"
+        ),
+    ]
+    for index, fork_value in enumerate(fork_evidence, start=1):
+        fork_value["inputArguments"][-1] = (
+            f"-XX:CompileCommandFile=/tmp/jmh-qualification-{index}.compilecommand"
+        )
     effective_jvm = module.validate_effective_jvm_evidence(
         fork_evidence,
         expected_forks=3,
@@ -1946,6 +2053,9 @@ def main() -> int:
     )
     assert effective_jvm["aggregateStatus"] == "PASS"
     assert effective_jvm["forkCount"] == 3
+    assert effective_jvm["effectiveJvmArguments"] == (
+        jvm_allowlist["effectiveJvmArguments"]
+    )
     unexpected_argument = json.loads(json.dumps(fork_evidence))
     unexpected_argument[0]["inputArguments"] = ["-XX:+UseWhatever"]
     expect_t3_error(
@@ -1957,6 +2067,32 @@ def main() -> int:
             allowlist_sha256="1" * 64,
         ),
         "unexpected effective JVM argument passed",
+    )
+    changed_compile_command = json.loads(json.dumps(fork_evidence))
+    changed_compile_command[0]["inputArgumentFiles"][0]["sha256"] = "7" * 64
+    expect_t3_error(
+        module,
+        lambda: module.validate_effective_jvm_evidence(
+            changed_compile_command,
+            expected_forks=3,
+            allowlist=jvm_allowlist,
+            allowlist_sha256="1" * 64,
+        ),
+        "changed JMH CompileCommandFile bytes passed",
+    )
+    forged_compile_command_index = json.loads(json.dumps(fork_evidence))
+    forged_compile_command_index[0]["inputArgumentFiles"][0][
+        "argumentIndex"
+    ] = 0
+    expect_t3_error(
+        module,
+        lambda: module.validate_effective_jvm_evidence(
+            forged_compile_command_index,
+            expected_forks=3,
+            allowlist=jvm_allowlist,
+            allowlist_sha256="1" * 64,
+        ),
+        "forged JMH CompileCommandFile argv binding passed",
     )
     missing_property = json.loads(json.dumps(fork_evidence))
     missing_property[0]["stableSystemProperties"].pop("java.vm.name")
@@ -1987,14 +2123,14 @@ def main() -> int:
                 "scoreUnit": "ns/op",
                 "rawData": [[12.5]],
             },
-            "jvmArgs": [],
+            "jvmArgs": reported_jmh_arguments,
         }
     ]
     validated = module.validate_jmh_native_json(
         native,
         expected_benchmark=native[0]["benchmark"],
         expected_forks=1,
-        effective_jvm_arguments=[],
+        effective_jvm_arguments=jvm_allowlist["effectiveJvmArguments"],
         expected_warmup_iterations=1,
         expected_warmup_time="200ms",
         expected_measurement_iterations=1,
@@ -2002,6 +2138,31 @@ def main() -> int:
         logical_operations_per_invocation=32,
     )
     assert validated["nativeValue"] == 12.5
+    assert validated["reportedJvmArguments"] == reported_jmh_arguments
+    assert validated["effectiveJvmArguments"] == (
+        jvm_allowlist["effectiveJvmArguments"]
+    )
+    forged_reported_arguments = json.loads(json.dumps(native))
+    forged_reported_arguments[0]["jvmArgs"].append(
+        "-DcompilerBlackholesEnabled=true"
+    )
+    expect_t3_error(
+        module,
+        lambda: module.validate_jmh_native_json(
+            forged_reported_arguments,
+            expected_benchmark=native[0]["benchmark"],
+            expected_forks=1,
+            effective_jvm_arguments=jvm_allowlist[
+                "effectiveJvmArguments"
+            ],
+            expected_warmup_iterations=1,
+            expected_warmup_time="200ms",
+            expected_measurement_iterations=1,
+            expected_measurement_time="200ms",
+            logical_operations_per_invocation=32,
+        ),
+        "JMH reported JVM arguments accepted launcher-only flags",
+    )
     native_tampers = []
     fabricated_empty_params = json.loads(json.dumps(native))
     fabricated_empty_params[0]["params"] = {}
@@ -2041,7 +2202,9 @@ def main() -> int:
                 value,
                 expected_benchmark=native[0]["benchmark"],
                 expected_forks=1,
-                effective_jvm_arguments=[],
+                effective_jvm_arguments=jvm_allowlist[
+                    "effectiveJvmArguments"
+                ],
                 expected_warmup_iterations=1,
                 expected_warmup_time="200ms",
                 expected_measurement_iterations=1,
@@ -2059,7 +2222,9 @@ def main() -> int:
             underflow,
             expected_benchmark=native[0]["benchmark"],
             expected_forks=1,
-            effective_jvm_arguments=[],
+            effective_jvm_arguments=jvm_allowlist[
+                "effectiveJvmArguments"
+            ],
             expected_warmup_iterations=1,
             expected_warmup_time="200ms",
             expected_measurement_iterations=1,
