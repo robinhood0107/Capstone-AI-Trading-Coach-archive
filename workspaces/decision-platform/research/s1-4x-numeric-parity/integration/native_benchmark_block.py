@@ -174,6 +174,53 @@ HASKELL_BENCHMARK_CONFIGURATION_PATHS = (
     "stack.yaml",
     "stack.yaml.lock",
 )
+HASKELL_WORKFLOW_INPUT_PATHS = (
+    ".hlint.yaml",
+    "Containerfile",
+    "ghc-compatibility-solve-failure.v1.json",
+    "lint-exceptions.v1.json",
+    "stack-ghc-9.14.1.yaml",
+    "stack-ghc-9.14.1.yaml.lock",
+    "stylish-ghc2024-fallback.v1.json",
+    "toolchain-lock.v1.json",
+    "tools/assert-toolchain.sh",
+    "tools/check-format.sh",
+    "tools/check-hlint.sh",
+    "tools/compatibility_evidence.py",
+    "tools/fixtures/hlint-negative.v1.json",
+    "tools/fixtures/hlint/aliased-from-left.hs",
+    "tools/fixtures/hlint/aliased-from-right.hs",
+    "tools/fixtures/hlint/core-system-io.hs",
+    "tools/fixtures/hlint/debug-trace.hs",
+    "tools/fixtures/hlint/forbidden-deriving.hs",
+    "tools/fixtures/hlint/forbidden-extension.hs",
+    "tools/fixtures/hlint/foreign-interface.hs",
+    "tools/fixtures/hlint/partial-and-unsafe.hs",
+    "tools/fixtures/hlint/qualified-from-just.hs",
+    "tools/fixtures/hlint/qualified-throw-io.hs",
+    "tools/fixtures/hlint/qualified-throw.hs",
+    "tools/fixtures/hlint/unchecked-folds.hs",
+    "tools/fixtures/hlint/unsafe-module.hs",
+    "tools/fixtures/hlint/unsafe-modules.hs",
+    "tools/fixtures/process/large/unicode-digit-path.manifest.json",
+    "tools/fixtures/process/large/unicode-digit-sha.manifest.json",
+    "tools/fixtures/stylish/misformatted.hs",
+    "tools/haskell_benchmark_block.py",
+    "tools/haskell_evidence.py",
+    "tools/hlint_inventory.py",
+    "tools/profile_workflow.py",
+    "tools/python-runtime.sh",
+    "tools/run-benchmark-block.sh",
+    "tools/run-candidate.sh",
+    "tools/run-correctness-profile.sh",
+    "tools/run-ghc-9.14.1-compatibility.sh",
+    "tools/run-oci-correctness.sh",
+    "tools/run-profile-qualification.sh",
+    "tools/run-property-evidence.sh",
+    "tools/select-proven-profile.sh",
+    "tools/stylish_fallback.py",
+    "tools/validate-ghc-9.14.1-compatibility.sh",
+)
 HASKELL_FORBIDDEN_COMPILED_SUFFIXES = (".lhs", ".hsc", ".hs-boot")
 HASKELL_RUNTIME_IDENTITY_FIELDS = {
     "schemaVersion",
@@ -2474,7 +2521,10 @@ def _haskell_benchmark_source_tree_sha256(
 
     source_files = _haskell_candidate_source_files(haskell_root, error=error)
     benchmark_files = dict(source_files)
-    for relative_path in HASKELL_BENCHMARK_CONFIGURATION_PATHS:
+    for relative_path in (
+        *HASKELL_BENCHMARK_CONFIGURATION_PATHS,
+        *HASKELL_WORKFLOW_INPUT_PATHS,
+    ):
         path = haskell_root / relative_path
         if path.is_symlink() or not path.is_file():
             raise GateError(error)
@@ -3751,6 +3801,9 @@ def _validate_execution_receipt(
             or SHA256.fullmatch(str(haskell_provenance["markerArgvSha256"])) is None
             or marker_argv
             != [
+                "/usr/bin/env",
+                "-a",
+                marker_python_text,
                 marker_python_fd_text,
                 marker_script_fd_text,
                 "mark-measurement-entered",
@@ -3938,6 +3991,9 @@ def _validate_execution_receipt(
         # Persistent source paths form the portable marker projection; raw
         # `/proc/self/fd` values remain a live-only execution witness.
         portable_marker_argv = [
+            "/usr/bin/env",
+            "-a",
+            str(marker_python_path),
             str(marker_python_path),
             str(marker_script_path),
             "mark-measurement-entered",
@@ -3981,14 +4037,15 @@ def _validate_execution_receipt(
             stack_root_text,
             error=provenance_error,
         )
-        expected_stack_work_directory = (
-            Path(".stack-work") / "s1-4x" / derived_root_name
+        expected_stack_work_directory = Path(
+            f".stack-work-s1-4x-{derived_root_name}"
         )
         if (
             stack_root.name != derived_root_name
             or not isinstance(stack_work_directory_text, str)
             or Path(stack_work_directory_text) != expected_stack_work_directory
             or Path(stack_work_directory_text).is_absolute()
+            or len(Path(stack_work_directory_text).parts) != 1
             or any(
                 part in {".", ".."} for part in Path(stack_work_directory_text).parts
             )
