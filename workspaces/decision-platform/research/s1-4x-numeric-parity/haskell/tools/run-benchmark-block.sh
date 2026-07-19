@@ -40,7 +40,7 @@ while IFS= read -r environment_name; do
   esac
 done < <(compgen -e)
 export PATH="/usr/bin:/bin"
-export LC_ALL="C"
+export LC_ALL="C.UTF-8"
 export TZ="UTC"
 
 REPO_ROOT="$(/usr/bin/git -C "$PWD" rev-parse --show-toplevel)"
@@ -180,7 +180,7 @@ s1_4x_assert_benchmark_python_closure >/dev/null
 
 exec /usr/bin/env -i -a "$BENCHMARK_PYTHON" \
   PATH="/usr/bin:/bin" \
-  LC_ALL="C" \
+  LC_ALL="C.UTF-8" \
   TZ="UTC" \
   HOME="/nonexistent" \
   PYTHONDONTWRITEBYTECODE="1" \

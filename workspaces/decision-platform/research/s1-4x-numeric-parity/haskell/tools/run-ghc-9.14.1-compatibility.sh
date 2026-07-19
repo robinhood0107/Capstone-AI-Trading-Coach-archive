@@ -1,5 +1,6 @@
 #!/usr/bin/bash
 set -euo pipefail
+export LC_ALL="C.UTF-8"
 
 usage() {
   echo "usage: run-ghc-9.14.1-compatibility.sh --stack-yaml STACK_YAML --full-matrix --output-dir ABSOLUTE_NEW_DIRECTORY" >&2
@@ -61,7 +62,7 @@ STACK_ROOT_PATH="$(
   exit 73
 }
 mkdir -m 700 "$OUTPUT_DIRECTORY" "$STACK_ROOT_PATH"
-STACK_WORK_DIR=".stack-work/s1-4x/${STACK_ROOT_PATH##*/}"
+STACK_WORK_DIR=".stack-work-s1-4x-${STACK_ROOT_PATH##*/}"
 
 AUTHORITATIVE_BOOT_DUMP="$OUTPUT_DIRECTORY/authoritative-boot.dump"
 COMPATIBILITY_BOOT_DUMP="$OUTPUT_DIRECTORY/compatibility-boot.dump"

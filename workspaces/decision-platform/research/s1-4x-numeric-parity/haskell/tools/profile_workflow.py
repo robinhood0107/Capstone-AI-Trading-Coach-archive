@@ -1066,7 +1066,7 @@ def candidate_stack_root(cache_root: Path, output_path: Path) -> Path:
 
 
 def isolated_stack_work_dir(stack_root: Path) -> Path:
-    """Output-bound Stack root 이름으로 project-relative build 산출물 경계를 만든다."""
+    """Output-bound Stack root 이름으로 단일-component build 경계를 만든다."""
 
     if (
         not stack_root.is_absolute()
@@ -1074,7 +1074,9 @@ def isolated_stack_work_dir(stack_root: Path) -> Path:
         is None
     ):
         raise WorkflowError("ISOLATED_STACK_WORK_DIR_INPUT_INVALID")
-    return Path(".stack-work") / "s1-4x" / stack_root.name
+    # Stack은 이 상대 경로를 unpacked dependency에도 적용하므로 중간 부모가 없는 단일
+    # component여야 fresh dependency build가 실패하지 않는다.
+    return Path(f".stack-work-s1-4x-{stack_root.name}")
 
 
 def build_stack_command(
@@ -2670,7 +2672,7 @@ def _sealed_child_environment(
             f"{ghc_bin.parent}:{stack_bin.parent}:"
             "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
         ),
-        "LC_ALL": "C",
+        "LC_ALL": "C.UTF-8",
         "TZ": "UTC",
         "OMP_NUM_THREADS": "1",
         "OPENBLAS_NUM_THREADS": "1",
@@ -3175,9 +3177,11 @@ def _find_candidate_binary(
 ) -> Path:
     if (
         work_dir.is_absolute()
-        or len(work_dir.parts) != 3
-        or work_dir.parts[:2] != (".stack-work", "s1-4x")
-        or re.fullmatch(r"[a-z0-9][a-z0-9-]{0,127}", work_dir.name)
+        or len(work_dir.parts) != 1
+        or re.fullmatch(
+            r"\.stack-work-s1-4x-[a-z0-9][a-z0-9-]{0,127}",
+            work_dir.name,
+        )
         is None
     ):
         raise WorkflowError("CANDIDATE_STACK_WORK_DIR_INVALID")

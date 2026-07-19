@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+export LC_ALL="C.UTF-8"
 
 if [[ "$#" -ne 2 || "$1" != "--output-dir" || "$2" != /* ]]; then
   echo "usage: run-property-evidence.sh --output-dir ABSOLUTE_NEW_DIRECTORY" >&2
@@ -63,7 +64,7 @@ if [[ "$STACK_ROOT_PATH" != "$CACHE_ROOT"/stack-root-property-* \
   exit 73
 fi
 mkdir -m 700 -- "$STACK_ROOT_PATH"
-STACK_WORK_DIR=".stack-work/s1-4x/${STACK_ROOT_PATH##*/}"
+STACK_WORK_DIR=".stack-work-s1-4x-${STACK_ROOT_PATH##*/}"
 
 if [[ ! -x "$STACK_BIN" || ! -x "$GHC_BIN" ]]; then
   echo "required Haskell toolchain executable is missing" >&2

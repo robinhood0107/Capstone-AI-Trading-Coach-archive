@@ -38,7 +38,7 @@ while IFS= read -r environment_name; do
   esac
 done < <(compgen -e)
 export PATH="/usr/bin:/bin"
-export LC_ALL="C"
+export LC_ALL="C.UTF-8"
 export TZ="UTC"
 
 SCRIPT_PATH="$(/usr/bin/readlink -f -- "${BASH_SOURCE[0]}")"
@@ -114,7 +114,7 @@ if [[ "$STACK_ROOT_PATH" != "$CACHE_ROOT"/stack-root-candidate-* \
   exit 73
 fi
 /usr/bin/mkdir -m 700 -- "$STACK_ROOT_PATH"
-STACK_WORK_DIR=".stack-work/s1-4x/${STACK_ROOT_PATH##*/}"
+STACK_WORK_DIR=".stack-work-s1-4x-${STACK_ROOT_PATH##*/}"
 STACK_STDOUT="$STACK_ROOT_PATH/candidate.stdout"
 STACK_STDERR="$STACK_ROOT_PATH/candidate.stderr"
 

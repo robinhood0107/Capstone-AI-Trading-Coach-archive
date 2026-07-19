@@ -1160,7 +1160,7 @@ def build_stack_benchmark_command(
         or not stack_root.is_absolute()
         or work_dir.is_absolute()
         or work_dir
-        != Path(".stack-work") / "s1-4x" / stack_root.name
+        != Path(f".stack-work-s1-4x-{stack_root.name}")
         or type(tool_path) is not str
         or not tool_path.startswith(f"{stack_root}/tool-bin:")
         or tool_path.endswith(":")
@@ -2452,7 +2452,8 @@ def run_block(arguments: argparse.Namespace) -> dict[str, Any]:
     if stack_root.exists() or stack_root.is_symlink():
         raise BlockError("BENCHMARK_STACK_ROOT_ALREADY_EXISTS")
     stack_root.mkdir(mode=0o700)
-    work_dir = Path(".stack-work") / "s1-4x" / stack_root.name
+    # Stack이 dependency source에도 만들 수 있는 단일-component 상대 경로를 쓴다.
+    work_dir = Path(f".stack-work-s1-4x-{stack_root.name}")
     work_directory = haskell_root / work_dir
     if work_directory.exists() or work_directory.is_symlink():
         raise BlockError("BENCHMARK_STACK_WORK_DIRECTORY_ALREADY_EXISTS")
