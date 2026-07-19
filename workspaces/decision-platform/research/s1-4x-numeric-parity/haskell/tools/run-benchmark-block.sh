@@ -59,6 +59,7 @@ BENCHMARK_PYTHON_PINNED_FD_PATH="${S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH:?S1_4X_
 GHCUP_BIN="${S1_4X_GHCUP_BIN:?S1_4X_GHCUP_BIN is required}"
 GHCUP_SHA256="${S1_4X_GHCUP_SHA256:?S1_4X_GHCUP_SHA256 is required}"
 GHCUP_PINNED_FD_PATH="${S1_4X_GHCUP_PINNED_FD_PATH:?S1_4X_GHCUP_PINNED_FD_PATH is required}"
+GHCUP_INSTALL_BASE_PREFIX="${GHCUP_INSTALL_BASE_PREFIX:?GHCUP_INSTALL_BASE_PREFIX is required}"
 STACK_BIN="${S1_4X_STACK_BIN:?S1_4X_STACK_BIN is required}"
 STACK_SHA256="${S1_4X_STACK_SHA256:?S1_4X_STACK_SHA256 is required}"
 STACK_PINNED_FD_PATH="${S1_4X_STACK_PINNED_FD_PATH:?S1_4X_STACK_PINNED_FD_PATH is required}"
@@ -122,6 +123,20 @@ verify_pinned_object() {
   fi
 }
 
+verify_ghcup_install_base_prefix() {
+  local prefix="$1"
+  if [[ "$prefix" != /* \
+    || ! -d "$prefix" \
+    || -L "$prefix" \
+    || "$(/usr/bin/realpath -e -- "$prefix")" != "$prefix" \
+    || "$AUTHORITATIVE_GHC_BIN" \
+      != "$prefix/.ghcup/ghc/9.10.3/bin/ghc-9.10.3" \
+    || "$STACK_BIN" != "$prefix/.ghcup/stack/3.11.1/stack" ]]; then
+    echo "GHCup install base prefix identity is unsafe" >&2
+    exit 69
+  fi
+}
+
 for tool_record in \
   "benchmark Python|$BENCHMARK_PYTHON|$BENCHMARK_PYTHON_PINNED_FD_PATH|$BENCHMARK_PYTHON_SHA256" \
   "GHCup|$GHCUP_BIN|$GHCUP_PINNED_FD_PATH|$GHCUP_SHA256" \
@@ -142,6 +157,7 @@ for evidence_record in \
   verify_source_path_layout "$label" "$source_path"
   verify_pinned_object "$label" "$pinned_fd_path" "$expected_sha256" "json"
 done
+verify_ghcup_install_base_prefix "$GHCUP_INSTALL_BASE_PREFIX"
 
 if [[ ! -f "$HELPER" \
   || -L "$HELPER" \
@@ -165,6 +181,7 @@ exec /usr/bin/env -i \
   LC_ALL="C" \
   TZ="UTC" \
   HOME="/nonexistent" \
+  GHCUP_INSTALL_BASE_PREFIX="$GHCUP_INSTALL_BASE_PREFIX" \
   S1_4X_BENCHMARK_PYTHON_BIN="$BENCHMARK_PYTHON" \
   S1_4X_BENCHMARK_PYTHON_SHA256="$BENCHMARK_PYTHON_SHA256" \
   S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH="$BENCHMARK_PYTHON_PINNED_FD_PATH" \

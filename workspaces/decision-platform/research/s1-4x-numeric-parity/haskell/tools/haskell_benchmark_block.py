@@ -34,6 +34,7 @@ NATIVE_STATISTICS_RELATIVE = "native-statistics.json"
 NATIVE_RELATIVE = "native.json"
 BLOCK_RESULT_RELATIVE = "block-result.json"
 RUNTIME_IDENTITY_RELATIVE = "benchmark-runtime-identity.json"
+GHC_INSTALL_CLOSURE_RELATIVE = "authoritative-ghc-install-closure.json"
 THREAD_ENVIRONMENT = {
     "OMP_NUM_THREADS": "1",
     "OPENBLAS_NUM_THREADS": "1",
@@ -64,6 +65,21 @@ PINNED_TOOL_SHA256 = {
         "385dc27bc2d0fb654e76ecadfb57bc0b7e1c58afe74f19923e20b696e6fe0d7b"
     ),
 }
+AUTHORITATIVE_GHC_VERSION = "9.10.3"
+AUTHORITATIVE_GHC_COMPILER_ELF_SHA256 = (
+    "560b354d05aa626c66f6d9ef04139c3746e4000acaf272667c393ce86336a45f"
+)
+AUTHORITATIVE_GHC_AUXILIARY_ELF_SHA256 = {
+    "ghc-pkg": (
+        "03792b0e7f08aed4553564271753cc290ddff649171c8f2b87822a6e32def7b7"
+    ),
+    "runghc": (
+        "9c99cc70faf68c180d27ab2c8436e4415b13a920f0912327bda8a42e8b9bf339"
+    ),
+    "haddock": (
+        "bbb8c400078b913fe1f13e126da6724ec06fd5dd7e7db36e761e8ee72c8f6984"
+    ),
+}
 _LINUX_MFD_CLOEXEC = 0x0001
 _LINUX_MFD_ALLOW_SEALING = 0x0002
 _LINUX_F_ADD_SEALS = 1033
@@ -88,6 +104,7 @@ class RegularFileSnapshot:
     payload: bytes
     sha256: str
     mode: int
+    identity: tuple[int, int, int, int, int, int]
 
 
 @dataclass(frozen=True)
@@ -138,6 +155,50 @@ class PinnedJsonEvidence:
     sha256: str
     document: Any
     identity: tuple[int, int, int, int, int, int]
+
+
+@dataclass(frozen=True)
+class ToolchainTreeMetadataSnapshot:
+    """설치 tree의 path/type/stat closure를 bytes 실행 없이 고정한다."""
+
+    path: Path
+    sha256: str
+    entry_count: int
+    total_file_bytes: int
+
+
+@dataclass(frozen=True)
+class AuthoritativeGhcClosure:
+    """승인 wrapper와 실제 compiler/aux ELF, libdir, output shim을 함께 고정한다."""
+
+    install_root: Path
+    wrapper: PinnedExecutable
+    compiler_elf: PinnedExecutable
+    auxiliary_elves: tuple[tuple[str, PinnedExecutable], ...]
+    libdir_path: Path
+    distribution_bin_path: Path
+    libdir_snapshot: ToolchainTreeMetadataSnapshot
+    distribution_bin_snapshot: ToolchainTreeMetadataSnapshot
+    tool_path: str
+    ghc_shim: Path
+    pinned_launchers: tuple[PinnedRegularFile, ...]
+
+    @property
+    def pinned_executables(self) -> tuple[PinnedExecutable, ...]:
+        """Benchmark child에 상속해야 하는 실제 distribution ELF 집합이다."""
+
+        return (
+            self.compiler_elf,
+            *(pinned for _, pinned in self.auxiliary_elves),
+        )
+
+    @property
+    def pinned_objects(
+        self,
+    ) -> tuple[PinnedExecutable | PinnedRegularFile, ...]:
+        """테스트/정리와 pre/post 검증이 공유하는 retained descriptor 집합이다."""
+
+        return (*self.pinned_executables, *self.pinned_launchers)
 
 
 def _require_linux_memfd_abi(*, label: str) -> None:
@@ -625,6 +686,17 @@ def read_regular_file_snapshot(
         payload=payload,
         sha256=hashlib.sha256(payload).hexdigest(),
         mode=before.st_mode,
+        identity=tuple(
+            getattr(before, field)
+            for field in (
+                "st_dev",
+                "st_ino",
+                "st_size",
+                "st_mtime_ns",
+                "st_ctime_ns",
+                "st_nlink",
+            )
+        ),
     )
 
 
@@ -845,55 +917,553 @@ def build_stack_benchmark_command(
     ]
 
 
-def prepare_authoritative_ghc_shim(
+def _toolchain_tree_records(
+    root: Path,
+    *,
+    label: str,
+    allow_relative_symlinks: bool,
+) -> tuple[list[dict[str, Any]], int]:
+    """한 시점의 tree metadata를 path 순서로 수집하며 hardlink/escape를 거부한다."""
+
+    records: list[dict[str, Any]] = []
+    total_file_bytes = 0
+    pending = [root]
+    while pending:
+        directory = pending.pop()
+        relative_directory = (
+            "."
+            if directory == root
+            else directory.relative_to(root).as_posix()
+        )
+        directory_stat = os.lstat(directory)
+        if not stat.S_ISDIR(directory_stat.st_mode):
+            raise BlockError(f"{label}_DIRECTORY_INVALID:{relative_directory}")
+        records.append(
+            {
+                "path": relative_directory,
+                "type": "directory",
+                "device": directory_stat.st_dev,
+                "inode": directory_stat.st_ino,
+                "mode": directory_stat.st_mode,
+                "size": directory_stat.st_size,
+                "mtimeNs": directory_stat.st_mtime_ns,
+                "ctimeNs": directory_stat.st_ctime_ns,
+                "linkCount": directory_stat.st_nlink,
+            }
+        )
+        try:
+            entries = sorted(
+                os.scandir(directory),
+                key=lambda entry: os.fsencode(entry.name),
+                reverse=True,
+            )
+        except OSError as exc:
+            raise BlockError(
+                f"{label}_DIRECTORY_SCAN_FAILED:{relative_directory}"
+            ) from exc
+        for entry in entries:
+            path = Path(entry.path)
+            relative = path.relative_to(root).as_posix()
+            entry_stat = entry.stat(follow_symlinks=False)
+            common = {
+                "path": relative,
+                "device": entry_stat.st_dev,
+                "inode": entry_stat.st_ino,
+                "mode": entry_stat.st_mode,
+                "size": entry_stat.st_size,
+                "mtimeNs": entry_stat.st_mtime_ns,
+                "ctimeNs": entry_stat.st_ctime_ns,
+                "linkCount": entry_stat.st_nlink,
+            }
+            if stat.S_ISLNK(entry_stat.st_mode):
+                if not allow_relative_symlinks:
+                    raise BlockError(f"{label}_SYMLINK_FORBIDDEN:{relative}")
+                target = os.readlink(path)
+                target_path = Path(target)
+                try:
+                    resolved = (path.parent / target_path).resolve(strict=True)
+                    resolved.relative_to(root)
+                except (OSError, ValueError) as exc:
+                    raise BlockError(
+                        f"{label}_SYMLINK_ESCAPE:{relative}"
+                    ) from exc
+                if target_path.is_absolute() or ".." in target_path.parts:
+                    raise BlockError(f"{label}_SYMLINK_ESCAPE:{relative}")
+                records.append({**common, "type": "symlink", "target": target})
+            elif stat.S_ISDIR(entry_stat.st_mode):
+                pending.append(path)
+            elif stat.S_ISREG(entry_stat.st_mode):
+                if entry_stat.st_nlink != 1:
+                    raise BlockError(f"{label}_HARDLINK_FORBIDDEN:{relative}")
+                total_file_bytes += entry_stat.st_size
+                records.append({**common, "type": "regular"})
+            else:
+                raise BlockError(f"{label}_ENTRY_INVALID:{relative}")
+    records.sort(key=lambda record: os.fsencode(record["path"]))
+    return records, total_file_bytes
+
+
+def snapshot_toolchain_tree_metadata(
+    root: Path,
+    *,
+    label: str,
+    allow_relative_symlinks: bool = False,
+) -> ToolchainTreeMetadataSnapshot:
+    """Tree 전체 stat closure를 연속 두 번 읽어 path ABA와 hardlink를 탐지한다."""
+
+    if (
+        type(label) is not str
+        or re.fullmatch(r"[A-Z][A-Z0-9_]*", label) is None
+        or not root.is_absolute()
+        or root.is_symlink()
+        or not root.is_dir()
+        or root.resolve(strict=True) != root
+    ):
+        raise BlockError(f"{label}_ROOT_INVALID")
+    first_records, first_bytes = _toolchain_tree_records(
+        root,
+        label=label,
+        allow_relative_symlinks=allow_relative_symlinks,
+    )
+    second_records, second_bytes = _toolchain_tree_records(
+        root,
+        label=label,
+        allow_relative_symlinks=allow_relative_symlinks,
+    )
+    if first_records != second_records or first_bytes != second_bytes:
+        raise BlockError(f"{label}_CHANGED_DURING_SNAPSHOT")
+    return ToolchainTreeMetadataSnapshot(
+        path=root,
+        sha256=canonical_sha256(first_records),
+        entry_count=len(first_records),
+        total_file_bytes=first_bytes,
+    )
+
+
+def _pin_source_executable(
+    path: Path,
+    *,
+    label: str,
+    required_sha256: str | None = None,
+) -> PinnedExecutable:
+    """Secure source snapshot과 같은 inode를 retained executable FD로 고정한다."""
+
+    snapshot = read_regular_file_snapshot(
+        path,
+        label=label,
+        max_bytes=1024 * 1024 * 1024,
+        executable=True,
+    )
+    if required_sha256 is not None and snapshot.sha256 != required_sha256:
+        raise BlockError(f"{label}_SHA256_MISMATCH")
+    try:
+        descriptor = os.open(
+            path,
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+        )
+    except OSError as exc:
+        raise BlockError(f"{label}_PIN_OPEN_FAILED") from exc
+    try:
+        (
+            pinned_descriptor,
+            _,
+            sha256,
+            mode,
+            identity,
+        ) = _read_pinned_fd(
+            fd_path=Path(f"/proc/self/fd/{descriptor}"),
+            label=label,
+            max_bytes=1024 * 1024 * 1024,
+            executable=True,
+            capture_payload=False,
+        )
+        if (
+            identity != snapshot.identity
+            or sha256 != snapshot.sha256
+            or mode != snapshot.mode
+            or identity[-1] != 1
+        ):
+            raise BlockError(f"{label}_PIN_SOURCE_IDENTITY_MISMATCH")
+        return PinnedExecutable(
+            label=label,
+            source_path=path,
+            fd_path=Path(f"/proc/self/fd/{descriptor}"),
+            descriptor=pinned_descriptor,
+            sha256=sha256,
+            mode=mode,
+            identity=identity,
+        )
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _authoritative_ghc_layout(
+    wrapper: PinnedExecutable,
+) -> tuple[Path, Path, Path, bytes]:
+    """승인 wrapper bytes에서 고정된 install root, distribution bin, libdir를 복원한다."""
+
+    (
+        _,
+        payload,
+        sha256,
+        mode,
+        identity,
+    ) = _read_pinned_fd(
+        fd_path=wrapper.fd_path,
+        label=wrapper.label,
+        max_bytes=64 * 1024,
+        executable=True,
+        capture_payload=True,
+    )
+    if (
+        wrapper.label != "AUTHORITATIVE_GHC"
+        or sha256 != wrapper.sha256
+        or mode != wrapper.mode
+        or identity != wrapper.identity
+        or wrapper.source_path.name != f"ghc-{AUTHORITATIVE_GHC_VERSION}"
+        or wrapper.source_path.parent.name != "bin"
+    ):
+        raise BlockError("AUTHORITATIVE_GHC_WRAPPER_IDENTITY_INVALID")
+    install_root = wrapper.source_path.parent.parent
+    distribution_root = (
+        install_root / "lib" / f"ghc-{AUTHORITATIVE_GHC_VERSION}"
+    )
+    distribution_bin = distribution_root / "bin"
+    libdir = distribution_root / "lib"
+    expected = (
+        "#!/bin/bash\n"
+        f'exedir="{distribution_bin}"\n'
+        f'exeprog="./ghc-{AUTHORITATIVE_GHC_VERSION}"\n'
+        f'executablename="{distribution_bin}/./ghc-{AUTHORITATIVE_GHC_VERSION}"\n'
+        f'bindir="{install_root / "bin"}"\n'
+        f'libdir="{libdir}"\n'
+        f'docdir="{install_root / "share" / "doc" / f"ghc-{AUTHORITATIVE_GHC_VERSION}"}"\n'
+        f'includedir="{install_root / "include"}"\n'
+        "\n"
+        'exec "$executablename" -B"$libdir" ${1+"$@"}\n'
+    ).encode("utf-8")
+    if payload != expected:
+        raise BlockError("AUTHORITATIVE_GHC_WRAPPER_LAYOUT_INVALID")
+    return install_root, distribution_bin, libdir, payload
+
+
+def _write_pinned_launcher(
+    *,
+    tool_bin: Path,
+    name: str,
+    payload: bytes,
+) -> PinnedRegularFile:
+    """Output-bound launcher를 배타 생성한 뒤 sealed memfd symlink로 즉시 교체한다."""
+
+    source = tool_bin / f".{name}.launcher"
+    try:
+        descriptor = os.open(
+            source,
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+            0o500,
+        )
+    except OSError as exc:
+        raise BlockError(f"AUTHORITATIVE_GHC_LAUNCHER_CREATE_FAILED:{name}") from exc
+    try:
+        # Ambient umask가 launcher 실행 bit를 약화하지 못하도록 FD에서 exact mode를 고정한다.
+        os.fchmod(descriptor, 0o500)
+        offset = 0
+        while offset < len(payload):
+            written = os.write(descriptor, payload[offset:])
+            if written <= 0:
+                raise BlockError(
+                    f"AUTHORITATIVE_GHC_LAUNCHER_WRITE_FAILED:{name}"
+                )
+            offset += written
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    pinned = pin_regular_file(
+        source,
+        label=f"AUTHORITATIVE_GHC_{name.upper().replace('-', '_')}_LAUNCHER",
+        max_bytes=64 * 1024,
+    )
+    source.unlink()
+    command_path = tool_bin / name
+    command_path.symlink_to(str(pinned.fd_path))
+    return pinned
+
+
+def prepare_authoritative_ghc_closure(
     *,
     stack_root: Path,
     authoritative_ghc: PinnedExecutable,
-) -> tuple[str, Path]:
-    """Output-bound PATH에 scoring GHC FD와 Stack 필수 보조 실행기를 노출한다."""
+) -> AuthoritativeGhcClosure:
+    """실제 GHC/aux ELF FD와 distribution metadata를 output-bound shim에 결속한다."""
 
     if (
         not stack_root.is_absolute()
         or not stack_root.is_dir()
         or stack_root.is_symlink()
-        or authoritative_ghc.label != "AUTHORITATIVE_GHC"
-        or authoritative_ghc.source_path.parent == Path("/")
     ):
         raise BlockError("AUTHORITATIVE_GHC_TOOL_SHIM_INPUT_INVALID")
     tool_bin = stack_root / "tool-bin"
     if tool_bin.exists() or tool_bin.is_symlink():
         raise BlockError("AUTHORITATIVE_GHC_TOOL_SHIM_ALREADY_EXISTS")
-    tool_bin.mkdir(mode=0o700)
-    ghc_shim = tool_bin / "ghc"
-    ghc_shim.symlink_to(str(authoritative_ghc.fd_path))
-    auxiliary_names = ("ghc-pkg", "runghc", "haddock")
-    for name in auxiliary_names:
-        source = authoritative_ghc.source_path.parent / name
-        try:
-            target = source.resolve(strict=True)
-        except OSError as exc:
-            raise BlockError(
-                f"AUTHORITATIVE_GHC_AUXILIARY_INVALID:{name}"
-            ) from exc
-        if (
-            target.parent != authoritative_ghc.source_path.parent
-            or not target.is_file()
-            or target.is_symlink()
-            or not os.access(target, os.X_OK)
-        ):
-            raise BlockError(f"AUTHORITATIVE_GHC_AUXILIARY_INVALID:{name}")
-        (tool_bin / name).symlink_to(str(target))
+    (
+        install_root,
+        distribution_bin,
+        libdir,
+        _,
+    ) = _authoritative_ghc_layout(authoritative_ghc)
+    frozen_install = (
+        authoritative_ghc.sha256
+        == PINNED_TOOL_SHA256["S1_4X_AUTHORITATIVE_GHC"]
+    )
+    compiler_elf = _pin_source_executable(
+        distribution_bin / f"ghc-{AUTHORITATIVE_GHC_VERSION}",
+        label="AUTHORITATIVE_GHC_COMPILER_ELF",
+        required_sha256=(
+            AUTHORITATIVE_GHC_COMPILER_ELF_SHA256
+            if frozen_install
+            else None
+        ),
+    )
+    auxiliary_binary_names = {
+        "ghc-pkg": f"ghc-pkg-{AUTHORITATIVE_GHC_VERSION}",
+        "runghc": f"runghc-{AUTHORITATIVE_GHC_VERSION}",
+        "haddock": f"haddock-ghc-{AUTHORITATIVE_GHC_VERSION}",
+    }
+    auxiliary_elves: list[tuple[str, PinnedExecutable]] = []
+    pinned_launchers: list[PinnedRegularFile] = []
+    try:
+        for name, binary_name in auxiliary_binary_names.items():
+            auxiliary_elves.append(
+                (
+                    name,
+                    _pin_source_executable(
+                        distribution_bin / binary_name,
+                        label=(
+                            "AUTHORITATIVE_GHC_AUX_"
+                            f"{name.upper().replace('-', '_')}_ELF"
+                        ),
+                        required_sha256=(
+                            AUTHORITATIVE_GHC_AUXILIARY_ELF_SHA256[name]
+                            if frozen_install
+                            else None
+                        ),
+                    ),
+                )
+            )
+        libdir_snapshot = snapshot_toolchain_tree_metadata(
+            libdir,
+            label="AUTHORITATIVE_GHC_LIBDIR",
+        )
+        distribution_bin_snapshot = snapshot_toolchain_tree_metadata(
+            distribution_bin,
+            label="AUTHORITATIVE_GHC_DISTRIBUTION_BIN",
+            allow_relative_symlinks=True,
+        )
+        tool_bin.mkdir(mode=0o700)
+        auxiliary_map = dict(auxiliary_elves)
+        launcher_payloads = {
+            "ghc": (
+                "#!/usr/bin/bash\n"
+                "set -euo pipefail\n"
+                f'exec "{compiler_elf.fd_path}" "-B{libdir}" "$@"\n'
+            ),
+            "ghc-pkg": (
+                "#!/usr/bin/bash\n"
+                "set -euo pipefail\n"
+                f'exec "{auxiliary_map["ghc-pkg"].fd_path}" '
+                f'"--global-package-db" "{libdir / "package.conf.d"}" "$@"\n'
+            ),
+            "runghc": (
+                "#!/usr/bin/bash\n"
+                "set -euo pipefail\n"
+                f'exec "{auxiliary_map["runghc"].fd_path}" '
+                f'"-f" "{tool_bin / "ghc"}" "$@"\n'
+            ),
+            "haddock": (
+                "#!/usr/bin/bash\n"
+                "set -euo pipefail\n"
+                f'exec "{auxiliary_map["haddock"].fd_path}" '
+                f'"-B{libdir}" "-l{libdir}" "$@"\n'
+            ),
+        }
+        for name, payload in launcher_payloads.items():
+            pinned_launchers.append(
+                _write_pinned_launcher(
+                    tool_bin=tool_bin,
+                    name=name,
+                    payload=payload.encode("utf-8"),
+                )
+            )
+        closure = AuthoritativeGhcClosure(
+            install_root=install_root,
+            wrapper=authoritative_ghc,
+            compiler_elf=compiler_elf,
+            auxiliary_elves=tuple(auxiliary_elves),
+            libdir_path=libdir,
+            distribution_bin_path=distribution_bin,
+            libdir_snapshot=libdir_snapshot,
+            distribution_bin_snapshot=distribution_bin_snapshot,
+            tool_path=f"{tool_bin}:/usr/bin:/bin",
+            ghc_shim=tool_bin / "ghc",
+            pinned_launchers=tuple(pinned_launchers),
+        )
+        validate_authoritative_ghc_closure(closure)
+        return closure
+    except BaseException:
+        for pinned in (*pinned_launchers, *(item for _, item in auxiliary_elves)):
+            os.close(pinned.descriptor)
+        os.close(compiler_elf.descriptor)
+        raise
+
+
+def _validate_retained_pinned_object(
+    pinned: PinnedExecutable | PinnedRegularFile,
+) -> None:
+    """Retained FD의 bytes/stat/seal identity가 준비 시점과 같은지 재검증한다."""
+
+    (
+        descriptor,
+        _,
+        sha256,
+        mode,
+        identity,
+    ) = _read_pinned_fd(
+        fd_path=pinned.fd_path,
+        label=pinned.label,
+        max_bytes=1024 * 1024 * 1024,
+        executable=bool(pinned.mode & 0o111),
+        capture_payload=False,
+    )
     if (
-        os.readlink(ghc_shim) != str(authoritative_ghc.fd_path)
-        or sorted(path.name for path in tool_bin.iterdir())
-        != ["ghc", "ghc-pkg", "haddock", "runghc"]
+        descriptor != pinned.descriptor
+        or sha256 != pinned.sha256
+        or mode != pinned.mode
+        or identity != pinned.identity
+    ):
+        raise BlockError(f"{pinned.label}_PINNED_FD_OBJECT_CHANGED")
+    if isinstance(pinned, PinnedRegularFile) and (
+        fcntl.fcntl(descriptor, _LINUX_F_GET_SEALS)
+        != _LINUX_REQUIRED_MEMFD_SEALS
+    ):
+        raise BlockError(f"{pinned.label}_PINNED_FD_NOT_SEALED")
+
+
+def validate_authoritative_ghc_closure(
+    closure: AuthoritativeGhcClosure,
+) -> None:
+    """Compiler 실행 전후에 retained FD, output shim, install metadata를 모두 재검증한다."""
+
+    if not isinstance(closure, AuthoritativeGhcClosure):
+        raise BlockError("AUTHORITATIVE_GHC_INSTALL_CLOSURE_INVALID")
+    _validate_retained_pinned_object(closure.wrapper)
+    for pinned in closure.pinned_objects:
+        _validate_retained_pinned_object(pinned)
+    tool_bin = closure.ghc_shim.parent
+    expected_names = ["ghc", "ghc-pkg", "haddock", "runghc"]
+    launcher_by_name = {
+        pinned.source_path.name.removeprefix(".").removesuffix(".launcher"): pinned
+        for pinned in closure.pinned_launchers
+    }
+    try:
+        actual_names = sorted(path.name for path in tool_bin.iterdir())
+        links = {
+            name: os.readlink(tool_bin / name)
+            for name in expected_names
+        }
+    except OSError as exc:
+        raise BlockError("AUTHORITATIVE_GHC_TOOL_SHIM_INVALID") from exc
+    if (
+        actual_names != expected_names
+        or set(launcher_by_name) != set(expected_names)
+        or any(
+            links[name] != str(launcher_by_name[name].fd_path)
+            for name in expected_names
+        )
     ):
         raise BlockError("AUTHORITATIVE_GHC_TOOL_SHIM_INVALID")
-    # Stack은 선택된 ghc의 sibling 경로에서 보조 실행기를 찾으므로 같은 shim closure에 고정한다.
-    tool_path = (
-        f"{tool_bin}:{authoritative_ghc.source_path.parent}:/usr/bin:/bin"
+    current_libdir = snapshot_toolchain_tree_metadata(
+        closure.libdir_path,
+        label="AUTHORITATIVE_GHC_LIBDIR",
     )
-    return tool_path, ghc_shim
+    current_bin = snapshot_toolchain_tree_metadata(
+        closure.distribution_bin_path,
+        label="AUTHORITATIVE_GHC_DISTRIBUTION_BIN",
+        allow_relative_symlinks=True,
+    )
+    if (
+        current_libdir != closure.libdir_snapshot
+        or current_bin != closure.distribution_bin_snapshot
+    ):
+        raise BlockError("AUTHORITATIVE_GHC_INSTALL_CLOSURE_CHANGED")
+
+
+def authoritative_ghc_closure_receipt(
+    closure: AuthoritativeGhcClosure,
+) -> dict[str, Any]:
+    """승인 wrapper와 실제 실행 ELF/metadata closure를 구분한 receipt projection이다."""
+
+    auxiliary = dict(closure.auxiliary_elves)
+    launcher_by_name = {
+        pinned.source_path.name.removeprefix(".").removesuffix(".launcher"): pinned
+        for pinned in closure.pinned_launchers
+    }
+    return {
+        "approvedWrapperPath": str(closure.wrapper.source_path),
+        "approvedWrapperPinnedFdPath": str(closure.wrapper.fd_path),
+        "approvedWrapperSha256": closure.wrapper.sha256,
+        "actualCompilerElfPath": str(closure.compiler_elf.source_path),
+        "actualCompilerElfPinnedFdPath": str(closure.compiler_elf.fd_path),
+        "actualCompilerElfSha256": closure.compiler_elf.sha256,
+        "actualCompilerLibdirPath": str(closure.libdir_path),
+        "libdirMetadataSha256": closure.libdir_snapshot.sha256,
+        "libdirMetadataEntryCount": closure.libdir_snapshot.entry_count,
+        "libdirMetadataTotalFileBytes": (
+            closure.libdir_snapshot.total_file_bytes
+        ),
+        "distributionBinPath": str(closure.distribution_bin_path),
+        "distributionBinMetadataSha256": (
+            closure.distribution_bin_snapshot.sha256
+        ),
+        "distributionBinMetadataEntryCount": (
+            closure.distribution_bin_snapshot.entry_count
+        ),
+        "auxiliaryElfSha256": {
+            name: auxiliary[name].sha256
+            for name in sorted(auxiliary)
+        },
+        "auxiliaryElfPinnedFdPath": {
+            name: str(auxiliary[name].fd_path)
+            for name in sorted(auxiliary)
+        },
+        "outputLauncherSha256": {
+            name: launcher_by_name[name].sha256
+            for name in sorted(launcher_by_name)
+        },
+        "scoringCompilerExecutionBinding": (
+            "sealed-elf-fd-with-validated-install-closure"
+        ),
+    }
+
+
+def prepare_authoritative_ghc_shim(
+    *,
+    stack_root: Path,
+    authoritative_ghc: PinnedExecutable,
+) -> tuple[str, Path]:
+    """기존 내부 호출자를 actual-ELF closure 구현으로 연결한다."""
+
+    closure = prepare_authoritative_ghc_closure(
+        stack_root=stack_root,
+        authoritative_ghc=authoritative_ghc,
+    )
+    return closure.tool_path, closure.ghc_shim
 
 
 def run_pinned_subprocess(
@@ -1514,6 +2084,7 @@ def run_block(arguments: argparse.Namespace) -> dict[str, Any]:
     native_path = block_dir / NATIVE_RELATIVE
     result_path = block_dir / BLOCK_RESULT_RELATIVE
     runtime_identity_path = block_dir / RUNTIME_IDENTITY_RELATIVE
+    ghc_install_closure_path = block_dir / GHC_INSTALL_CLOSURE_RELATIVE
     output_paths = (
         raw_path,
         receipt_path,
@@ -1523,6 +2094,7 @@ def run_block(arguments: argparse.Namespace) -> dict[str, Any]:
         native_path,
         result_path,
         runtime_identity_path,
+        ghc_install_closure_path,
         raw_path.parent,
         receipt_path.parent,
     )
@@ -1549,10 +2121,12 @@ def run_block(arguments: argparse.Namespace) -> dict[str, Any]:
         hlint,
         stylish,
     ) = pinned_executables
-    tool_path, ghc_shim = prepare_authoritative_ghc_shim(
+    ghc_closure = prepare_authoritative_ghc_closure(
         stack_root=stack_root,
         authoritative_ghc=authoritative_ghc,
     )
+    tool_path = ghc_closure.tool_path
+    ghc_shim = ghc_closure.ghc_shim
     pinned_profile_evidence = load_pinned_profile_evidence()
 
     _verify_subject_commit(repo_root, arguments.benchmark_subject_commit)
@@ -1635,7 +2209,11 @@ def run_block(arguments: argparse.Namespace) -> dict[str, Any]:
         label="NATIVE_BENCHMARK_BLOCK_SCRIPT",
         max_bytes=16 * 1024 * 1024,
     )
-    runtime_executables = (*pinned_executables, marker_python)
+    runtime_executables = (
+        *pinned_executables,
+        *ghc_closure.pinned_executables,
+        marker_python,
+    )
     environment = dict(os.environ)
     environment.update(THREAD_ENVIRONMENT)
     environment.update(
@@ -1704,6 +2282,7 @@ def run_block(arguments: argparse.Namespace) -> dict[str, Any]:
             "S1_4X_BENCHMARK_MARKER_SCRIPT_SHA256": marker_script.sha256,
         }
     )
+    validate_authoritative_ghc_closure(ghc_closure)
     started_at = _iso_now()
     completed = run_pinned_subprocess(
         command,
@@ -1711,11 +2290,12 @@ def run_block(arguments: argparse.Namespace) -> dict[str, Any]:
         environment=environment,
         pinned_executables=runtime_executables,
         capture_output=False,
-        pinned_files=(marker_script,),
+        pinned_files=(marker_script, *ghc_closure.pinned_launchers),
     )
     finished_at = _iso_now()
     if completed.returncode != 0:
         raise BlockError(f"INNER_BENCHMARK_FAILED:{completed.returncode}")
+    validate_authoritative_ghc_closure(ghc_closure)
     _validate_measurement_qualification(
         path=qualification_path,
         pre_run=qualification,
@@ -1743,6 +2323,21 @@ def run_block(arguments: argparse.Namespace) -> dict[str, Any]:
         or sha256_file(artifact) != executed_benchmark_sha256
     ):
         raise BlockError("BENCHMARK_ARTIFACT_RUNTIME_IDENTITY_MISMATCH")
+    ghc_install_closure = {
+        "schemaVersion": "s1.4x-haskell-ghc-install-closure-v1",
+        "status": "PASS",
+        **authoritative_ghc_closure_receipt(ghc_closure),
+    }
+    ghc_install_closure["closureSha256"] = canonical_sha256(
+        ghc_install_closure
+    )
+    gate.exclusive_json_write(
+        ghc_install_closure_path,
+        ghc_install_closure,
+    )
+    ghc_install_closure_file_sha256 = sha256_file(
+        ghc_install_closure_path
+    )
     fixture_root = large_fixture_root
     receipt = {
         "schemaVersion": "s1.4x-native-case-execution-receipt-v1",
@@ -1792,12 +2387,15 @@ def run_block(arguments: argparse.Namespace) -> dict[str, Any]:
                 ),
                 "authoritativeGhcSha256": authoritative_ghc.sha256,
                 "authoritativeGhcShimPath": str(ghc_shim),
-                "scoringCompilerExecutionBinding": "pinned-fd-path",
+                "scoringCompilerExecutionBinding": (
+                    "sealed-elf-fd-with-validated-install-closure"
+                ),
+                **authoritative_ghc_closure_receipt(ghc_closure),
                 "toolchainInstallClosurePath": str(
-                    authoritative_ghc.source_path.parent
+                    ghc_install_closure_path
                 ),
                 "toolchainInstallClosurePolicy": (
-                    "ghc-pkg-and-distribution-auxiliaries-only"
+                    "sealed-critical-elf-fds-and-stable-distribution-metadata"
                 ),
                 "markerPythonPath": str(marker_python.source_path),
                 "markerPythonPinnedFdPath": str(marker_python.fd_path),
@@ -1909,7 +2507,12 @@ def run_block(arguments: argparse.Namespace) -> dict[str, Any]:
         cwd=repo_root,
         environment=environment,
         pinned_executables=runtime_executables,
-        pinned_files=(native_script, marker_script, ledger_script),
+        pinned_files=(
+            native_script,
+            marker_script,
+            ledger_script,
+            *ghc_closure.pinned_launchers,
+        ),
     )
     if (
         set(producer_result)
@@ -1968,7 +2571,12 @@ def run_block(arguments: argparse.Namespace) -> dict[str, Any]:
         cwd=repo_root,
         environment=environment,
         pinned_executables=runtime_executables,
-        pinned_files=(native_script, marker_script, ledger_script),
+        pinned_files=(
+            native_script,
+            marker_script,
+            ledger_script,
+            *ghc_closure.pinned_launchers,
+        ),
     )
     if (
         set(block_result)
@@ -2000,6 +2608,12 @@ def run_block(arguments: argparse.Namespace) -> dict[str, Any]:
         raise BlockError("PROFILE_SOURCE_CLOSURE_CHANGED_DURING_BLOCK")
     if load_pinned_toolchain() != pinned_executables:
         raise BlockError("PINNED_TOOLCHAIN_CHANGED_DURING_BLOCK")
+    validate_authoritative_ghc_closure(ghc_closure)
+    if (
+        sha256_file(ghc_install_closure_path)
+        != ghc_install_closure_file_sha256
+    ):
+        raise BlockError("AUTHORITATIVE_GHC_CLOSURE_EVIDENCE_CHANGED")
     _verify_subject_commit(repo_root, arguments.benchmark_subject_commit)
     return {
         "status": "PASS",

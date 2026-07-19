@@ -17,6 +17,7 @@ fi
 : "${S1_4X_DOCKER_BIN:?absolute Docker client is required}"
 : "${S1_4X_DOCKER_SHA256:?trusted Docker client SHA-256 is required}"
 : "${S1_4X_DOCKER_DAEMON_IDENTITY_SHA256:?trusted Docker daemon identity SHA-256 is required}"
+PINNED_DOCKER_SHA256="834d45bd30c6d08f1045f39a48fda64cf563f89e6f217a0dac53742612634fe2"
 [[ "$S1_4X_DOCKER_BIN" == /* \
   && -f "$S1_4X_DOCKER_BIN" \
   && -x "$S1_4X_DOCKER_BIN" \
@@ -26,6 +27,7 @@ fi
   exit 69
 }
 [[ "$S1_4X_DOCKER_SHA256" =~ ^[0-9a-f]{64}$ \
+  && "$S1_4X_DOCKER_SHA256" == "$PINNED_DOCKER_SHA256" \
   && "$S1_4X_DOCKER_DAEMON_IDENTITY_SHA256" =~ ^[0-9a-f]{64}$ ]] || {
   echo "Docker trust anchor format is invalid" >&2
   exit 69

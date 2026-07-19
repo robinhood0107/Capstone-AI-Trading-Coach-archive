@@ -106,6 +106,10 @@ FORBIDDEN_STACK_ENVIRONMENT = (
     "STACK_CONFIG",
 )
 OCI_PLATFORM = "linux/amd64"
+OCI_CONTEXT_NAME = "desktop-linux"
+OCI_DOCKER_CLIENT_SHA256 = (
+    "834d45bd30c6d08f1045f39a48fda64cf563f89e6f217a0dac53742612634fe2"
+)
 OCI_BASE_IMAGE = (
     "docker.io/library/haskell@sha256:"
     "417d4bc30ac7d8d5ff04ec97937f86eb508b0c76bfd1a39b5ec225688531aa9d"
@@ -298,6 +302,370 @@ def _portable_argv(
     if any(argument.startswith("/proc/self/fd/") for argument in portable):
         raise WorkflowError("COMMAND_PINNED_FD_NOT_PORTABLE")
     return portable
+
+
+def _stat_identity(value: os.stat_result) -> dict[str, int]:
+    """FD witness가 저장하는 Linux regular-file stat identity를 정규화한다."""
+
+    return {
+        "device": value.st_dev,
+        "inode": value.st_ino,
+        "size": value.st_size,
+        "mode": value.st_mode,
+        "mtimeNs": value.st_mtime_ns,
+        "ctimeNs": value.st_ctime_ns,
+        "linkCount": value.st_nlink,
+    }
+
+
+def _process_start_ticks(pid: int) -> int:
+    """PID reuse와 owner 종료를 구분하는 `/proc/<pid>/stat` starttime을 읽는다."""
+
+    if type(pid) is not int or pid <= 0:
+        raise WorkflowError("QUALIFICATION_WITNESS_OWNER_PID_INVALID")
+    try:
+        payload = Path(f"/proc/{pid}/stat").read_text(encoding="ascii")
+    except (OSError, UnicodeError) as exc:
+        raise WorkflowError("QUALIFICATION_WITNESS_OWNER_NOT_LIVE") from exc
+    closing = payload.rfind(")")
+    if closing <= 1 or not payload.startswith(f"{pid} ("):
+        raise WorkflowError("QUALIFICATION_WITNESS_OWNER_STAT_INVALID")
+    fields = payload[closing + 2 :].split()
+    try:
+        start_ticks = int(fields[19])
+    except (IndexError, ValueError) as exc:
+        raise WorkflowError("QUALIFICATION_WITNESS_OWNER_STAT_INVALID") from exc
+    if start_ticks <= 0:
+        raise WorkflowError("QUALIFICATION_WITNESS_OWNER_STAT_INVALID")
+    return start_ticks
+
+
+def _process_identity_is_live(pid: int, start_ticks: int) -> bool:
+    """같은 PID와 starttime의 owner가 아직 살아 있는지 확인한다."""
+
+    try:
+        return _process_start_ticks(pid) == start_ticks
+    except WorkflowError as exc:
+        if str(exc) == "QUALIFICATION_WITNESS_OWNER_NOT_LIVE":
+            return False
+        raise
+
+
+def _qualification_marker_path_id(
+    *,
+    order_block: int,
+    profile_id: str,
+) -> str:
+    """Output pathname 대신 block/profile 의미만 담는 portable marker ID를 만든다."""
+
+    if type(order_block) is not int or order_block not in range(4):
+        raise WorkflowError("QUALIFICATION_WITNESS_BLOCK_INVALID")
+    profile_options(profile_id)
+    normalized_profile = re.sub(r"[^A-Z0-9]+", "_", profile_id.upper()).strip("_")
+    return (
+        "S1_4X_QUALIFICATION_MEASUREMENT_"
+        f"BLOCK_{order_block + 1}_{normalized_profile}"
+    )
+
+
+def _read_descriptor_sha256(
+    descriptor: int,
+    *,
+    expected_identity: Mapping[str, Any],
+    label: str,
+) -> str:
+    """Live owner FD bytes를 pread하고 전후 fstat identity를 witness에 결속한다."""
+
+    if type(descriptor) is not int or descriptor < 3:
+        raise WorkflowError(f"QUALIFICATION_WITNESS_{label}_FD_INVALID")
+    try:
+        before = os.fstat(descriptor)
+    except OSError as exc:
+        raise WorkflowError(
+            f"QUALIFICATION_WITNESS_{label}_FD_NOT_LIVE"
+        ) from exc
+    if (
+        not stat.S_ISREG(before.st_mode)
+        or _stat_identity(before) != dict(expected_identity)
+        or before.st_size < 0
+        or before.st_size > 1024 * 1024 * 1024
+    ):
+        raise WorkflowError(f"QUALIFICATION_WITNESS_{label}_IDENTITY_INVALID")
+    digest = hashlib.sha256()
+    offset = 0
+    while offset < before.st_size:
+        try:
+            chunk = os.pread(
+                descriptor,
+                min(1024 * 1024, before.st_size - offset),
+                offset,
+            )
+        except OSError as exc:
+            raise WorkflowError(
+                f"QUALIFICATION_WITNESS_{label}_FD_READ_FAILED"
+            ) from exc
+        if not chunk:
+            raise WorkflowError(
+                f"QUALIFICATION_WITNESS_{label}_FD_SHORT_READ"
+            )
+        digest.update(chunk)
+        offset += len(chunk)
+    if _stat_identity(os.fstat(descriptor)) != dict(expected_identity):
+        raise WorkflowError(
+            f"QUALIFICATION_WITNESS_{label}_CHANGED_DURING_READ"
+        )
+    return digest.hexdigest()
+
+
+def build_qualification_command_witness(
+    *,
+    owner_pid: int,
+    owner_start_ticks: int,
+    python_source_path: Path,
+    python_source_sha256: str,
+    python_descriptor: int,
+    python_identity: Mapping[str, Any],
+    script_source_path: Path,
+    script_source_sha256: str,
+    script_descriptor: int,
+    script_identity: Mapping[str, Any],
+    marker_argv: Sequence[str],
+    marker_path_id: str,
+) -> dict[str, Any]:
+    """Live FD owner가 exact argv/source/stat을 portable historical witness로 봉인한다."""
+
+    if (
+        type(owner_pid) is not int
+        or owner_pid <= 0
+        or type(owner_start_ticks) is not int
+        or owner_start_ticks <= 0
+        or _process_start_ticks(owner_pid) != owner_start_ticks
+        or not python_source_path.is_absolute()
+        or not script_source_path.is_absolute()
+        or re.fullmatch(r"[A-Z0-9_]+", marker_path_id) is None
+    ):
+        raise WorkflowError("QUALIFICATION_WITNESS_INPUT_INVALID")
+    python_sha256 = _require_sha256(
+        python_source_sha256,
+        label="qualification-witness-python",
+    )
+    script_sha256 = _require_sha256(
+        script_source_sha256,
+        label="qualification-witness-script",
+    )
+    raw_argv = list(marker_argv)
+    if (
+        len(raw_argv) != 5
+        or raw_argv[0] != f"/proc/self/fd/{python_descriptor}"
+        or raw_argv[1] != f"/proc/self/fd/{script_descriptor}"
+        or raw_argv[2:4] != ["mark-measurement-entered", "--qualification"]
+        or not raw_argv[4].startswith("/")
+    ):
+        raise WorkflowError("QUALIFICATION_WITNESS_ARGV_INVALID")
+    actual_python_sha256 = _read_descriptor_sha256(
+        python_descriptor,
+        expected_identity=python_identity,
+        label="PYTHON",
+    )
+    actual_script_sha256 = _read_descriptor_sha256(
+        script_descriptor,
+        expected_identity=script_identity,
+        label="SCRIPT",
+    )
+    if (
+        actual_python_sha256 != python_sha256
+        or actual_script_sha256 != script_sha256
+    ):
+        raise WorkflowError("QUALIFICATION_WITNESS_SOURCE_BYTES_MISMATCH")
+    objects = {
+        "python": {
+            "sourcePath": str(python_source_path),
+            "sourcePathSha256": hashlib.sha256(
+                os.fsencode(str(python_source_path))
+            ).hexdigest(),
+            "sourceBytesSha256": python_sha256,
+            "fdNumber": python_descriptor,
+            "fdIdentity": dict(python_identity),
+        },
+        "script": {
+            "sourcePath": str(script_source_path),
+            "sourcePathSha256": hashlib.sha256(
+                os.fsencode(str(script_source_path))
+            ).hexdigest(),
+            "sourceBytesSha256": script_sha256,
+            "fdNumber": script_descriptor,
+            "fdIdentity": dict(script_identity),
+        },
+    }
+    normalized_argv = [
+        (
+            "S1_4X_BENCHMARK_CPYTHON_3_12_13_SHA256_"
+            f"{python_sha256.upper()}"
+        ),
+        f"S1_4X_PROFILE_MARKER_SCRIPT_SHA256_{script_sha256.upper()}",
+        "mark-measurement-entered",
+        "--qualification",
+        marker_path_id,
+    ]
+    witness = {
+        "schemaVersion": "s1.4x-portable-command-witness-v1",
+        "owner": {
+            "pid": owner_pid,
+            "startTicks": owner_start_ticks,
+        },
+        "objects": objects,
+        "objectsSha256": canonical_sha256(objects),
+        "ownerArgvSha256": canonical_sha256(raw_argv),
+        "markerPathId": marker_path_id,
+        "normalizedArgv": normalized_argv,
+        "normalizedArgvSha256": canonical_sha256(normalized_argv),
+    }
+    witness["witnessSha256"] = canonical_sha256(witness)
+    return witness
+
+
+def validate_qualification_command_witness(
+    witness: object,
+    *,
+    marker_argv: Sequence[str],
+    marker_path_id: str,
+    python_source_path: Path,
+    python_source_sha256: str,
+    script_source_path: Path,
+    script_source_sha256: str,
+    require_owner_exit: bool,
+) -> dict[str, Any]:
+    """Dead owner FD를 재개방하지 않고 historical stat/argv/source closure를 검증한다."""
+
+    expected_fields = {
+        "schemaVersion",
+        "owner",
+        "objects",
+        "objectsSha256",
+        "ownerArgvSha256",
+        "markerPathId",
+        "normalizedArgv",
+        "normalizedArgvSha256",
+        "witnessSha256",
+    }
+    if (
+        not isinstance(witness, dict)
+        or set(witness) != expected_fields
+        or witness.get("schemaVersion")
+        != "s1.4x-portable-command-witness-v1"
+        or type(require_owner_exit) is not bool
+        or re.fullmatch(r"[A-Z0-9_]+", marker_path_id) is None
+    ):
+        raise WorkflowError("QUALIFICATION_WITNESS_OBJECT_INVALID")
+    owner = witness.get("owner")
+    objects = witness.get("objects")
+    if (
+        not isinstance(owner, dict)
+        or set(owner) != {"pid", "startTicks"}
+        or type(owner.get("pid")) is not int
+        or owner["pid"] <= 0
+        or type(owner.get("startTicks")) is not int
+        or owner["startTicks"] <= 0
+        or not isinstance(objects, dict)
+        or set(objects) != {"python", "script"}
+    ):
+        raise WorkflowError("QUALIFICATION_WITNESS_OWNER_OR_OBJECT_INVALID")
+    expected_sources = {
+        "python": (
+            python_source_path,
+            _require_sha256(
+                python_source_sha256,
+                label="qualification-witness-python",
+            ),
+        ),
+        "script": (
+            script_source_path,
+            _require_sha256(
+                script_source_sha256,
+                label="qualification-witness-script",
+            ),
+        ),
+    }
+    raw_argv = list(marker_argv)
+    for index, name in enumerate(("python", "script")):
+        binding = objects.get(name)
+        source_path, source_sha256 = expected_sources[name]
+        if (
+            not isinstance(binding, dict)
+            or set(binding)
+            != {
+                "sourcePath",
+                "sourcePathSha256",
+                "sourceBytesSha256",
+                "fdNumber",
+                "fdIdentity",
+            }
+            or binding.get("sourcePath") != str(source_path)
+            or binding.get("sourcePathSha256")
+            != hashlib.sha256(os.fsencode(str(source_path))).hexdigest()
+            or binding.get("sourceBytesSha256") != source_sha256
+            or type(binding.get("fdNumber")) is not int
+            or binding["fdNumber"] < 3
+            or len(raw_argv) != 5
+            or raw_argv[index]
+            != f"/proc/self/fd/{binding['fdNumber']}"
+        ):
+            raise WorkflowError(
+                f"QUALIFICATION_WITNESS_{name.upper()}_BINDING_INVALID"
+            )
+        identity = binding.get("fdIdentity")
+        if (
+            not isinstance(identity, dict)
+            or set(identity)
+            != {
+                "device",
+                "inode",
+                "size",
+                "mode",
+                "mtimeNs",
+                "ctimeNs",
+                "linkCount",
+            }
+            or any(type(value) is not int or value < 0 for value in identity.values())
+            or not stat.S_ISREG(identity["mode"])
+            or identity["size"] > 1024 * 1024 * 1024
+        ):
+            raise WorkflowError(
+                f"QUALIFICATION_WITNESS_{name.upper()}_FSTAT_INVALID"
+            )
+    expected_normalized = [
+        (
+            "S1_4X_BENCHMARK_CPYTHON_3_12_13_SHA256_"
+            f"{expected_sources['python'][1].upper()}"
+        ),
+        (
+            "S1_4X_PROFILE_MARKER_SCRIPT_SHA256_"
+            f"{expected_sources['script'][1].upper()}"
+        ),
+        "mark-measurement-entered",
+        "--qualification",
+        marker_path_id,
+    ]
+    without_hash = dict(witness)
+    witness_sha256 = without_hash.pop("witnessSha256", None)
+    if (
+        raw_argv[2:4] != ["mark-measurement-entered", "--qualification"]
+        or not raw_argv[4].startswith("/")
+        or witness.get("objectsSha256") != canonical_sha256(objects)
+        or witness.get("ownerArgvSha256") != canonical_sha256(raw_argv)
+        or witness.get("markerPathId") != marker_path_id
+        or witness.get("normalizedArgv") != expected_normalized
+        or witness.get("normalizedArgvSha256")
+        != canonical_sha256(expected_normalized)
+        or witness_sha256 != canonical_sha256(without_hash)
+    ):
+        raise WorkflowError("QUALIFICATION_WITNESS_CANONICAL_BINDING_INVALID")
+    if require_owner_exit and _process_identity_is_live(
+        owner["pid"],
+        owner["startTicks"],
+    ):
+        raise WorkflowError("QUALIFICATION_WITNESS_OWNER_STILL_LIVE")
+    return witness
 
 
 def canonical_json_bytes(value: Any, *, trailing_newline: bool = False) -> bytes:
@@ -750,17 +1118,32 @@ def _same_fd_bytes_snapshot(
         raise WorkflowError(f"{label}_FILE_INVALID") from exc
     try:
         before = os.fstat(descriptor)
-        if not stat.S_ISREG(before.st_mode) or before.st_size > max_bytes:
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_size > max_bytes
+            or before.st_nlink != 1
+        ):
             raise WorkflowError(f"{label}_FILE_INVALID")
         chunks: list[bytes] = []
         while chunk := os.read(descriptor, 64 * 1024):
             chunks.append(chunk)
         after = os.fstat(descriptor)
+        current = os.stat(path, follow_symlinks=False)
+        identity_fields = (
+            "st_dev",
+            "st_ino",
+            "st_size",
+            "st_mode",
+            "st_mtime_ns",
+            "st_ctime_ns",
+            "st_nlink",
+        )
         if (
-            before.st_dev != after.st_dev
-            or before.st_ino != after.st_ino
-            or before.st_size != after.st_size
-            or before.st_mtime_ns != after.st_mtime_ns
+            any(
+                getattr(before, field) != getattr(after, field)
+                or getattr(before, field) != getattr(current, field)
+                for field in identity_fields
+            )
         ):
             raise WorkflowError(f"{label}_CHANGED_DURING_READ")
     finally:
@@ -1545,8 +1928,7 @@ def validate_oci_daemon_identity(
     )
     if (
         not isinstance(document, dict)
-        or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", context_name)
-        is None
+        or context_name != OCI_CONTEXT_NAME
         or document.get("OSType") != "linux"
         or document.get("Architecture") not in {"amd64", "x86_64"}
         or any(
@@ -2846,6 +3228,10 @@ def _qualification(arguments: argparse.Namespace) -> None:
     )
     configured_python_sha256 = marker_python.sha256
     marker_script_sha256 = marker_script.sha256
+    qualification_owner_pid = os.getpid()
+    qualification_owner_start_ticks = _process_start_ticks(
+        qualification_owner_pid
+    )
     cache_value = os.environ.get("S1_4X_CACHE_ROOT")
     if cache_value is None:
         raise WorkflowError("REQUIRED_ENVIRONMENT_MISSING:S1_4X_CACHE_ROOT")
@@ -2916,6 +3302,40 @@ def _qualification(arguments: argparse.Namespace) -> None:
                 "--qualification",
                 str(marker_path),
             ]
+            marker_path_id = _qualification_marker_path_id(
+                order_block=block_index,
+                profile_id=profile_id,
+            )
+            marker_witness = build_qualification_command_witness(
+                owner_pid=qualification_owner_pid,
+                owner_start_ticks=qualification_owner_start_ticks,
+                python_source_path=marker_python.source_path,
+                python_source_sha256=configured_python_sha256,
+                python_descriptor=marker_python.descriptor,
+                python_identity={
+                    "device": marker_python.identity[0],
+                    "inode": marker_python.identity[1],
+                    "size": marker_python.identity[2],
+                    "mode": marker_python.mode,
+                    "mtimeNs": marker_python.identity[3],
+                    "ctimeNs": marker_python.identity[4],
+                    "linkCount": marker_python.identity[5],
+                },
+                script_source_path=marker_script.source_path,
+                script_source_sha256=marker_script_sha256,
+                script_descriptor=marker_script.descriptor,
+                script_identity={
+                    "device": marker_script.identity[0],
+                    "inode": marker_script.identity[1],
+                    "size": marker_script.identity[2],
+                    "mode": marker_script.mode,
+                    "mtimeNs": marker_script.identity[3],
+                    "ctimeNs": marker_script.identity[4],
+                    "linkCount": marker_script.identity[5],
+                },
+                marker_argv=marker_argv,
+                marker_path_id=marker_path_id,
+            )
             marker = build_profile_marker(
                 plan_sha256=plan_sha256,
                 selector_config_sha256=selector_config_sha256,
@@ -3022,6 +3442,7 @@ def _qualification(arguments: argparse.Namespace) -> None:
                         "scriptSha256": marker_script_sha256,
                         "argv": marker_argv,
                         "argvSha256": canonical_sha256(marker_argv),
+                        "portableWitness": marker_witness,
                     },
                 }
             )
@@ -3558,6 +3979,7 @@ def _validate_qualification_artifact(
         "scriptSha256",
         "argv",
         "argvSha256",
+        "portableWitness",
     }
     selector_blocks: list[dict[str, Any]] = []
     for index, block in enumerate(artifact["blocks"]):
@@ -3676,6 +4098,20 @@ def _validate_qualification_artifact(
                 measurement,
                 state="MEASUREMENT",
             )
+            marker_path_id = _qualification_marker_path_id(
+                order_block=index,
+                profile_id=expected_profile_id,
+            )
+            validate_qualification_command_witness(
+                marker.get("portableWitness"),
+                marker_argv=marker.get("argv", []),
+                marker_path_id=marker_path_id,
+                python_source_path=marker_python.source_path,
+                python_source_sha256=marker_python_sha256,
+                script_source_path=marker_script_source,
+                script_source_sha256=marker_script_sha256,
+                require_owner_exit=True,
+            )
             if (
                 measurement.get("planSha256") != artifact["planSha256"]
                 or measurement.get("selectorConfigSha256")
@@ -3691,14 +4127,12 @@ def _validate_qualification_artifact(
                 != str(marker_python.source_path)
                 or measurement.get("markerPythonPinnedFdPath")
                 != marker.get("pythonPinnedFdPath")
-                or _pinned_fd_number(marker.get("pythonPinnedFdPath")) is None
                 or measurement.get("markerPythonSha256")
                 != marker_python_sha256
                 or measurement.get("markerScriptPath")
                 != str(marker_script_source)
                 or measurement.get("markerScriptPinnedFdPath")
                 != marker.get("scriptPinnedFdPath")
-                or _pinned_fd_number(marker.get("scriptPinnedFdPath")) is None
                 or measurement.get("markerScriptSha256")
                 != marker_script_sha256
                 or marker.get("preRunSha256")
@@ -5603,6 +6037,148 @@ def _regular_tree_sha256(root: Path, *, label: str) -> str:
     return hashlib.sha256(b"".join(entries)).hexdigest()
 
 
+def _docker_config_tree_snapshot(
+    docker_config: Path,
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    """Output-bound Docker config의 directory/file bytes와 stat identity를 고정한다."""
+
+    root_stat = os.lstat(docker_config)
+    if not stat.S_ISDIR(root_stat.st_mode):
+        raise WorkflowError("OCI_DOCKER_CONFIG_MODE_INVALID")
+    records: list[dict[str, Any]] = []
+    for path in sorted(
+        docker_config.rglob("*"),
+        key=lambda item: os.fsencode(item.relative_to(docker_config).as_posix()),
+    ):
+        relative = path.relative_to(docker_config).as_posix()
+        value = os.lstat(path)
+        if stat.S_ISLNK(value.st_mode):
+            raise WorkflowError(f"OCI_DOCKER_CONFIG_SYMLINK:{relative}")
+        if stat.S_ISDIR(value.st_mode):
+            records.append(
+                {
+                    "path": relative,
+                    "type": "directory",
+                    "identity": _stat_identity(value),
+                }
+            )
+            continue
+        if not stat.S_ISREG(value.st_mode) or value.st_nlink != 1:
+            raise WorkflowError(
+                f"OCI_DOCKER_CONFIG_ENTRY_INVALID:{relative}"
+            )
+        payload, snapshot = _same_fd_bytes_snapshot(
+            path,
+            label="OCI_DOCKER_CONFIG_FILE",
+            max_bytes=16 * 1024 * 1024,
+        )
+        records.append(
+            {
+                "path": relative,
+                "type": "regular",
+                "identity": _stat_identity(snapshot),
+                "sha256": hashlib.sha256(payload).hexdigest(),
+            }
+        )
+    current_root = os.lstat(docker_config)
+    if _stat_identity(current_root) != _stat_identity(root_stat):
+        raise WorkflowError("OCI_DOCKER_CONFIG_CHANGED_DURING_SNAPSHOT")
+    return records, _stat_identity(root_stat)
+
+
+def snapshot_oci_docker_stage(
+    *,
+    stage: str,
+    docker: Path,
+    expected_docker_sha256: str,
+    docker_config: Path,
+    output_root: Path,
+) -> dict[str, Any]:
+    """각 Docker command 직전/직후 client bytes와 output-bound config를 snapshot한다."""
+
+    expected_sha256 = _require_sha256(
+        expected_docker_sha256,
+        label="oci-docker-stage-client",
+    )
+    if (
+        type(stage) is not str
+        or re.fullmatch(r"[a-z0-9][a-z0-9-]{0,127}", stage) is None
+        or not output_root.is_absolute()
+        or output_root.is_symlink()
+        or not output_root.is_dir()
+        or output_root.resolve(strict=True) != output_root
+        or docker_config != output_root / "docker-config"
+        or docker_config.is_symlink()
+        or not docker_config.is_dir()
+        or docker_config.resolve(strict=True) != docker_config
+    ):
+        raise WorkflowError("OCI_DOCKER_TRUST_STAGE_INPUT_INVALID")
+    docker_payload, docker_stat = _same_fd_bytes_snapshot(
+        docker,
+        label="OCI_DOCKER_CLIENT_STAGE",
+        max_bytes=64 * 1024 * 1024,
+    )
+    docker_sha256 = hashlib.sha256(docker_payload).hexdigest()
+    if (
+        docker_sha256 != expected_sha256
+        or docker_stat.st_mode & 0o111 == 0
+        or docker_stat.st_nlink != 1
+    ):
+        raise WorkflowError("OCI_DOCKER_CLIENT_STAGE_INVALID")
+    config_records, config_identity = _docker_config_tree_snapshot(
+        docker_config
+    )
+    trust_identity = {
+        "dockerClientPath": str(docker),
+        "dockerClientSha256": docker_sha256,
+        "dockerClientByteLength": len(docker_payload),
+        "dockerClientIdentity": _stat_identity(docker_stat),
+        "dockerConfigPath": str(docker_config),
+        "dockerConfigIdentity": config_identity,
+        "dockerConfigEntryCount": len(config_records),
+        "dockerConfigTreeSha256": canonical_sha256(config_records),
+    }
+    snapshot = {
+        "schemaVersion": "s1.4x-oci-docker-trust-stage-v1",
+        "stage": stage,
+        **trust_identity,
+        "dockerTrustIdentitySha256": canonical_sha256(trust_identity),
+    }
+    snapshot["snapshotSha256"] = canonical_sha256(snapshot)
+    return snapshot
+
+
+def validate_oci_docker_stage_pair(
+    before: object,
+    after: object,
+) -> None:
+    """한 Docker command의 전후 client/config byte closure가 동일함을 강제한다."""
+
+    expected_fields = {
+        "schemaVersion",
+        "stage",
+        "dockerClientPath",
+        "dockerClientSha256",
+        "dockerClientByteLength",
+        "dockerClientIdentity",
+        "dockerConfigPath",
+        "dockerConfigIdentity",
+        "dockerConfigEntryCount",
+        "dockerConfigTreeSha256",
+        "dockerTrustIdentitySha256",
+        "snapshotSha256",
+    }
+    for value in (before, after):
+        if not isinstance(value, dict) or set(value) != expected_fields:
+            raise WorkflowError("OCI_DOCKER_TRUST_STAGE_OBJECT_INVALID")
+        without_hash = dict(value)
+        snapshot_sha256 = without_hash.pop("snapshotSha256")
+        if snapshot_sha256 != canonical_sha256(without_hash):
+            raise WorkflowError("OCI_DOCKER_TRUST_STAGE_HASH_INVALID")
+    if before != after:
+        raise WorkflowError("OCI_DOCKER_TRUST_STAGE_CHANGED")
+
+
 def _oci_context_name(
     path: Path,
     *,
@@ -5623,9 +6199,9 @@ def _oci_context_name(
         value = payload.decode("utf-8")
     except UnicodeError as exc:
         raise WorkflowError("OCI_CONTEXT_NAME_INVALID") from exc
-    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\n", value) is None:
+    if value != f"{OCI_CONTEXT_NAME}\n":
         raise WorkflowError("OCI_CONTEXT_NAME_INVALID")
-    return value[:-1]
+    return OCI_CONTEXT_NAME
 
 
 def _oci_correctness(arguments: argparse.Namespace) -> None:
@@ -5668,6 +6244,8 @@ def _oci_correctness(arguments: argparse.Namespace) -> None:
         os.environ.get("S1_4X_DOCKER_SHA256"),
         label="docker",
     )
+    if expected_docker_sha256 != OCI_DOCKER_CLIENT_SHA256:
+        raise WorkflowError("DOCKER_TRUST_ANCHOR_NOT_FROZEN")
     expected_daemon_identity_sha256 = _require_sha256(
         os.environ.get("S1_4X_DOCKER_DAEMON_IDENTITY_SHA256"),
         label="docker-daemon-identity",
@@ -5690,8 +6268,8 @@ def _oci_correctness(arguments: argparse.Namespace) -> None:
         output_path=output,
     )
     context = cache_root / f"oci-context-{suffix}"
-    docker_config = cache_root / f"docker-config-{suffix}"
-    for path in (stack_root, context, docker_config):
+    docker_config = output / "docker-config"
+    for path in (stack_root, context):
         if path.exists() or path.is_symlink():
             raise WorkflowError(f"OCI_CACHE_PATH_ALREADY_EXISTS:{path.name}")
     stack_root.mkdir(mode=0o700)
@@ -5707,6 +6285,67 @@ def _oci_correctness(arguments: argparse.Namespace) -> None:
         python_runtime=python_runtime,
     )
     environment["DOCKER_CONFIG"] = str(docker_config)
+    docker_trust_baseline = snapshot_oci_docker_stage(
+        stage="baseline",
+        docker=docker,
+        expected_docker_sha256=expected_docker_sha256,
+        docker_config=docker_config,
+        output_root=output,
+    )
+    if docker_trust_baseline["dockerConfigEntryCount"] != 0:
+        raise WorkflowError("OCI_DOCKER_CONFIG_NOT_FRESH_EMPTY")
+    docker_trust_stage_snapshots: list[dict[str, Any]] = []
+
+    def run_docker_stage(
+        command: Sequence[str],
+        *,
+        phase: str,
+    ) -> dict[str, Any]:
+        """Docker command마다 exact client/config bytes를 전후 동일 snapshot으로 묶는다."""
+
+        if not command or command[0] != str(docker):
+            raise WorkflowError(f"OCI_DOCKER_STAGE_COMMAND_INVALID:{phase}")
+        before = snapshot_oci_docker_stage(
+            stage=phase,
+            docker=docker,
+            expected_docker_sha256=expected_docker_sha256,
+            docker_config=docker_config,
+            output_root=output,
+        )
+        if (
+            before["dockerTrustIdentitySha256"]
+            != docker_trust_baseline["dockerTrustIdentitySha256"]
+        ):
+            raise WorkflowError("OCI_DOCKER_TRUST_BASELINE_DRIFT")
+        record = _run_logged(
+            command,
+            cwd=cache_root,
+            environment=environment,
+            phase=phase,
+            output_directory=output,
+        )
+        after = snapshot_oci_docker_stage(
+            stage=phase,
+            docker=docker,
+            expected_docker_sha256=expected_docker_sha256,
+            docker_config=docker_config,
+            output_root=output,
+        )
+        validate_oci_docker_stage_pair(before, after)
+        if (
+            after["dockerTrustIdentitySha256"]
+            != docker_trust_baseline["dockerTrustIdentitySha256"]
+        ):
+            raise WorkflowError("OCI_DOCKER_TRUST_BASELINE_DRIFT")
+        docker_trust_stage_snapshots.append(
+            {
+                "phase": phase,
+                "before": before,
+                "after": after,
+            }
+        )
+        return record
+
     stack_yaml = _absolute_regular(
         haskell_root / "stack.yaml",
         label="AUTHORITATIVE_STACK_YAML",
@@ -5735,12 +6374,9 @@ def _oci_correctness(arguments: argparse.Namespace) -> None:
         )
     ]
     context_show_command = build_oci_context_show_command(docker)
-    context_before_record = _run_logged(
+    context_before_record = run_docker_stage(
         context_show_command,
-        cwd=cache_root,
-        environment=environment,
         phase="oci-context-before",
-        output_directory=output,
     )
     commands.append(context_before_record)
     context_name = _oci_context_name(
@@ -5753,12 +6389,9 @@ def _oci_correctness(arguments: argparse.Namespace) -> None:
         "--format",
         "{{json .}}",
     ]
-    daemon_before_record = _run_logged(
+    daemon_before_record = run_docker_stage(
         daemon_info_command,
-        cwd=cache_root,
-        environment=environment,
         phase="oci-daemon-before",
-        output_directory=output,
     )
     commands.append(daemon_before_record)
     daemon_before_document, _ = _same_fd_logged_json_snapshot(
@@ -5779,12 +6412,9 @@ def _oci_correctness(arguments: argparse.Namespace) -> None:
         "{{json .}}",
         OCI_BASE_IMAGE,
     ]
-    base_before_record = _run_logged(
+    base_before_record = run_docker_stage(
         base_inspect_command,
-        cwd=cache_root,
-        environment=environment,
         phase="oci-base-before",
-        output_directory=output,
     )
     commands.append(base_before_record)
     base_before_document, base_inspection_before_sha256 = (
@@ -5839,12 +6469,9 @@ def _oci_correctness(arguments: argparse.Namespace) -> None:
     )
     _validate_oci_context_snapshot(context, expected=context_snapshot)
     commands.append(
-        _run_logged(
+        run_docker_stage(
             image_build,
-            cwd=cache_root,
-            environment=environment,
             phase="oci-image-build",
-            output_directory=output,
         )
     )
     _validate_oci_context_snapshot(context, expected=context_snapshot)
@@ -5863,12 +6490,9 @@ def _oci_correctness(arguments: argparse.Namespace) -> None:
         "{{json .}}",
         image_id,
     ]
-    immutable_inspect_record = _run_logged(
+    immutable_inspect_record = run_docker_stage(
         immutable_inspect_command,
-        cwd=cache_root,
-        environment=environment,
         phase="oci-image-id-inspect",
-        output_directory=output,
     )
     commands.append(immutable_inspect_record)
     immutable_inspection, _ = _same_fd_logged_json_snapshot(
@@ -5897,12 +6521,9 @@ def _oci_correctness(arguments: argparse.Namespace) -> None:
         *,
         expected_image_id: str | None,
     ) -> str:
-        inspect_record = _run_logged(
+        inspect_record = run_docker_stage(
             inspect_command,
-            cwd=cache_root,
-            environment=environment,
             phase=phase,
-            output_directory=output,
         )
         commands.append(inspect_record)
         inspect_path = output / f"{phase}.stdout"
@@ -5974,12 +6595,9 @@ def _oci_correctness(arguments: argparse.Namespace) -> None:
             gid=os.getgid(),
         )
         commands.append(
-            _run_logged(
+            run_docker_stage(
                 run_command,
-                cwd=cache_root,
-                environment=environment,
                 phase=f"oci-{label}-run",
-                output_directory=output,
             )
         )
         inspect_tag_binding(
@@ -6023,12 +6641,9 @@ def _oci_correctness(arguments: argparse.Namespace) -> None:
                 "status": "PASS",
             }
         )
-    base_after_record = _run_logged(
+    base_after_record = run_docker_stage(
         base_inspect_command,
-        cwd=cache_root,
-        environment=environment,
         phase="oci-base-after",
-        output_directory=output,
     )
     commands.append(base_after_record)
     base_after_document, base_inspection_after_sha256 = (
@@ -6046,24 +6661,18 @@ def _oci_correctness(arguments: argparse.Namespace) -> None:
         != base_image_id
     ):
         raise WorkflowError("OCI_BASE_IMAGE_CHANGED_DURING_RUN")
-    context_after_record = _run_logged(
+    context_after_record = run_docker_stage(
         context_show_command,
-        cwd=cache_root,
-        environment=environment,
         phase="oci-context-after",
-        output_directory=output,
     )
     commands.append(context_after_record)
     context_name_after = _oci_context_name(
         output / "oci-context-after.stdout",
         command_record=context_after_record,
     )
-    daemon_after_record = _run_logged(
+    daemon_after_record = run_docker_stage(
         daemon_info_command,
-        cwd=cache_root,
-        environment=environment,
         phase="oci-daemon-after",
-        output_directory=output,
     )
     commands.append(daemon_after_record)
     daemon_after_document, _ = _same_fd_logged_json_snapshot(
@@ -6109,6 +6718,9 @@ def _oci_correctness(arguments: argparse.Namespace) -> None:
         "dockerPath": str(docker),
         "dockerSha256": docker_sha256,
         "expectedDockerSha256": expected_docker_sha256,
+        "dockerConfigPath": str(docker_config),
+        "dockerTrustBaseline": docker_trust_baseline,
+        "dockerTrustStageSnapshots": docker_trust_stage_snapshots,
         "expectedDaemonIdentitySha256": (
             expected_daemon_identity_sha256
         ),
