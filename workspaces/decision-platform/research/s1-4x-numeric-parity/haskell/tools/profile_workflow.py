@@ -2644,7 +2644,7 @@ def resolve_selected_profile_commit_fixed_point(
     profile_relative_path: str,
     manifest_relative_path: str,
 ) -> dict[str, str | None]:
-    """프로필 전 subject와 두 파일만 바꾸는 materialization commit을 결속한다."""
+    """Pending→final 두 파일 commit과 이후 재생성 evidence를 결속한다."""
 
     root = _absolute_existing_directory(
         repo_root,
@@ -2671,27 +2671,24 @@ def resolve_selected_profile_commit_fixed_point(
         "-e",
         f"{expected_subject_commit}^{{commit}}",
     )
-    pending_bytes = _git_output(
+    subject_profile_bytes = _git_output(
         root,
         "show",
         f"{expected_subject_commit}:{profile_relative_path}",
         text=False,
     )
-    assert isinstance(pending_bytes, bytes)
-    pending = _strict_json_bytes(
-        pending_bytes,
-        label="SELECTED_PROFILE_PRE_MATERIALIZATION_SUBJECT",
+    assert isinstance(subject_profile_bytes, bytes)
+    subject_profile = _strict_json_bytes(
+        subject_profile_bytes,
+        label="SELECTED_PROFILE_EVIDENCE_SUBJECT",
     )
-    if (
-        not isinstance(pending, dict)
-        or pending.get("schemaVersion")
-        != "s1.4x-haskell-selected-profile-pending-v1"
-    ):
-        raise WorkflowError(
-            "SELECTED_PROFILE_PRE_MATERIALIZATION_SUBJECT_INVALID"
-        )
     if mode == "materialize":
-        if current_commit != expected_subject_commit:
+        if (
+            current_commit != expected_subject_commit
+            or not isinstance(subject_profile, dict)
+            or subject_profile.get("schemaVersion")
+            != "s1.4x-haskell-selected-profile-pending-v1"
+        ):
             raise WorkflowError("SELECTED_PROFILE_MATERIALIZE_SUBJECT_DRIFT")
         return {
             "currentCommit": current_commit,
@@ -2714,14 +2711,6 @@ def resolve_selected_profile_commit_fixed_point(
     )
     if ancestor.returncode != 0:
         raise WorkflowError("SELECTED_PROFILE_SUBJECT_NOT_ANCESTOR")
-    ancestry_output = _git_output(
-        root,
-        "rev-list",
-        "--ancestry-path",
-        "--parents",
-        f"{expected_subject_commit}..{current_commit}",
-    )
-    assert isinstance(ancestry_output, str)
     current_blobs = {
         path: _git_output(
             root,
@@ -2741,29 +2730,88 @@ def resolve_selected_profile_commit_fixed_point(
         != "s1.4x-haskell-selected-profile-v1"
     ):
         raise WorkflowError("SELECTED_PROFILE_MATERIALIZED_HEAD_INVALID")
-    candidates: list[str] = []
+    subject_schema = (
+        subject_profile.get("schemaVersion")
+        if isinstance(subject_profile, dict)
+        else None
+    )
+    candidate_subjects: list[tuple[str, str]] = []
     expected_paths = set(paths)
-    for line in ancestry_output.splitlines():
-        fields = line.split()
-        if len(fields) != 2 or fields[1] != expected_subject_commit:
-            continue
-        commit = fields[0]
+    if subject_schema == "s1.4x-haskell-selected-profile-pending-v1":
+        ancestry_output = _git_output(
+            root,
+            "rev-list",
+            "--ancestry-path",
+            "--parents",
+            f"{expected_subject_commit}..{current_commit}",
+        )
+        assert isinstance(ancestry_output, str)
+        candidate_subjects = [
+            (fields[0], fields[1])
+            for line in ancestry_output.splitlines()
+            if len(fields := line.split()) == 2
+            and fields[1] == expected_subject_commit
+        ]
+    elif subject_schema == "s1.4x-haskell-selected-profile-v1":
+        subject_blobs = {
+            path: _git_output(
+                root,
+                "show",
+                f"{expected_subject_commit}:{path}",
+                text=False,
+            )
+            for path in paths
+        }
+        if subject_blobs != current_blobs:
+            raise WorkflowError("SELECTED_PROFILE_MATERIALIZATION_COMMIT_INVALID")
+        history_output = _git_output(
+            root,
+            "rev-list",
+            "--parents",
+            expected_subject_commit,
+            "--",
+            profile_relative_path,
+        )
+        assert isinstance(history_output, str)
+        for line in history_output.splitlines():
+            fields = line.split()
+            if len(fields) != 2:
+                continue
+            commit, parent = fields
+            parent_profile_bytes = _git_output(
+                root,
+                "show",
+                f"{parent}:{profile_relative_path}",
+                text=False,
+            )
+            assert isinstance(parent_profile_bytes, bytes)
+            parent_profile = _strict_json_bytes(
+                parent_profile_bytes,
+                label="SELECTED_PROFILE_PRE_MATERIALIZATION_SUBJECT",
+            )
+            if (
+                isinstance(parent_profile, dict)
+                and parent_profile.get("schemaVersion")
+                == "s1.4x-haskell-selected-profile-pending-v1"
+            ):
+                candidate_subjects.append((commit, parent))
+    else:
+        raise WorkflowError("SELECTED_PROFILE_EVIDENCE_SUBJECT_INVALID")
+
+    candidates: list[tuple[str, str]] = []
+    for commit, parent in candidate_subjects:
         changed_output = _git_output(
             root,
             "diff-tree",
             "--no-commit-id",
             "--name-only",
             "-r",
-            expected_subject_commit,
+            parent,
             commit,
         )
         assert isinstance(changed_output, str)
-        changed_paths = {
-            path for path in changed_output.splitlines() if path
-        }
-        if changed_paths != expected_paths:
-            continue
-        if all(
+        changed_paths = {path for path in changed_output.splitlines() if path}
+        if changed_paths == expected_paths and all(
             _git_output(
                 root,
                 "show",
@@ -2773,13 +2821,14 @@ def resolve_selected_profile_commit_fixed_point(
             == current_blobs[path]
             for path in paths
         ):
-            candidates.append(commit)
+            candidates.append((commit, parent))
     if len(candidates) != 1:
         raise WorkflowError("SELECTED_PROFILE_MATERIALIZATION_COMMIT_INVALID")
+    materialization_commit, pre_materialization_commit = candidates[0]
     return {
         "currentCommit": current_commit,
-        "materializationCommit": candidates[0],
-        "preMaterializationSubjectCommit": expected_subject_commit,
+        "materializationCommit": materialization_commit,
+        "preMaterializationSubjectCommit": pre_materialization_commit,
     }
 
 
