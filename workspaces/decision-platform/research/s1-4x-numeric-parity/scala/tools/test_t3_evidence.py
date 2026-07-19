@@ -769,6 +769,70 @@ def selector_fixture(
                     "binarySha256": javac_sha,
                 },
             ]
+            live_execution_path_identity = []
+            for index, (stable, binary) in enumerate(
+                zip(
+                    runtime_execution_identities,
+                    (
+                        scala_cli,
+                        Path(os.environ["JAVA_HOME"]) / "bin/java",
+                        Path(os.environ["JAVA_HOME"]) / "bin/javac",
+                    ),
+                    strict=True,
+                ),
+                start=10,
+            ):
+                metadata = os.stat(binary, follow_symlinks=False)
+                live_execution_path_identity.append(
+                    {
+                        **stable,
+                        "procOwnerPid": 12345,
+                        "procOwnerStartTimeTicks": 67890,
+                        "procFd": index,
+                        "runtimePathSha256": f"{index:064x}",
+                        "fileIdentity": {
+                            "device": metadata.st_dev,
+                            "inode": metadata.st_ino,
+                            "mode": metadata.st_mode,
+                            "linkCount": metadata.st_nlink,
+                            "uid": metadata.st_uid,
+                            "gid": metadata.st_gid,
+                            "size": metadata.st_size,
+                            "mtimeNs": metadata.st_mtime_ns,
+                            "ctimeNs": metadata.st_ctime_ns,
+                        },
+                    }
+                )
+            java_index = runtime_identity.index("PINNED_JAVA_FD")
+            live_runtime_argv_witness = {
+                "schemaVersion": (
+                    "s1.4x-scala-live-runtime-argv-witness-v1"
+                ),
+                "normalizedArgv": runtime_identity,
+                "normalizedArgvSha256": canonical_sha256(
+                    runtime_identity
+                ),
+                "physicalArgvSha256": "9" * 64,
+                "physicalExecutionPaths": [
+                    {
+                        "argvIndex": 0,
+                        "executionPathId": (
+                            "PINNED_SCALA_CLI_1_15_0_FD"
+                        ),
+                        "pathSha256": live_execution_path_identity[0][
+                            "runtimePathSha256"
+                        ],
+                    },
+                    {
+                        "argvIndex": java_index,
+                        "executionPathId": "PINNED_JAVA_FD",
+                        "pathSha256": live_execution_path_identity[1][
+                            "runtimePathSha256"
+                        ],
+                    },
+                ],
+                "status": "PASS",
+            }
             closure_snapshot = module.SealedEvidenceSnapshot()
             command_tools = module.command_tool_closure(
                 scala_root=SCALA_ROOT,
@@ -801,14 +865,22 @@ def selector_fixture(
                 "portableArgv": portable,
                 "portableArgvSha256": canonical_sha256(portable),
                 "runtimeArgvSha256": canonical_sha256(runtime_identity),
-                "liveRuntimeArgvSha256": "9" * 64,
+                "liveRuntimeArgvWitness": live_runtime_argv_witness,
+                "liveRuntimeArgvWitnessSha256": canonical_sha256(
+                    live_runtime_argv_witness
+                ),
                 "runtimeExecutionPathIdentities": (
                     runtime_execution_identities
                 ),
                 "runtimeExecutionPathIdentitiesSha256": canonical_sha256(
                     runtime_execution_identities
                 ),
-                "liveExecutionPathIdentitySha256": "8" * 64,
+                "liveExecutionPathIdentity": (
+                    live_execution_path_identity
+                ),
+                "liveExecutionPathIdentitySha256": canonical_sha256(
+                    live_execution_path_identity
+                ),
                 "commandToolClosure": command_tools,
                 "commandToolClosureSha256": canonical_sha256(
                     command_tools
@@ -1401,6 +1473,52 @@ def main() -> int:
     selected = module.select_scala_profile(**selected_inputs)
     assert selected["selectedProfileId"] == "B"
     assert selected["fallbackExecuted"] is False
+    witness_run = json.loads(
+        (
+            selected_inputs["qualification_artifact_root"]
+            / "r1/A/case-01/scala-jmh-run-result.v1.json"
+        ).read_text(encoding="utf-8")
+    )
+    witness_snapshot = module.SealedEvidenceSnapshot()
+    expected_witness_identities = module.runtime_execution_path_identities(
+        scala_cli=selected_inputs["scala_cli"],
+        java_executable=Path(os.environ["JAVA_HOME"]) / "bin/java",
+        scala_cli_execution_path_id="PINNED_SCALA_CLI_1_15_0_FD",
+        snapshot=witness_snapshot,
+    )
+    module.validate_live_runtime_execution_witness(
+        run=witness_run,
+        expected_normalized_argv=witness_run["liveRuntimeArgvWitness"][
+            "normalizedArgv"
+        ],
+        expected_execution_path_identities=expected_witness_identities,
+        scala_cli=selected_inputs["scala_cli"],
+        java_executable=Path(os.environ["JAVA_HOME"]) / "bin/java",
+        snapshot=witness_snapshot,
+    )
+    witness_tamper = json.loads(json.dumps(witness_run))
+    witness_tamper["liveExecutionPathIdentity"][0]["fileIdentity"][
+        "inode"
+    ] += 1
+    witness_tamper["liveExecutionPathIdentitySha256"] = canonical_sha256(
+        witness_tamper["liveExecutionPathIdentity"]
+    )
+    expect_t3_error(
+        module,
+        lambda: module.validate_live_runtime_execution_witness(
+            run=witness_tamper,
+            expected_normalized_argv=witness_run[
+                "liveRuntimeArgvWitness"
+            ]["normalizedArgv"],
+            expected_execution_path_identities=(
+                expected_witness_identities
+            ),
+            scala_cli=selected_inputs["scala_cli"],
+            java_executable=Path(os.environ["JAVA_HOME"]) / "bin/java",
+            snapshot=witness_snapshot,
+        ),
+        "self-consistent fabricated live fstat witness passed",
+    )
     sequential_qualification_selector_contract(
         module,
         root=selector_root / "sequential",
