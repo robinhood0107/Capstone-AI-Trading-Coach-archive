@@ -89,8 +89,9 @@ from pathlib import Path
 formatted = Path(sys.argv[1]).read_text(encoding="utf-8")
 required = (
     "module Negative.Misformatted (value) where",
-    "value :: Maybe Int -> Int",
-    "value = maybe 0 id",
+    "import           Data.Maybe (maybe)",
+    "value::Maybe Int->Int",
+    "value=maybe 0 id",
 )
 if not all(token in formatted for token in required):
     raise SystemExit("stylish-haskell negative fixture output is incomplete")
