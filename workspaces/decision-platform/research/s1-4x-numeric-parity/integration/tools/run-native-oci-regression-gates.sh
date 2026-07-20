@@ -357,7 +357,7 @@ else
   # manifest에 봉인된 원본 root에서 검증하고, 복사본은 final evidence closure에 남긴다.
   export S1_4X_LARGE_FIXTURE_ROOT="$RESULT_ROOT/large-fixtures"
   SCALA_QUALIFICATION_SOURCE_ROOT="$(
-    /usr/bin/jq -er '
+    jq -er '
       [.sourceTrees[]
         | select(.sourceId == "scala-qualification")
         | .sourceRoot] as $qualification
@@ -399,13 +399,25 @@ else
     --correctness-root "$S1_4X_SCALA_CORRECTNESS_ROOT" \
     --output "$S1_4X_SCALA_SELECTED_PROFILE_RESULT"
 
-  export S1_4X_HASKELL_BASELINE_CORRECTNESS=\
-"$RESULT_ROOT/haskell/profiles/baseline-o0-fasm/correctness-receipt.v1.json"
-  export S1_4X_HASKELL_OPTIMIZED_CORRECTNESS=\
-"$RESULT_ROOT/haskell/profiles/optimized-o2-fasm/correctness-receipt.v1.json"
-  export S1_4X_HASKELL_QUALIFICATION_ARTIFACT=\
-"$RESULT_ROOT/haskell/qualification/qualification-artifact.v1.json"
-  run_result_command "$HASKELL/tools/select-proven-profile.sh" --check
+  HASKELL_SELECTED_PROFILE_SHA256="$(
+    sha256sum "$HASKELL/selected-profile.v1.json" | awk '{print $1}'
+  )"
+  run_result_command_quiet jq -e \
+    --arg subject "$S1_4X_BENCHMARK_SUBJECT_COMMIT" \
+    --arg selected "$HASKELL_SELECTED_PROFILE_SHA256" '
+      .schemaVersion == "s1.4x-continuation-import-v1" and
+      .status == "PASS" and
+      .currentSubject == $subject and
+      (.sourceTrees
+        | any(
+            .sourceId == "haskell-qualification" and
+            .bindings.selectedProfileSha256 == $selected and
+            .bindings.qualificationArtifactSha256 ==
+              "996c99ec659b67fe9b38ca77ae59a3d696e79903b3c443d8a42ec52c7137c764" and
+            .bindings.baselineCorrectnessSha256 ==
+              "c250e56090103aedbee9cc77832da4127e09f4667aec9ee2ddf2bd6ba699eb9c"
+          ))
+    ' "$RESULT_ROOT/continuation-import.v1.json"
 fi
 run_result_command "$HASKELL/tools/run-ghc-9.14.1-compatibility.sh" \
   --stack-yaml "$HASKELL/stack-ghc-9.14.1.yaml" \
