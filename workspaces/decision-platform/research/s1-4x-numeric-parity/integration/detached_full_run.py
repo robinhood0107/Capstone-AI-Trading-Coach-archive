@@ -17,6 +17,7 @@ import sys
 import tempfile
 import time
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import suppress
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -1045,10 +1046,8 @@ def _signal_handler(signum: int, _frame: object) -> None:
     if process is not None and process.poll() is None:
         # signal handler 안에서 Popen.wait를 재진입하지 않는다. Child group에는
         # TERM만 전달하고 정상 wait 흐름 또는 systemd cgroup stop이 회수한다.
-        try:
+        with suppress(ProcessLookupError):
             os.killpg(process.pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
         return
     raise StageFailure("supervisor", 128 + signum, "INTERRUPTED")
 
@@ -1115,9 +1114,7 @@ def run_stage(
                 exit_code = 128 + _INTERRUPTED_SIGNAL
         except OSError as exc:
             stderr.write(
-                f"supervisor process start failed: {type(exc).__name__}\n".encode(
-                    "utf-8"
-                )
+                f"supervisor process start failed: {type(exc).__name__}\n".encode()
             )
             exit_code = 127
         finally:
