@@ -80,6 +80,75 @@ def _runner_pass_fds(candidate: str) -> tuple[int, ...]:
     return (descriptor,)
 
 
+def _exclusive_bytes_write(path: Path, payload: bytes) -> None:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    with os.fdopen(os.open(path, flags, 0o600), "wb") as stream:
+        stream.write(payload)
+        stream.flush()
+        os.fsync(stream.fileno())
+
+
+def _process_bytes(value: bytes | str | None) -> bytes:
+    if value is None:
+        return b""
+    return value if isinstance(value, bytes) else value.encode("utf-8")
+
+
+def _persist_process_failure(
+    *,
+    candidate: str,
+    receipt: Path,
+    command_sha256: str,
+    runner_sha256: str,
+    started_at: str,
+    finished_at: str,
+    exit_code: int,
+    failure_code: str,
+    stdout: bytes | str | None,
+    stderr: bytes | str | None,
+) -> Path:
+    """실패한 child stream과 digest를 terminal evidence 수집 경계에 남긴다."""
+
+    standard_output = _process_bytes(stdout)
+    standard_error = _process_bytes(stderr)
+    output_path = receipt.with_name(f"{receipt.stem}.process.stdout")
+    error_path = receipt.with_name(f"{receipt.stem}.process.stderr")
+    failure_path = receipt.with_name(f"{receipt.stem}.failure.json")
+    _exclusive_bytes_write(output_path, standard_output)
+    _exclusive_bytes_write(error_path, standard_error)
+    exclusive_json_write(
+        failure_path,
+        {
+            "schemaVersion": "s1.4x-property-execution-failure-v1",
+            "candidate": candidate,
+            "failureCode": failure_code,
+            "runner": {
+                "sha256": runner_sha256,
+                "commandArgvSha256": command_sha256,
+            },
+            "process": {
+                "startedAt": started_at,
+                "finishedAt": finished_at,
+                "exitCode": exit_code,
+                "stdout": {
+                    "path": output_path.name,
+                    "sha256": _sha256_bytes(standard_output),
+                    "sizeBytes": len(standard_output),
+                },
+                "stderr": {
+                    "path": error_path.name,
+                    "sha256": _sha256_bytes(standard_error),
+                    "sizeBytes": len(standard_error),
+                },
+            },
+            "status": "FAIL",
+        },
+    )
+    return failure_path
+
+
 def _report_paths(candidate: str, output_directory: Path) -> dict[str, Path]:
     return {
         "property": output_directory / f"{candidate}-property-report.v1.json",
@@ -142,11 +211,38 @@ def run_candidate_coverage(
             timeout=timeout_seconds,
         )
     except subprocess.TimeoutExpired as exc:
-        raise CoverageExecutionError("COVERAGE_PROCESS_TIMEOUT") from exc
+        failure_path = _persist_process_failure(
+            candidate=candidate,
+            receipt=receipt,
+            command_sha256=command_sha256,
+            runner_sha256=runner_sha256,
+            started_at=started,
+            finished_at=_utc_now(),
+            exit_code=124,
+            failure_code="COVERAGE_PROCESS_TIMEOUT",
+            stdout=exc.stdout,
+            stderr=exc.stderr,
+        )
+        raise CoverageExecutionError(
+            f"COVERAGE_PROCESS_TIMEOUT:evidence={failure_path.name}"
+        ) from exc
     finished = _utc_now()
     if completed.returncode != 0:
+        failure_path = _persist_process_failure(
+            candidate=candidate,
+            receipt=receipt,
+            command_sha256=command_sha256,
+            runner_sha256=runner_sha256,
+            started_at=started,
+            finished_at=finished,
+            exit_code=completed.returncode,
+            failure_code="COVERAGE_PROCESS_FAILED",
+            stdout=completed.stdout,
+            stderr=completed.stderr,
+        )
         raise CoverageExecutionError(
-            f"COVERAGE_PROCESS_FAILED:exit={completed.returncode}"
+            f"COVERAGE_PROCESS_FAILED:exit={completed.returncode}:"
+            f"evidence={failure_path.name}"
         )
     if output.is_symlink() or not output.is_dir():
         raise CoverageExecutionError("COVERAGE_OUTPUT_DIRECTORY_MISSING")
