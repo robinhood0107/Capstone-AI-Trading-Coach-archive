@@ -102,10 +102,23 @@ def test_contract_manifest_hash_consumers_match_current_bytes() -> None:
     sys.path.insert(0, str(INTEGRATION))
     import final_candidate_audit as audit_module
 
+    manifest = json.loads(CONTRACT_MANIFEST.read_text(encoding="utf-8"))
     report = json.loads(BASELINE_REPORT.read_text(encoding="utf-8"))
     current_sha256 = _sha256(CONTRACT_MANIFEST)
+    canonical_roots = {
+        Path(root["root"]).name: root["canonicalManifestSha256"]
+        for root in manifest["immutableRoots"]
+    }
 
     assert report["immutableInputs"]["contractManifestSha256"] == current_sha256
+    assert (
+        report["immutableInputs"]["contractCanonicalRootSha256"]
+        == canonical_roots["contract"]
+    )
+    assert (
+        report["immutableInputs"]["oracleCanonicalRootSha256"]
+        == canonical_roots["oracle"]
+    )
     assert audit_module.FROZEN_CONTRACT_MANIFEST_SHA256 == current_sha256
 
 
