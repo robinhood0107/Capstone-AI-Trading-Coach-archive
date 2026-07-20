@@ -30,14 +30,12 @@ ROOT="$(git rev-parse --show-toplevel)"
 S1_4X="$ROOT/workspaces/decision-platform/research/s1-4x-numeric-parity"
 CACHE_ROOT="${S1_4X_CACHE_ROOT:-$HOME/.cache/s1-4x}"
 UV_BIN="${S1_4X_UV_BIN:?set the verified absolute uv executable path}"
-mkdir -p "$CACHE_ROOT/tmp" "$CACHE_ROOT/uv" "$CACHE_ROOT/coursier" \
-  "$CACHE_ROOT/stack-root"
+mkdir -p "$CACHE_ROOT/tmp" "$CACHE_ROOT/uv" "$CACHE_ROOT/coursier"
 export TMPDIR="$CACHE_ROOT/tmp"
 export TEMP="$TMPDIR"
 export TMP="$TMPDIR"
 export UV_CACHE_DIR="$CACHE_ROOT/uv"
 export COURSIER_CACHE="$CACHE_ROOT/coursier"
-export STACK_ROOT="$CACHE_ROOT/stack-root"
 RUN_PARENT="$(mktemp -d "$TMPDIR/s1-4x-integration.XXXXXX")"
 
 "$S1_4X/integration/tools/run-integration-correctness.sh" \
@@ -90,6 +88,69 @@ Official timing으로 진행하려면 Python 네 boundary와 Scala/Haskell의 fr
 전체가 smoke에서 통과해야 한다. `smallest` CI input도 같은 성격의 연결 검사일 뿐
 `scorecard.v1.json`을 만들 수 없다.
 
+## Detached full-run supervisor
+
+`detached_full_run.py`는 full gate를 foreground에서 한 번만 직렬 실행하고, tracked
+launcher는 이 process를 transient user-systemd cgroup에 분리한다. Supervisor와 launcher는
+benchmark를 재시작하거나 부분 결과를 이어 붙이지 않는다.
+
+실행 전에는 다음 계약을 모두 만족해야 한다.
+
+- 현재 branch는 `experiment/s1-4x-numeric-parity*`이며 clean `HEAD`가 같은 origin remote
+  ref에 non-force push되어 있어야 한다.
+- run ID와 repository 밖의 새 absolute run root를 사용한다.
+- `JAVA_HOME`과 `S1_4X_UV_BIN`, `S1_4X_DOCKER_BIN`,
+  `S1_4X_DOCKER_SHA256`, `S1_4X_BENCHMARK_PYTHON_BIN`,
+  `S1_4X_SCALA_CLI_BIN`, `S1_4X_SCALAFIX_BIN`,
+  `S1_4X_SCALAFMT_ARCHIVE`, `S1_4X_SCALAFMT_BIN`,
+  `S1_4X_GHCUP_BIN`, `S1_4X_STACK_BIN`,
+  `S1_4X_AUTHORITATIVE_GHC_BIN`, `S1_4X_LATEST_GHC_BIN`,
+  `S1_4X_HLINT_BIN`, `S1_4X_STYLISH_BIN`,
+  `S1_4X_VECTOR_SOURCE_ARCHIVE`를 검증된 absolute path로 export한다.
+- Windows/WSL 종료나 재부팅을 견디는 daemon은 아니다. User manager session과 benchmark
+  host는 terminal marker가 생길 때까지 유지한다.
+
+실행 명령은 다음과 같다.
+
+```bash
+ROOT="$(git rev-parse --show-toplevel)"
+S1_4X="$ROOT/workspaces/decision-platform/research/s1-4x-numeric-parity"
+SUBJECT="$(git -C "$ROOT" rev-parse HEAD)"
+RUN_ID="s1-4x-full-$(date -u +%Y%m%dT%H%M%SZ)-${SUBJECT:0:8}"
+RUN_ROOT="$HOME/.cache/s1-4x/detached-runs/$RUN_ID"
+mkdir -p "$(dirname "$RUN_ROOT")"
+
+"$S1_4X/integration/tools/launch-detached-full-run.sh" \
+  --repo-root "$ROOT" \
+  --run-root "$RUN_ROOT" \
+  --run-id "$RUN_ID" \
+  --subject "$SUBJECT"
+```
+
+실행 순서는 native/OCI/regression aggregate gate, exact command manifest 봉인, 87개 rotated
+block, typed finalizer다. `run-plan.v1.json`과 sidecar, `events.jsonl`, 단계별
+`stdout.log`·`stderr.log`·`receipt.json`, checkpoint, correctness·benchmark raw artifact,
+portable final report, terminal evidence index와 SHA-256 manifest를 run root에 남긴다.
+
+상태 확인은 marker만 읽는 다음 명령으로 한다.
+
+```bash
+/usr/bin/python3 "$S1_4X/integration/detached_full_run.py" status \
+  --run-root "$RUN_ROOT"
+UNIT="$(jq -r '.unitName' "$RUN_ROOT/run-plan.v1.json")"
+systemctl --user show "$UNIT" \
+  -p ActiveState -p SubState -p Result -p ExecMainStatus -p NRestarts
+```
+
+Marker가 아직 없으면 첫 명령만으로 active service와 marker 없이 죽은 service를 구분할 수
+없으므로 exact unit 상태를 함께 확인한다.
+
+`terminal/PASS.json`은 87개 block과 portable report가 review 가능한 상태라는 뜻이다.
+이는 언어 순위, production migration 또는 `FINAL_PR_READY` 선언이 아니다. 종료 뒤 sealed
+artifact와 scorecard를 검토하고 report-only commit, final audit와 remote SHA 검증을 별도로
+마쳐야 한다. `terminal/FAIL.json` 또는 marker 없는 비정상 종료는 같은 run을 보충하지 않고
+새 run 승인 대상으로 남긴다.
+
 ## Full benchmark 계약
 
 Frozen plan `benchmarks/benchmark-plan.v1.json`은 다음 closure를 고정한다.
@@ -111,48 +172,26 @@ family raw와 receipt는 selector 안의 모든 case가 같은 path와 hash를 �
 ### 1. Command manifest 생성
 
 Command manifest는 shell-free argv, 실행 파일 절대 경로와 SHA-256, subject commit을
-고정한다. 생성 시 `benchmarkSubjectCommit`은 현재 `HEAD`와 같아야 한다.
+고정한다. 생성 시 `benchmarkSubjectCommit`은 현재 `HEAD`와 같아야 한다. Full run의
+authoritative argv는 supervisor가 sealed `run-plan.v1.json`의 runtime binding과
+correctness output에서 생성한다. Required executable 13개와 evidence 10개 중 하나라도
+생략한 수동 manifest는 full run 입력이 아니다.
 
 ```bash
-ORACLE="$S1_4X/oracle"
-PLAN="$S1_4X/benchmarks/benchmark-plan.v1.json"
-SUBJECT="$(git -C "$ROOT" rev-parse HEAD)"
-BENCH_PARENT="$(mktemp -d "$TMPDIR/s1-4x-benchmark.XXXXXX")"
-SCALA_BLOCK_WRAPPER="${SCALA_BLOCK_WRAPPER:?set the absolute Scala block wrapper path}"
-HASKELL_BLOCK_WRAPPER="${HASKELL_BLOCK_WRAPPER:?set the absolute Haskell block wrapper path}"
-
-"$UV_BIN" run --frozen --no-config --project "$ORACLE" \
-  python "$S1_4X/integration/prepare_benchmark_commands.py" \
-  --repo-root "$ROOT" \
-  --benchmark-subject-commit "$SUBJECT" \
-  --host-wrapper "$S1_4X/integration/tools/run-host-validator.sh" \
-  --python-wrapper "$S1_4X/integration/tools/run-python-benchmark-block.sh" \
-  --scala-wrapper "$SCALA_BLOCK_WRAPPER" \
-  --haskell-wrapper "$HASKELL_BLOCK_WRAPPER" \
-  --uv "$UV_BIN" \
-  --output "$BENCH_PARENT/commands.json" \
-  --sidecar "$BENCH_PARENT/commands.sha256"
+jq '.argv' "$RUN_ROOT/stages/command-sealing/receipt.json"
+(cd "$RUN_ROOT/benchmark" && sha256sum -c commands.sha256)
 ```
 
-생성기는 기존 manifest나 sidecar를 덮어쓰지 않는다. Runner는 manifest digest,
-wrapper byte hash와 `benchmarkSubjectCommit == candidateSourceCommit`을 다시 검사한다.
+직접 진단이 필요하면 이 receipt의 argv를 byte-identical하게 재사용한다. 생성기는 기존
+manifest나 sidecar를 덮어쓰지 않는다. Runner는 manifest digest, wrapper byte hash와
+`benchmarkSubjectCommit == candidateSourceCommit`을 다시 검사한다.
 
 ### 2. Rotated blocks 실행
 
-```bash
-COMMAND_SHA256="$(awk '{print $1}' "$BENCH_PARENT/commands.sha256")"
-
-"$UV_BIN" run --frozen --no-config --project "$ORACLE" \
-  python "$S1_4X/integration/run_rotated_blocks.py" run \
-  --plan "$PLAN" \
-  --commands "$BENCH_PARENT/commands.json" \
-  --commands-sha256 "$COMMAND_SHA256" \
-  --benchmark-subject-commit "$SUBJECT" \
-  --candidate-source-commit "$SUBJECT" \
-  --output-root "$BENCH_PARENT/run" \
-  --run-id "s1-4x-full-local" \
-  --repo-root "$ROOT"
-```
+Supervisor가 실행한 exact argv는
+`stages/frozen-timing/receipt.json`에 남는다. 이 argv에는 command manifest SHA-256과
+correctness stage가 만든 `large-fixtures` root 및 `large-fixture-receipt.json`이 모두
+포함되어야 한다. 누락한 수동 timing은 valid block을 만들 수 없다.
 
 각 block은 timing 전에 host validator와 timeout qualification을 통과해야 한다. Partial
 block, 임의 retry, `NOT_MEASURED`, selector 밖 case, 다른 executable 또는 stale input
@@ -216,16 +255,9 @@ benchmark result에서 별도로 계산한다.
 Finalizer는 87개 block completeness, native raw statistics, timeout 분류, input ledger,
 host identity, typed audit를 한 번 더 검증하고 네 portable report를 쓴다.
 
-```bash
-"$UV_BIN" run --frozen --no-config --project "$ORACLE" \
-  python "$S1_4X/integration/finalize_benchmark_run.py" \
-  --plan "$PLAN" \
-  --run-directory "$BENCH_PARENT/run/s1-4x-full-local" \
-  --large-fixture-root "$S1_4X_LARGE_FIXTURE_ROOT" \
-  --output-directory "$BENCH_PARENT/final-reports" \
-  --benchmark-subject-commit "$SUBJECT" \
-  --audit-ledger "$AUDIT_ROOT/final-candidate-audit.json"
-```
+Supervisor가 실행한 exact finalizer argv는
+`stages/typed-finalization/receipt.json`에 남는다. 이 argv는 run directory, large fixture
+root, exact subject와 correctness aggregate gate의 typed audit ledger를 함께 결속한다.
 
 생성되는 report:
 

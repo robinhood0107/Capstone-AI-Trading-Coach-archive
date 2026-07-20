@@ -16,13 +16,15 @@ Gate 0 governance와 Gate 1 neutral fixture freeze 뒤 Scala/Haskell candidate �
 - Scala profile A와 Haskell `baseline-o0-fasm`의 historical selection evidence
 - 6개 family, 89개 case, 3회 반복의 사전 동결 full benchmark plan
 
-2026-07-20 expedited completion은 완료된 historical evidence를 재사용하고, 변경된
-host validator의 focused test와 대표 3개 case의 candidate별 native sample만 새로
-실행한다. 결과와 생략 범위는
-[`reports/EXPEDITED_COMPLETION.md`](reports/EXPEDITED_COMPLETION.md)에 기록한다.
+현재 HEAD에는 correctness·OCI·regression부터 87개 timing block과 typed finalization까지
+한 번만 직렬 실행하는 detached full-run supervisor가 포함되어 있다. 실행 중 retry나
+partial resume는 하지 않으며, 종료 후 봉인된 full evidence를 사람이 검토하기 전에는
+공식 실험 순위나 `FINAL_PR_READY`를 주장하지 않는다.
 
-이 경로는 `sample-only`, `native-only`, `non-scoring`이다. full 89-case rotation,
-Docker/OCI 재검증, 언어 순위, production migration 판단을 대신하지 않는다.
+[`reports/EXPEDITED_COMPLETION.md`](reports/EXPEDITED_COMPLETION.md)는 commit
+`d91764ec7cafde75eb0cc5e140c9ff67046c5c88`의 historical 6/10 snapshot이다. 이
+snapshot의 `sample-only`, `native-only`, `non-scoring` 결과는 현재 HEAD의 full
+correctness·OCI·scorecard 또는 PR readiness를 뜻하지 않는다.
 
 ## 경계
 
