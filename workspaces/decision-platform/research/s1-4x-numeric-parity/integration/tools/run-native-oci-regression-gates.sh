@@ -353,11 +353,37 @@ run_result_command "$HASKELL/tools/select-proven-profile.sh" --check
 else
   # Import는 sealed ancestor closure만 복원한다. 현재 실패한 profile receipt를
   # selector가 다시 판정하되 compiler/static/qualification은 재실행하지 않는다.
+  # Qualification stdout에는 생성 당시 absolute workspace가 결속되므로 selector는
+  # manifest에 봉인된 원본 root에서 검증하고, 복사본은 final evidence closure에 남긴다.
   export S1_4X_LARGE_FIXTURE_ROOT="$RESULT_ROOT/large-fixtures"
+  SCALA_QUALIFICATION_SOURCE_ROOT="$(
+    /usr/bin/jq -er '
+      [.sourceTrees[]
+        | select(.sourceId == "scala-qualification")
+        | .sourceRoot] as $qualification
+      | [.sourceTrees[]
+          | select(.sourceId == "scala-jmh-smoke")
+          | .sourceRoot] as $jmh
+      | if (($qualification | length) == 1
+          and ($jmh | length) == 1
+          and $qualification[0] == $jmh[0])
+        then $qualification[0]
+        else error("scala source root mismatch")
+        end
+    ' "$SEALED_CONTINUATION_MANIFEST"
+  )"
+  [[ "$SCALA_QUALIFICATION_SOURCE_ROOT" == /* \
+    && -d "$SCALA_QUALIFICATION_SOURCE_ROOT" \
+    && ! -L "$SCALA_QUALIFICATION_SOURCE_ROOT" \
+    && "$(/usr/bin/readlink -f -- "$SCALA_QUALIFICATION_SOURCE_ROOT")" \
+      == "$SCALA_QUALIFICATION_SOURCE_ROOT" ]] || {
+    echo "sealed Scala qualification source root is unsafe" >&2
+    exit 66
+  }
   export S1_4X_SCALA_JVM_ALLOWLIST_RESULT=\
-"$RESULT_ROOT/scala/jmh-smoke/scala-jvm-argument-allowlist.v1.json"
+"$SCALA_QUALIFICATION_SOURCE_ROOT/jmh-smoke/scala-jvm-argument-allowlist.v1.json"
   export S1_4X_SCALA_QUALIFICATION_RESULT=\
-"$RESULT_ROOT/scala/qualification/scala-profile-qualification.v1.json"
+"$SCALA_QUALIFICATION_SOURCE_ROOT/qualification/scala-profile-qualification.v1.json"
   export S1_4X_SCALA_CORRECTNESS_ROOT="$RESULT_ROOT/scala/profiles"
   export S1_4X_SCALA_SELECTED_PROFILE_RESULT=\
 "$RESULT_ROOT/scala/scala-selected-profile-result.v1.json"
