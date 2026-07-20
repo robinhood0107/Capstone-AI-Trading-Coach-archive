@@ -195,3 +195,20 @@ def test_aggregate_reasserts_pinned_roots_before_publication() -> None:
     ) in source
     assert "exec {VECTOR_SOURCE_ARCHIVE_OWNER_FD}<&-" in source
     assert 'mkdir -p \\\n  "$RESULT_ROOT/scala"' not in source
+
+
+def test_aggregate_creates_haskell_profile_parent_before_correctness() -> None:
+    source = (
+        INTEGRATION / "tools/run-native-oci-regression-gates.sh"
+    ).read_text(encoding="utf-8")
+    parent_creation = (
+        'run_result_command mkdir -p "$RESULT_ROOT/haskell/profiles"'
+    )
+    baseline_correctness = (
+        'run_result_command "$HASKELL/tools/run-correctness-profile.sh" \\\n'
+        "  baseline-o0-fasm"
+    )
+
+    # Haskell workflow는 leaf만 원자 생성하므로 aggregate가 소유한 부모를 먼저 만든다.
+    assert parent_creation in source
+    assert source.index(parent_creation) < source.index(baseline_correctness)
