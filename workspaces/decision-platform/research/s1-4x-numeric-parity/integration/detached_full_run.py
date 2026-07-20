@@ -27,6 +27,11 @@ PLAN_SCHEMA = "s1.4x-detached-full-run-plan-v1"
 CANDIDATE_SCHEMA = "s1.4x-detached-full-run-candidate-v1"
 TERMINAL_SCHEMA = "s1.4x-detached-full-run-terminal-v1"
 EVIDENCE_INDEX_SCHEMA = "s1.4x-detached-full-run-evidence-index-v1"
+CONTINUATION_MANIFEST_SCHEMA = "s1.4x-continuation-source-manifest-v1"
+CONTINUATION_MANIFEST_NAME = "continuation-source-manifest.v1.json"
+FRESH_RETRY_POLICY = "NONE_FRESH_RUN_REQUIRED"
+REUSE_RETRY_POLICY = "SEALED_PREFIX_REUSE_NEW_RUN_ONLY"
+REUSE_MODE = "SEALED_PREFIX_REUSE_V1"
 COMMIT = re.compile(r"^[0-9a-f]{40}$")
 RUN_ID = re.compile(r"^[a-z0-9][a-z0-9-]{0,47}$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -534,6 +539,211 @@ def reserve_run_root(run_root: Path) -> RunPaths:
     return paths
 
 
+def _continuation_source_paths(
+    *,
+    failed_run_root: Path | None,
+    scala_qualification_source: Path | None,
+    haskell_static_source: Path | None,
+    haskell_profile_source: Path | None,
+) -> tuple[Path, Path, Path, Path] | None:
+    """재사용 source 네 개가 모두 명시됐을 때만 canonical directory로 수용한다."""
+
+    values = (
+        failed_run_root,
+        scala_qualification_source,
+        haskell_static_source,
+        haskell_profile_source,
+    )
+    if not any(value is not None for value in values):
+        return None
+    if not all(value is not None for value in values):
+        raise FullRunError("CONTINUATION_SOURCE_SET_INCOMPLETE")
+    labels = (
+        "FAILED_RUN_ROOT",
+        "SCALA_QUALIFICATION_SOURCE",
+        "HASKELL_STATIC_SOURCE",
+        "HASKELL_PROFILE_SOURCE",
+    )
+    return tuple(
+        _validate_absolute_directory(value, label=label)
+        for label, value in zip(labels, values, strict=True)
+        if value is not None
+    )  # type: ignore[return-value]
+
+
+def _validate_continuation_manifest(
+    path: Path,
+    *,
+    target_subject: str,
+    expected_parent_run_id: str | None = None,
+    expected_source_roots: Sequence[Path] | None = None,
+) -> dict[str, Any]:
+    """helper가 봉인한 source manifest의 subject와 최소 typed closure를 검증한다."""
+
+    manifest = _strict_json_load(path)
+    expected_keys = {
+        "schemaVersion",
+        "parentRunId",
+        "parentSubject",
+        "targetSubject",
+        "failedStage",
+        "currentDiffPaths",
+        "sourceCommits",
+        "sourceTrees",
+        "artifactCount",
+        "artifacts",
+        "status",
+    }
+    source_commits = manifest.get("sourceCommits") if isinstance(manifest, dict) else None
+    source_trees = manifest.get("sourceTrees") if isinstance(manifest, dict) else None
+    artifacts = manifest.get("artifacts") if isinstance(manifest, dict) else None
+    if (
+        not isinstance(manifest, dict)
+        or set(manifest) != expected_keys
+        or manifest.get("schemaVersion") != CONTINUATION_MANIFEST_SCHEMA
+        or RUN_ID.fullmatch(str(manifest.get("parentRunId"))) is None
+        or COMMIT.fullmatch(str(manifest.get("parentSubject"))) is None
+        or manifest.get("targetSubject") != target_subject
+        or manifest.get("failedStage") != "correctness-oci-regression"
+        or not isinstance(manifest.get("currentDiffPaths"), list)
+        or any(
+            not isinstance(item, str) or not item
+            for item in manifest.get("currentDiffPaths", [])
+        )
+        or not isinstance(source_commits, dict)
+        or set(source_commits) != {"scalaQualification", "haskellProfile"}
+        or any(COMMIT.fullmatch(str(value)) is None for value in source_commits.values())
+        or not isinstance(source_trees, list)
+        or not source_trees
+        or not isinstance(artifacts, list)
+        or not artifacts
+        or isinstance(manifest.get("artifactCount"), bool)
+        or not isinstance(manifest.get("artifactCount"), int)
+        or manifest.get("artifactCount") != len(artifacts)
+        or manifest.get("status") != "SEALED"
+    ):
+        raise FullRunError("CONTINUATION_SOURCE_MANIFEST_INVALID")
+    if (
+        expected_parent_run_id is not None
+        and manifest["parentRunId"] != expected_parent_run_id
+    ):
+        raise FullRunError("CONTINUATION_PARENT_RUN_MISMATCH")
+    source_roots: set[str] = set()
+    for source_tree in source_trees:
+        if (
+            not isinstance(source_tree, dict)
+            or not isinstance(source_tree.get("sourceId"), str)
+            or not source_tree["sourceId"]
+            or not isinstance(source_tree.get("sourceRoot"), str)
+            or not source_tree["sourceRoot"]
+            or SHA256.fullmatch(str(source_tree.get("treeSha256"))) is None
+            or isinstance(source_tree.get("artifactCount"), bool)
+            or not isinstance(source_tree.get("artifactCount"), int)
+            or source_tree["artifactCount"] < 0
+            or isinstance(source_tree.get("totalSizeBytes"), bool)
+            or not isinstance(source_tree.get("totalSizeBytes"), int)
+            or source_tree["totalSizeBytes"] < 0
+        ):
+            raise FullRunError("CONTINUATION_SOURCE_TREE_INVALID")
+        source_roots.add(source_tree["sourceRoot"])
+    for artifact in artifacts:
+        if (
+            not isinstance(artifact, dict)
+            or not isinstance(artifact.get("sourceId"), str)
+            or not artifact["sourceId"]
+            or not isinstance(artifact.get("destinationPath"), str)
+            or not artifact["destinationPath"]
+            or SHA256.fullmatch(str(artifact.get("sha256"))) is None
+            or isinstance(artifact.get("sizeBytes"), bool)
+            or not isinstance(artifact.get("sizeBytes"), int)
+            or artifact["sizeBytes"] < 0
+        ):
+            raise FullRunError("CONTINUATION_SOURCE_ARTIFACT_INVALID")
+    if expected_source_roots is not None and source_roots != {
+        str(path) for path in expected_source_roots
+    }:
+        raise FullRunError("CONTINUATION_SOURCE_ROOT_SET_MISMATCH")
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        raise FullRunError("CONTINUATION_SOURCE_MANIFEST_UNAVAILABLE") from exc
+    if raw != _canonical_bytes(manifest):
+        raise FullRunError("CONTINUATION_SOURCE_MANIFEST_NOT_CANONICAL")
+    return manifest
+
+
+def _snapshot_continuation_manifest(
+    *,
+    repo: Path,
+    home: Path,
+    paths: RunPaths,
+    subject: str,
+    sources: tuple[Path, Path, Path, Path],
+) -> tuple[dict[str, Any], dict[str, object]]:
+    """tracked helper로 source tree를 새 run control plane에 한 번만 봉인한다."""
+
+    helper = (
+        repo
+        / "workspaces/decision-platform/research/s1-4x-numeric-parity"
+        / "integration/continuation_prefix.py"
+    )
+    _snapshot_file(
+        helper,
+        label="continuationPrefixHelper",
+        executable=False,
+    )
+    output = paths.control / CONTINUATION_MANIFEST_NAME
+    failed_run, scala_qualification, haskell_static, haskell_profile = sources
+    command = [
+        "/usr/bin/python3",
+        str(helper),
+        "snapshot",
+        "--repo-root",
+        str(repo),
+        "--failed-run-root",
+        str(failed_run),
+        "--scala-qualification-source",
+        str(scala_qualification),
+        "--haskell-static-source",
+        str(haskell_static),
+        "--haskell-profile-source",
+        str(haskell_profile),
+        "--target-subject",
+        subject,
+        "--output",
+        str(output),
+    ]
+    completed = subprocess.run(
+        command,
+        cwd=repo,
+        env={**_git_environment(home), "PYTHONUNBUFFERED": "1"},
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        check=False,
+        timeout=300,
+    )
+    if completed.returncode != 0:
+        raise FullRunError(
+            f"CONTINUATION_PREFIX_SNAPSHOT_FAILED:{completed.returncode}"
+        )
+    if completed.stderr:
+        raise FullRunError("CONTINUATION_PREFIX_SNAPSHOT_STDERR_NOT_EMPTY")
+    snapshot = _snapshot_file(
+        output,
+        label="continuationSourceManifest",
+        executable=False,
+    )
+    if completed.stdout != output.read_bytes():
+        raise FullRunError("CONTINUATION_PREFIX_SNAPSHOT_RECEIPT_MISMATCH")
+    manifest = _validate_continuation_manifest(
+        output,
+        target_subject=subject,
+        expected_parent_run_id=failed_run.name,
+        expected_source_roots=sources,
+    )
+    return manifest, snapshot
+
+
 def prepare_run(
     *,
     repo_root: Path,
@@ -541,6 +751,10 @@ def prepare_run(
     run_id: str,
     subject: str,
     overall_timeout_seconds: int,
+    failed_run_root: Path | None = None,
+    scala_qualification_source: Path | None = None,
+    haskell_static_source: Path | None = None,
+    haskell_profile_source: Path | None = None,
 ) -> dict[str, object]:
     """clean remote-backed HEAD와 runtime identity를 local run plan에 봉인한다."""
 
@@ -548,6 +762,12 @@ def prepare_run(
         raise FullRunError("RUN_ID_INVALID")
     if not 36_000 <= overall_timeout_seconds <= 61_200:
         raise FullRunError("OVERALL_TIMEOUT_INVALID")
+    continuation_sources = _continuation_source_paths(
+        failed_run_root=failed_run_root,
+        scala_qualification_source=scala_qualification_source,
+        haskell_static_source=haskell_static_source,
+        haskell_profile_source=haskell_profile_source,
+    )
     repo = _validate_absolute_directory(repo_root, label="REPOSITORY")
     home = _validate_absolute_directory(Path.home(), label="HOME")
     if run_root == repo or run_root.is_relative_to(repo):
@@ -589,6 +809,27 @@ def prepare_run(
         or control_snapshot["sizeBytes"] != source_snapshot["sizeBytes"]
     ):
         raise FullRunError("CONTROL_SUPERVISOR_COPY_INVALID")
+    evidence_reuse: dict[str, object] | None = None
+    if continuation_sources is not None:
+        manifest, manifest_snapshot = _snapshot_continuation_manifest(
+            repo=repo,
+            home=home,
+            paths=paths,
+            subject=subject,
+            sources=continuation_sources,
+        )
+        evidence_reuse = {
+            "mode": REUSE_MODE,
+            "parentRunId": manifest["parentRunId"],
+            "parentSubject": manifest["parentSubject"],
+            "targetSubject": subject,
+            "sourceCommits": manifest["sourceCommits"],
+            "controlManifest": {
+                "relativePath": f"control/{CONTINUATION_MANIFEST_NAME}",
+                "sha256": manifest_snapshot["sha256"],
+                "sizeBytes": manifest_snapshot["sizeBytes"],
+            },
+        }
     unit_name = f"s1-4x-full-{run_id}.service"
     plan: dict[str, object] = {
         "schemaVersion": PLAN_SCHEMA,
@@ -614,8 +855,12 @@ def prepare_run(
         "scalaBaseImage": SCALA_BASE_IMAGE,
         "haskellBaseImage": HASKELL_BASE_IMAGE,
         "stageOrder": list(STAGE_ORDER),
-        "retryPolicy": "NONE_FRESH_RUN_REQUIRED",
+        "retryPolicy": (
+            REUSE_RETRY_POLICY if evidence_reuse is not None else FRESH_RETRY_POLICY
+        ),
     }
+    if evidence_reuse is not None:
+        plan["evidenceReuse"] = evidence_reuse
     payload = _canonical_bytes(plan)
     digest = hashlib.sha256(payload).hexdigest()
     _exclusive_bytes(paths.plan, payload)
@@ -623,7 +868,7 @@ def prepare_run(
         paths.plan_sidecar,
         f"{digest}  {paths.plan.name}\n".encode("ascii"),
     )
-    return {
+    result: dict[str, object] = {
         "schemaVersion": "s1.4x-detached-full-run-preparation-v1",
         "runId": run_id,
         "unitName": unit_name,
@@ -632,6 +877,54 @@ def prepare_run(
         "planSha256": digest,
         "status": "DETACHED_RUNNER_PREPARED",
     }
+    if evidence_reuse is not None:
+        result["evidenceReuseMode"] = REUSE_MODE
+        result["parentRunId"] = evidence_reuse["parentRunId"]
+    return result
+
+
+def _validate_evidence_reuse_plan(
+    plan: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """plan의 fresh/reuse 실행 정책과 manifest binding을 exact shape로 검증한다."""
+
+    if "evidenceReuse" not in plan:
+        if plan.get("retryPolicy") != FRESH_RETRY_POLICY:
+            raise FullRunError("RUN_PLAN_EXECUTION_POLICY_INVALID")
+        return None
+    value = plan.get("evidenceReuse")
+    expected = {
+        "mode",
+        "parentRunId",
+        "parentSubject",
+        "targetSubject",
+        "sourceCommits",
+        "controlManifest",
+    }
+    source_commits = value.get("sourceCommits") if isinstance(value, dict) else None
+    control_manifest = value.get("controlManifest") if isinstance(value, dict) else None
+    if (
+        not isinstance(value, dict)
+        or set(value) != expected
+        or value.get("mode") != REUSE_MODE
+        or RUN_ID.fullmatch(str(value.get("parentRunId"))) is None
+        or COMMIT.fullmatch(str(value.get("parentSubject"))) is None
+        or value.get("targetSubject") != plan.get("benchmarkSubjectCommit")
+        or not isinstance(source_commits, dict)
+        or set(source_commits) != {"scalaQualification", "haskellProfile"}
+        or any(COMMIT.fullmatch(str(commit)) is None for commit in source_commits.values())
+        or not isinstance(control_manifest, dict)
+        or set(control_manifest) != {"relativePath", "sha256", "sizeBytes"}
+        or control_manifest.get("relativePath")
+        != f"control/{CONTINUATION_MANIFEST_NAME}"
+        or SHA256.fullmatch(str(control_manifest.get("sha256"))) is None
+        or isinstance(control_manifest.get("sizeBytes"), bool)
+        or not isinstance(control_manifest.get("sizeBytes"), int)
+        or control_manifest["sizeBytes"] <= 0
+        or plan.get("retryPolicy") != REUSE_RETRY_POLICY
+    ):
+        raise FullRunError("RUN_PLAN_EVIDENCE_REUSE_INVALID")
+    return value
 
 
 def _load_run_plan(path: Path, *, strict: bool) -> dict[str, Any]:
@@ -667,6 +960,8 @@ def _load_run_plan(path: Path, *, strict: bool) -> dict[str, Any]:
             "stageOrder",
             "retryPolicy",
         }
+        if "evidenceReuse" in value:
+            expected.add("evidenceReuse")
         if set(value) != expected:
             raise FullRunError("RUN_PLAN_FIELDS_MISSING")
         if (
@@ -680,9 +975,9 @@ def _load_run_plan(path: Path, *, strict: bool) -> dict[str, Any]:
             or value["scalaBaseImage"] != SCALA_BASE_IMAGE
             or value["haskellBaseImage"] != HASKELL_BASE_IMAGE
             or value["stageOrder"] != list(STAGE_ORDER)
-            or value["retryPolicy"] != "NONE_FRESH_RUN_REQUIRED"
         ):
             raise FullRunError("RUN_PLAN_EXECUTION_POLICY_INVALID")
+        _validate_evidence_reuse_plan(value)
     return value
 
 
@@ -711,6 +1006,43 @@ def _validate_control_supervisor(
         or current["sizeBytes"] != value["sizeBytes"]
     ):
         raise FullRunError("CONTROL_SUPERVISOR_DRIFT")
+
+
+def _validate_evidence_reuse(
+    paths: RunPaths,
+    plan: Mapping[str, Any],
+) -> Path | None:
+    """plan에 봉인된 continuation manifest가 실행 직전에도 동일한지 재검증한다."""
+
+    value = _validate_evidence_reuse_plan(plan)
+    manifest_path = paths.control / CONTINUATION_MANIFEST_NAME
+    if value is None:
+        if manifest_path.exists() or manifest_path.is_symlink():
+            raise FullRunError("UNDECLARED_CONTINUATION_MANIFEST")
+        return None
+    control = value["controlManifest"]
+    current = _snapshot_file(
+        manifest_path,
+        label="continuationSourceManifest",
+        executable=False,
+    )
+    if (
+        current["sha256"] != control["sha256"]
+        or current["sizeBytes"] != control["sizeBytes"]
+    ):
+        raise FullRunError("CONTINUATION_CONTROL_MANIFEST_DRIFT")
+    manifest = _validate_continuation_manifest(
+        manifest_path,
+        target_subject=str(plan["benchmarkSubjectCommit"]),
+        expected_parent_run_id=str(value["parentRunId"]),
+    )
+    if (
+        manifest["parentSubject"] != value["parentSubject"]
+        or manifest["targetSubject"] != value["targetSubject"]
+        or manifest["sourceCommits"] != value["sourceCommits"]
+    ):
+        raise FullRunError("CONTINUATION_CONTROL_MANIFEST_PLAN_MISMATCH")
+    return manifest_path
 
 
 def _validate_plan_sidecar(paths: RunPaths) -> None:
@@ -826,6 +1158,10 @@ def _execution_environment(plan: Mapping[str, Any]) -> dict[str, str]:
         cache / "coursier",
     ):
         directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if _validate_evidence_reuse_plan(plan) is not None:
+        # 사용자가 이번 sealed continuation에 한해 ambient container 수와
+        # 외부 Codex CPU 비율을 timing eligibility에서 제외하도록 승인했다.
+        environment["S1_4X_IGNORE_AMBIENT_HOST_ACTIVITY"] = "1"
     return environment
 
 
@@ -923,13 +1259,25 @@ def build_stage_commands(
     for role, path in evidence.items():
         sealing.extend(["--runtime-evidence", f"{role}={path}"])
     sealing.extend(["--output", str(commands), "--sidecar", str(sidecar)])
+    correctness_argv = [
+        str(integration / "tools/run-native-oci-regression-gates.sh"),
+        str(correctness),
+    ]
+    evidence_reuse = _validate_evidence_reuse_plan(plan)
+    if evidence_reuse is not None:
+        correctness_argv.extend(
+            [
+                "--sealed-continuation-manifest",
+                str(
+                    run_root
+                    / str(evidence_reuse["controlManifest"]["relativePath"])
+                ),
+            ]
+        )
     return [
         StageCommand(
             "correctness-oci-regression",
-            (
-                str(integration / "tools/run-native-oci-regression-gates.sh"),
-                str(correctness),
-            ),
+            tuple(correctness_argv),
         ),
         StageCommand("command-sealing", tuple(sealing)),
         StageCommand(
@@ -1645,6 +1993,7 @@ def execute_run(config: Path) -> int:
         if Path(plan["runRoot"]) != paths.root:
             raise FullRunError("RUN_PLAN_ROOT_MISMATCH")
         _validate_control_supervisor(paths, plan)
+        _validate_evidence_reuse(paths, plan)
         lock_descriptor = _acquire_run_lock(plan)
         home = _validate_absolute_directory(
             Path(plan["home"]),
@@ -1761,6 +2110,7 @@ def _selected_evidence_files(paths: RunPaths) -> list[Path]:
         paths.plan,
         paths.plan_sidecar,
         paths.events,
+        paths.control / CONTINUATION_MANIFEST_NAME,
         paths.correctness / "correctness-run-manifest.v1.json",
         paths.correctness / "large-fixture-receipt.json",
         paths.correctness_audit / "final-candidate-audit.json",
@@ -1848,6 +2198,7 @@ def service_finalize(
     if Path(plan["runRoot"]) != paths.root:
         raise FullRunError("RUN_PLAN_ROOT_MISMATCH")
     _validate_control_supervisor(paths, plan)
+    _validate_evidence_reuse(paths, plan)
     candidate_pass = paths.candidate / "PASS.json"
     candidate_fail = paths.candidate / "FAIL.json"
     candidate_xor = candidate_pass.exists() ^ candidate_fail.exists()
@@ -1968,6 +2319,10 @@ def _parser() -> argparse.ArgumentParser:
     prepare.add_argument("--run-root", type=Path, required=True)
     prepare.add_argument("--run-id", required=True)
     prepare.add_argument("--benchmark-subject-commit", required=True)
+    prepare.add_argument("--failed-run-root", type=Path)
+    prepare.add_argument("--scala-qualification-source", type=Path)
+    prepare.add_argument("--haskell-static-source", type=Path)
+    prepare.add_argument("--haskell-profile-source", type=Path)
     prepare.add_argument(
         "--overall-timeout-seconds",
         type=int,
@@ -1995,6 +2350,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 run_id=arguments.run_id,
                 subject=arguments.benchmark_subject_commit,
                 overall_timeout_seconds=arguments.overall_timeout_seconds,
+                failed_run_root=arguments.failed_run_root,
+                scala_qualification_source=arguments.scala_qualification_source,
+                haskell_static_source=arguments.haskell_static_source,
+                haskell_profile_source=arguments.haskell_profile_source,
             )
         elif arguments.command == "run":
             return execute_run(arguments.config)

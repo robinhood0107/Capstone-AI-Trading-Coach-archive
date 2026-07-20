@@ -22,6 +22,8 @@ from oracle_common import OracleContractError, atomic_write_json, sha256_bytes
 SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 SELF_FD_PATTERN = re.compile(r"^/proc/self/fd/([3-9]|[1-9][0-9]+)$")
 DOCKER_PS_TIMEOUT_SECONDS = 10
+AMBIENT_ACTIVITY_OVERRIDE_ENV = "S1_4X_IGNORE_AMBIENT_HOST_ACTIVITY"
+AMBIENT_ACTIVITY_OVERRIDE_REASON = "USER_APPROVED_OBSERVE_ONLY"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -41,6 +43,14 @@ class ProcessSnapshot:
 
     monotonic_seconds: float
     processes: Mapping[int, ProcessSample]
+
+
+@dataclasses.dataclass(frozen=True)
+class RunningContainer:
+    """Docker 실행 컨테이너의 ID와 host-validity 분류에 필요한 라벨만 보존한다."""
+
+    container_id: str
+    mcp_server_name: str | None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -75,7 +85,7 @@ class EnvironmentAdapter(Protocol):
 
     def load1(self) -> float: ...
 
-    def running_containers(self) -> list[str]: ...
+    def running_containers(self) -> list[RunningContainer]: ...
 
     def process_snapshot(self) -> ProcessSnapshot: ...
 
@@ -225,10 +235,15 @@ class LocalEnvironmentAdapter:
     def load1(self) -> float:
         return os.getloadavg()[0]
 
-    def running_containers(self) -> list[str]:
+    def running_containers(self) -> list[RunningContainer]:
         try:
             completed = subprocess.run(
-                [self._docker_command, "ps", "-q"],
+                [
+                    self._docker_command,
+                    "ps",
+                    "--format",
+                    '{{.ID}}\\t{{.Label "io.modelcontextprotocol.server.name"}}',
+                ],
                 check=False,
                 capture_output=True,
                 text=True,
@@ -243,7 +258,20 @@ class LocalEnvironmentAdapter:
             raise OracleContractError(
                 f"docker ps failed with exit {completed.returncode}"
             )
-        return [line for line in completed.stdout.splitlines() if line]
+        containers: list[RunningContainer] = []
+        for line in completed.stdout.splitlines():
+            if not line:
+                continue
+            container_id, separator, mcp_server_name = line.partition("\t")
+            if not container_id or not separator:
+                raise OracleContractError("docker ps returned malformed container row")
+            containers.append(
+                RunningContainer(
+                    container_id=container_id,
+                    mcp_server_name=mcp_server_name or None,
+                )
+            )
+        return containers
 
     def process_snapshot(self) -> ProcessSnapshot:
         processes: dict[int, ProcessSample] = {}
@@ -477,6 +505,7 @@ def _sample_running_containers(
     adapter: EnvironmentAdapter,
     *,
     policy: EnvironmentPolicy,
+    ignore_limit: bool = False,
 ) -> dict[str, Any]:
     """Docker 조회 실패와 일시적 초과를 기존 quiet-window 안에서만 재시도한다."""
 
@@ -490,12 +519,26 @@ def _sample_running_containers(
             actual: int | str = f"UNAVAILABLE:{type(exc).__name__}"
             attempt_status = "UNAVAILABLE"
             container_ids: list[str] = []
+            excluded_container_ids: list[str] = []
+            total_count: int | str = actual
         else:
-            actual = len(containers)
-            container_ids = containers
+            excluded = [
+                container
+                for container in containers
+                if container.mcp_server_name is not None
+            ]
+            eligible = [
+                container
+                for container in containers
+                if container.mcp_server_name is None
+            ]
+            actual = len(eligible)
+            total_count = len(containers)
+            container_ids = [container.container_id for container in eligible]
+            excluded_container_ids = [container.container_id for container in excluded]
             attempt_status = (
                 "PASS"
-                if actual <= policy.max_running_containers
+                if ignore_limit or actual <= policy.max_running_containers
                 else "TOO_MANY"
             )
         attempts.append(
@@ -503,6 +546,18 @@ def _sample_running_containers(
                 "elapsedSeconds": adapter.monotonic() - started,
                 "actual": actual,
                 "containerIds": container_ids,
+                "totalCount": total_count,
+                "excludedContainerCount": len(excluded_container_ids),
+                "excludedContainerIds": excluded_container_ids,
+                "exclusionReason": (
+                    "MCP_INFRASTRUCTURE_LABEL:io.modelcontextprotocol.server.name"
+                    if excluded_container_ids
+                    else None
+                ),
+                "limitEnforced": not ignore_limit,
+                "overrideReason": (
+                    AMBIENT_ACTIVITY_OVERRIDE_REASON if ignore_limit else None
+                ),
                 "status": attempt_status,
             }
         )
@@ -529,6 +584,7 @@ def validate_environment(
     *,
     policy: EnvironmentPolicy,
     adapter: EnvironmentAdapter | None = None,
+    ignore_ambient_host_activity: bool = False,
 ) -> dict[str, Any]:
     """모든 host check를 끝까지 수집해 typed aggregate result를 반환한다."""
 
@@ -609,7 +665,11 @@ def validate_environment(
             passed=False,
         )
 
-    container_result = _sample_running_containers(source, policy=policy)
+    container_result = _sample_running_containers(
+        source,
+        policy=policy,
+        ignore_limit=ignore_ambient_host_activity,
+    )
     _record(
         checks,
         check_id="docker.running-containers",
@@ -623,6 +683,12 @@ def validate_environment(
         evidence={
             "attempts": container_result["attempts"],
             "elapsedSeconds": container_result["elapsedSeconds"],
+            "limitEnforced": not ignore_ambient_host_activity,
+            "overrideReason": (
+                AMBIENT_ACTIVITY_OVERRIDE_REASON
+                if ignore_ambient_host_activity
+                else None
+            ),
         },
     )
 
@@ -649,17 +715,7 @@ def validate_environment(
         },
     )
 
-    try:
-        first_process_snapshot = source.process_snapshot()
-        source.sleep(policy.external_process_sample_seconds)
-        second_process_snapshot = source.process_snapshot()
-        process_result = _process_cpu_result(
-            first_process_snapshot,
-            second_process_snapshot,
-            root_pid=policy.allowed_process_root_pid,
-            clock_ticks_per_second=source.clock_ticks_per_second(),
-            threshold_percent=policy.max_external_process_cpu_percent,
-        )
+    if ignore_ambient_host_activity:
         _record(
             checks,
             check_id="process.external-cpu",
@@ -670,23 +726,58 @@ def validate_environment(
                     f"<{policy.max_external_process_cpu_percent}"
                 ),
                 "pidReuse": 0,
+                "enforced": False,
             },
             actual={
-                "externalCount": len(process_result.get("external", [])),
-                "pidReuseCount": len(process_result.get("pidReuse", [])),
-                "rootIdentityStable": process_result.get("rootIdentityStable"),
+                "externalCount": "NOT_MEASURED",
+                "pidReuseCount": "NOT_MEASURED",
+                "rootIdentityStable": "NOT_MEASURED",
             },
-            passed=bool(process_result["passed"]),
-            evidence=process_result,
+            passed=True,
+            evidence={
+                "limitEnforced": False,
+                "overrideReason": AMBIENT_ACTIVITY_OVERRIDE_REASON,
+            },
         )
-    except (OSError, OracleContractError, ValueError) as exc:
-        _record(
-            checks,
-            check_id="process.external-cpu",
-            expected="valid two-snapshot process audit",
-            actual=f"UNAVAILABLE:{type(exc).__name__}",
-            passed=False,
-        )
+    else:
+        try:
+            first_process_snapshot = source.process_snapshot()
+            source.sleep(policy.external_process_sample_seconds)
+            second_process_snapshot = source.process_snapshot()
+            process_result = _process_cpu_result(
+                first_process_snapshot,
+                second_process_snapshot,
+                root_pid=policy.allowed_process_root_pid,
+                clock_ticks_per_second=source.clock_ticks_per_second(),
+                threshold_percent=policy.max_external_process_cpu_percent,
+            )
+            _record(
+                checks,
+                check_id="process.external-cpu",
+                expected={
+                    "rootPid": policy.allowed_process_root_pid,
+                    "sampleSeconds": policy.external_process_sample_seconds,
+                    "externalCpuPercent": (
+                        f"<{policy.max_external_process_cpu_percent}"
+                    ),
+                    "pidReuse": 0,
+                },
+                actual={
+                    "externalCount": len(process_result.get("external", [])),
+                    "pidReuseCount": len(process_result.get("pidReuse", [])),
+                    "rootIdentityStable": process_result.get("rootIdentityStable"),
+                },
+                passed=bool(process_result["passed"]),
+                evidence=process_result,
+            )
+        except (OSError, OracleContractError, ValueError) as exc:
+            _record(
+                checks,
+                check_id="process.external-cpu",
+                expected="valid two-snapshot process audit",
+                actual=f"UNAVAILABLE:{type(exc).__name__}",
+                passed=False,
+            )
 
     try:
         metadata = source.metadata()
@@ -811,6 +902,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             arguments.home.resolve(),
             policy=policy,
             adapter=adapter,
+            ignore_ambient_host_activity=(
+                os.environ.get(AMBIENT_ACTIVITY_OVERRIDE_ENV) == "1"
+            ),
         )
     except OracleContractError as exc:
         report = {

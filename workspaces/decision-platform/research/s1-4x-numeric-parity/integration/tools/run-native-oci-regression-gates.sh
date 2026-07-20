@@ -11,7 +11,16 @@ INTEGRATION="$S1_4X/integration"
 PLAN="$S1_4X/benchmarks/benchmark-plan.v1.json"
 POLICY="$S1_4X/contract/scala-source-policy.v1.json"
 CACHE_ROOT="${S1_4X_CACHE_ROOT:-$HOME/.cache/s1-4x}"
-RESULT_ROOT="${1:?usage: run-native-oci-regression-gates.sh ABSOLUTE_RESULT_ROOT}"
+RESULT_ROOT="${1:?usage: run-native-oci-regression-gates.sh ABSOLUTE_RESULT_ROOT [--sealed-continuation-manifest ABSOLUTE_MANIFEST]}"
+shift
+SEALED_CONTINUATION_MANIFEST=""
+if (($# == 2)) && [[ "$1" == "--sealed-continuation-manifest" ]]; then
+  SEALED_CONTINUATION_MANIFEST="$2"
+  shift 2
+elif (($# != 0)); then
+  echo "usage: run-native-oci-regression-gates.sh ABSOLUTE_RESULT_ROOT [--sealed-continuation-manifest ABSOLUTE_MANIFEST]" >&2
+  exit 64
+fi
 FINAL_AUDIT_ROOT="${RESULT_ROOT}-final-audit"
 UV_BIN="${S1_4X_UV_BIN:?set the verified absolute uv executable path}"
 DOCKER_BIN="${S1_4X_DOCKER_BIN:?set the verified absolute Docker executable path}"
@@ -25,6 +34,14 @@ case "$RESULT_ROOT" in
   /*) ;;
   *) echo "result root must be absolute" >&2; exit 64 ;;
 esac
+if [[ -n "$SEALED_CONTINUATION_MANIFEST" ]]; then
+  [[ "$SEALED_CONTINUATION_MANIFEST" == /* \
+    && -f "$SEALED_CONTINUATION_MANIFEST" \
+    && ! -L "$SEALED_CONTINUATION_MANIFEST" ]] || {
+    echo "sealed continuation manifest must be an absolute regular non-symlink" >&2
+    exit 64
+  }
+fi
 [[ "$CACHE_ROOT" == /* && ! -L "$CACHE_ROOT" ]] || {
   echo "cache root must be an absolute non-symlink path" >&2
   exit 64
@@ -92,13 +109,6 @@ s1_4x_pin_fresh_directory \
 FINAL_AUDIT_BASENAME="${RESULT_ROOT_BASENAME}-final-audit"
 s1_4x_assert_fresh_child_absent \
   "$RESULT_PARENT_OWNER_FD" "$FINAL_AUDIT_BASENAME"
-(
-  exec {RESULT_PARENT_OWNER_FD}<&-
-  for result_child in scala haskell coverage oci; do
-    mkdir -- "/proc/self/fd/$RESULT_ROOT_OWNER_FD/$result_child"
-  done
-)
-s1_4x_assert_pinned_directory "$RESULT_ROOT" "$RESULT_ROOT_OWNER_FD"
 
 run_result_command() {
   s1_4x_guarded_command \
@@ -137,10 +147,45 @@ run_result_command_keep_vector() {
     -- "$@"
 }
 
+if [[ -z "$SEALED_CONTINUATION_MANIFEST" ]]; then
+  (
+    exec {RESULT_PARENT_OWNER_FD}<&-
+    for result_child in scala haskell coverage oci; do
+      mkdir -- "/proc/self/fd/$RESULT_ROOT_OWNER_FD/$result_child"
+    done
+  )
+else
+  run_result_command "$UV_BIN" run --frozen --no-config --project "$ORACLE" \
+    python "$INTEGRATION/continuation_prefix.py" import \
+    --repo-root "$ROOT" \
+    --manifest "$SEALED_CONTINUATION_MANIFEST" \
+    --output-root "$RESULT_ROOT"
+  run_result_command "$UV_BIN" run --frozen --project "$ORACLE" \
+    python "$ORACLE/validate_contract.py" --check-all \
+    --output "$RESULT_ROOT/contract-validation.json"
+  run_result_command_quiet jq -e '
+    .status == "PASS" and
+    .functionCount == 20 and
+    .errorCodeCount == 32 and
+    .referenceSourceCount > 0 and
+    .referenceSourceTreeCount == 4
+  ' "$RESULT_ROOT/contract-validation.json"
+  run_result_command_quiet jq -e '
+    .schemaVersion == "s1.4x-large-fixture-materialization-receipt-v1" and
+    .status == "PASS" and
+    .materializedRootPathId == "S1_4X_LARGE_FIXTURE_ROOT" and
+    (.manifestEntries | length) == 4 and
+    (.payloadEntries | length) == 4
+  ' "$RESULT_ROOT/large-fixture-receipt.json"
+  run_result_command mkdir -- "$RESULT_ROOT/coverage" "$RESULT_ROOT/oci"
+fi
+s1_4x_assert_pinned_directory "$RESULT_ROOT" "$RESULT_ROOT_OWNER_FD"
+
 # Guard의 pre/post identity 검사는 지속된 route substitution을 차단한다.
 # 단일 producer 내부의 swap-and-restore race는 raw closure를 다시 pin/walk하는
 # strict final assembler가 accepted evidence에 들어오지 못하게 해야 한다.
 
+if [[ -z "$SEALED_CONTINUATION_MANIFEST" ]]; then
 run_result_command "$UV_BIN" lock --project "$ORACLE" --check
 run_result_command "$UV_BIN" sync --frozen --all-groups --project "$ORACLE"
 run_result_command "$UV_BIN" run --frozen --project "$ORACLE" \
@@ -305,6 +350,37 @@ export S1_4X_HASKELL_OPTIMIZED_CORRECTNESS=\
 export S1_4X_HASKELL_QUALIFICATION_ARTIFACT=\
 "$RESULT_ROOT/haskell/qualification/qualification-artifact.v1.json"
 run_result_command "$HASKELL/tools/select-proven-profile.sh" --check
+else
+  # Import는 sealed ancestor closure만 복원한다. 현재 실패한 profile receipt를
+  # selector가 다시 판정하되 compiler/static/qualification은 재실행하지 않는다.
+  export S1_4X_LARGE_FIXTURE_ROOT="$RESULT_ROOT/large-fixtures"
+  export S1_4X_SCALA_JVM_ALLOWLIST_RESULT=\
+"$RESULT_ROOT/scala/jmh-smoke/scala-jvm-argument-allowlist.v1.json"
+  export S1_4X_SCALA_QUALIFICATION_RESULT=\
+"$RESULT_ROOT/scala/qualification/scala-profile-qualification.v1.json"
+  export S1_4X_SCALA_CORRECTNESS_ROOT="$RESULT_ROOT/scala/profiles"
+  export S1_4X_SCALA_SELECTED_PROFILE_RESULT=\
+"$RESULT_ROOT/scala/scala-selected-profile-result.v1.json"
+  run_result_command "$SCALA/tools/select-proven-profile.sh" \
+    --plan "$PLAN" \
+    --qualification "$S1_4X_SCALA_QUALIFICATION_RESULT" \
+    --correctness-root "$S1_4X_SCALA_CORRECTNESS_ROOT" \
+    --output "$S1_4X_SCALA_SELECTED_PROFILE_RESULT"
+  run_result_command "$SCALA/tools/select-proven-profile.sh" \
+    --check \
+    --plan "$PLAN" \
+    --qualification "$S1_4X_SCALA_QUALIFICATION_RESULT" \
+    --correctness-root "$S1_4X_SCALA_CORRECTNESS_ROOT" \
+    --output "$S1_4X_SCALA_SELECTED_PROFILE_RESULT"
+
+  export S1_4X_HASKELL_BASELINE_CORRECTNESS=\
+"$RESULT_ROOT/haskell/profiles/baseline-o0-fasm/correctness-receipt.v1.json"
+  export S1_4X_HASKELL_OPTIMIZED_CORRECTNESS=\
+"$RESULT_ROOT/haskell/profiles/optimized-o2-fasm/correctness-receipt.v1.json"
+  export S1_4X_HASKELL_QUALIFICATION_ARTIFACT=\
+"$RESULT_ROOT/haskell/qualification/qualification-artifact.v1.json"
+  run_result_command "$HASKELL/tools/select-proven-profile.sh" --check
+fi
 run_result_command "$HASKELL/tools/run-ghc-9.14.1-compatibility.sh" \
   --stack-yaml "$HASKELL/stack-ghc-9.14.1.yaml" \
   --full-matrix \

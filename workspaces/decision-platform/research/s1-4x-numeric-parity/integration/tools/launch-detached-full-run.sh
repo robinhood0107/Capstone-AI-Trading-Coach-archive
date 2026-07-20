@@ -6,9 +6,13 @@ ROOT=""
 RUN_ROOT=""
 RUN_ID=""
 SUBJECT=""
+FAILED_RUN_ROOT=""
+SCALA_QUALIFICATION_SOURCE=""
+HASKELL_STATIC_SOURCE=""
+HASKELL_PROFILE_SOURCE=""
 
 usage() {
-  printf 'usage: %s --repo-root ABSOLUTE_REPO --run-root ABSOLUTE_NEW_ROOT --run-id ID --subject COMMIT\n' "$0" >&2
+  printf 'usage: %s --repo-root ABSOLUTE_REPO --run-root ABSOLUTE_NEW_ROOT --run-id ID --subject COMMIT [--failed-run-root ABS --scala-qualification-source ABS --haskell-static-source ABS --haskell-profile-source ABS]\n' "$0" >&2
   exit 64
 }
 
@@ -34,6 +38,26 @@ while (($# > 0)); do
       SUBJECT="$2"
       shift 2
       ;;
+    --failed-run-root)
+      (($# >= 2)) || usage
+      FAILED_RUN_ROOT="$2"
+      shift 2
+      ;;
+    --scala-qualification-source)
+      (($# >= 2)) || usage
+      SCALA_QUALIFICATION_SOURCE="$2"
+      shift 2
+      ;;
+    --haskell-static-source)
+      (($# >= 2)) || usage
+      HASKELL_STATIC_SOURCE="$2"
+      shift 2
+      ;;
+    --haskell-profile-source)
+      (($# >= 2)) || usage
+      HASKELL_PROFILE_SOURCE="$2"
+      shift 2
+      ;;
     *)
       usage
       ;;
@@ -44,12 +68,34 @@ done
 [[ "$RUN_ROOT" == /* && ! -e "$RUN_ROOT" && ! -L "$RUN_ROOT" ]] || usage
 [[ "$RUN_ID" =~ ^[a-z0-9][a-z0-9-]{0,47}$ ]] || usage
 [[ "$SUBJECT" =~ ^[0-9a-f]{40}$ ]] || usage
-case "$ROOT$RUN_ROOT" in
+CONTINUATION_SOURCE_COUNT=0
+for source in \
+  "$FAILED_RUN_ROOT" \
+  "$SCALA_QUALIFICATION_SOURCE" \
+  "$HASKELL_STATIC_SOURCE" \
+  "$HASKELL_PROFILE_SOURCE"
+do
+  [[ -z "$source" ]] || ((CONTINUATION_SOURCE_COUNT += 1))
+done
+[[ "$CONTINUATION_SOURCE_COUNT" == 0 || "$CONTINUATION_SOURCE_COUNT" == 4 ]] || usage
+case "$ROOT$RUN_ROOT$FAILED_RUN_ROOT$SCALA_QUALIFICATION_SOURCE$HASKELL_STATIC_SOURCE$HASKELL_PROFILE_SOURCE" in
   *[[:space:]%]*)
-    echo "repository and run paths cannot contain whitespace or percent" >&2
+    echo "repository, run, and continuation paths cannot contain whitespace or percent" >&2
     exit 64
     ;;
 esac
+PARENT_RUN_ID="NONE"
+if [[ "$CONTINUATION_SOURCE_COUNT" == 4 ]]; then
+  for source in \
+    "$FAILED_RUN_ROOT" \
+    "$SCALA_QUALIFICATION_SOURCE" \
+    "$HASKELL_STATIC_SOURCE" \
+    "$HASKELL_PROFILE_SOURCE"
+  do
+    [[ "$source" == /* && -d "$source" && ! -L "$source" ]] || usage
+  done
+  PARENT_RUN_ID="${FAILED_RUN_ROOT##*/}"
+fi
 
 S1_4X="$ROOT/workspaces/decision-platform/research/s1-4x-numeric-parity"
 SUPERVISOR="$S1_4X/integration/detached_full_run.py"
@@ -80,12 +126,23 @@ do
   }
 done
 
-/usr/bin/python3 "$SUPERVISOR" prepare \
-  --repo-root "$ROOT" \
-  --run-root "$RUN_ROOT" \
-  --run-id "$RUN_ID" \
-  --benchmark-subject-commit "$SUBJECT" \
+PREPARE_ARGS=(
+  prepare
+  --repo-root "$ROOT"
+  --run-root "$RUN_ROOT"
+  --run-id "$RUN_ID"
+  --benchmark-subject-commit "$SUBJECT"
   --overall-timeout-seconds 61200
+)
+if [[ "$CONTINUATION_SOURCE_COUNT" == 4 ]]; then
+  PREPARE_ARGS+=(
+    --failed-run-root "$FAILED_RUN_ROOT"
+    --scala-qualification-source "$SCALA_QUALIFICATION_SOURCE"
+    --haskell-static-source "$HASKELL_STATIC_SOURCE"
+    --haskell-profile-source "$HASKELL_PROFILE_SOURCE"
+  )
+fi
+/usr/bin/python3 "$SUPERVISOR" "${PREPARE_ARGS[@]}"
 
 CONTROL_SUPERVISOR="$RUN_ROOT/control/detached_full_run.py"
 [[ -f "$CONTROL_SUPERVISOR" && ! -L "$CONTROL_SUPERVISOR" ]] || {
@@ -160,5 +217,5 @@ fi
 /usr/bin/systemctl --user show "$UNIT" \
   -p Id -p LoadState -p ActiveState -p SubState -p Result \
   -p MainPID -p ExecMainCode -p ExecMainStatus -p InvocationID -p NRestarts
-printf 'S1_4X_DETACHED_FULL_RUN_STARTED unit=%s runRoot=%s subject=%s\n' \
-  "$UNIT" "$RUN_ROOT" "$SUBJECT"
+printf 'S1_4X_DETACHED_FULL_RUN_STARTED unit=%s runRoot=%s subject=%s parentRun=%s\n' \
+  "$UNIT" "$RUN_ROOT" "$SUBJECT" "$PARENT_RUN_ID"
