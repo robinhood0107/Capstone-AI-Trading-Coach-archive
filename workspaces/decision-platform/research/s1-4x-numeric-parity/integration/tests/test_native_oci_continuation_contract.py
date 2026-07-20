@@ -51,7 +51,9 @@ def test_sealed_continuation_imports_only_then_resumes_common_tail() -> None:
         '"$SCALA_QUALIFICATION_SOURCE_ROOT/jmh-smoke/'
         'scala-jvm-argument-allowlist.v1.json"'
     ) in continuation
-    assert '"$HASKELL/tools/select-proven-profile.sh" --check' in continuation
+    assert '"$HASKELL/tools/select-proven-profile.sh" --check' not in continuation
+    assert '"$RESULT_ROOT/continuation-import.v1.json"' in continuation
+    assert "selectedProfileSha256" in continuation
     ghc_tail = (
         'fi\nrun_result_command '
         '"$HASKELL/tools/run-ghc-9.14.1-compatibility.sh"'
