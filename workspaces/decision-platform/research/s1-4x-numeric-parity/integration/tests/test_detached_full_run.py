@@ -91,6 +91,7 @@ def _write_final_reports(
     completed: int = 87,
     partial: int = 0,
     not_measured: int = 0,
+    audit_sha256: str = "f" * 64,
 ) -> None:
     _write_json(
         directory / "benchmark-summary.v1.json",
@@ -142,6 +143,7 @@ def _write_final_reports(
         {
             "schemaVersion": "s1.4x-scorecard-v1",
             "benchmarkSubjectCommit": SUBJECT,
+            "auditLedgerSha256": audit_sha256,
             "candidates": {
                 "scala": {
                     "eligibility": "QUALIFIED",
@@ -191,6 +193,13 @@ def _write_final_reports(
             "status": "PASS",
         },
     )
+
+
+def _audit_pass(
+    _paths: supervisor.RunPaths,
+    _plan_value: dict[str, object],
+) -> dict[str, object]:
+    return {"status": "PASS"}
 
 
 def _write_finalizer_receipt(run_root: Path, *, status: str = "PASS") -> None:
@@ -441,7 +450,31 @@ class DetachedFullRunTerminalTest(unittest.TestCase):
                 "status": "BENCHMARK_EVIDENCE_READY_FOR_REVIEW",
             },
         )
-        _write_final_reports(run_root / "final-reports")
+        correctness_raw = run_root / "correctness/raw.json"
+        correctness_raw.parent.mkdir()
+        correctness_raw.write_bytes(b"correctness\n")
+        _write_json(
+            run_root / "correctness/correctness-run-manifest.v1.json",
+            {
+                "schemaVersion": "s1.4x-correctness-run-manifest-v1",
+                "benchmarkSubjectCommit": SUBJECT,
+                "artifactCount": 1,
+                "artifacts": [
+                    {
+                        "path": "raw.json",
+                        "sha256": hashlib.sha256(b"correctness\n").hexdigest(),
+                        "sizeBytes": len(b"correctness\n"),
+                    }
+                ],
+                "status": "PASS",
+            },
+        )
+        audit_ledger = run_root / "correctness-final-audit/final-candidate-audit.json"
+        _write_json(audit_ledger, {"status": "PASS"})
+        _write_final_reports(
+            run_root / "final-reports",
+            audit_sha256=hashlib.sha256(audit_ledger.read_bytes()).hexdigest(),
+        )
         raw_file = run_root / "benchmark/run/s1-4x-full-test/r1/file"
         raw_file.parent.mkdir(parents=True)
         raw_file.write_bytes(b"x")
@@ -475,6 +508,7 @@ class DetachedFullRunTerminalTest(unittest.TestCase):
                 service_result="success",
                 exit_code="exited",
                 exit_status="0",
+                audit_revalidator=_audit_pass,
             )
 
             self.assertEqual(result["status"], "PASS")
@@ -490,6 +524,7 @@ class DetachedFullRunTerminalTest(unittest.TestCase):
                 service_result="timeout",
                 exit_code="killed",
                 exit_status="TERM",
+                audit_revalidator=_audit_pass,
             )
 
             self.assertEqual(result["status"], "FAIL")
@@ -512,6 +547,7 @@ class DetachedFullRunTerminalTest(unittest.TestCase):
                 service_result="success",
                 exit_code="exited",
                 exit_status="0",
+                audit_revalidator=_audit_pass,
             )
 
             self.assertEqual(result["status"], "FAIL")
@@ -527,6 +563,7 @@ class DetachedFullRunTerminalTest(unittest.TestCase):
                 service_result="success",
                 exit_code="exited",
                 exit_status="0",
+                audit_revalidator=_audit_pass,
             )
 
             self.assertEqual(result["status"], "FAIL")
@@ -534,6 +571,35 @@ class DetachedFullRunTerminalTest(unittest.TestCase):
                 result["failureCode"],
                 "FINAL_REPORT_REVALIDATION_FAILED",
             )
+
+    def test_correctness_or_audit_drift_cannot_reach_terminal_pass(
+        self,
+    ) -> None:
+        drift_paths = (
+            "correctness/raw.json",
+            "correctness-final-audit/final-candidate-audit.json",
+        )
+        for relative in drift_paths:
+            with (
+                self.subTest(relative=relative),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                run_root = self._prepared_run(Path(temporary))
+                (run_root / relative).write_bytes(b"changed")
+
+                result = supervisor.service_finalize(
+                    run_root,
+                    service_result="success",
+                    exit_code="exited",
+                    exit_status="0",
+                    audit_revalidator=_audit_pass,
+                )
+
+                self.assertEqual(result["status"], "FAIL")
+                self.assertEqual(
+                    result["failureCode"],
+                    "FINAL_REPORT_REVALIDATION_FAILED",
+                )
 
     def test_status_never_confuses_candidate_pass_with_terminal_pass(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -546,6 +612,7 @@ class DetachedFullRunTerminalTest(unittest.TestCase):
                 service_result="success",
                 exit_code="exited",
                 exit_status="0",
+                audit_revalidator=_audit_pass,
             )
             passed = supervisor.inspect_status(run_root)
             self.assertEqual(passed["status"], "PASS")
