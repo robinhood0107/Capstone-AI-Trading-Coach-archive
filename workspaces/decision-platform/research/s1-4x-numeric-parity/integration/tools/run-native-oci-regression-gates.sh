@@ -232,6 +232,7 @@ run_result_command "$HASKELL/tools/check-hlint.sh" \
   --output-dir "$RESULT_ROOT/haskell/hlint"
 run_result_command "$UV_BIN" run --frozen --project "$ORACLE" \
   python "$HASKELL/tools/tests/test_workflow_input_closure.py"
+run_result_command mkdir -p "$RESULT_ROOT/haskell/profiles"
 run_result_command "$HASKELL/tools/run-correctness-profile.sh" \
   baseline-o0-fasm \
   --output-dir "$RESULT_ROOT/haskell/profiles/baseline-o0-fasm"
