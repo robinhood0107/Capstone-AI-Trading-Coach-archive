@@ -72,7 +72,8 @@ def test_native_aggregate_materializes_and_checks_once_under_result_root() -> No
     assert 'LARGE_FIXTURE_ROOT="$RESULT_ROOT/large-fixtures"' in source
     assert 'LARGE_FIXTURE_RECEIPT="$RESULT_ROOT/large-fixture-receipt.json"' in source
     assert (
-        '> "$RESULT_ROOT/large-fixture-check-receipt.json"'
+        'run_result_command_to_file \\\n'
+        '  "$RESULT_ROOT/large-fixture-check-receipt.json"'
         in source
     )
     assert 'export S1_4X_LARGE_FIXTURE_ROOT="$LARGE_FIXTURE_ROOT"' in source
