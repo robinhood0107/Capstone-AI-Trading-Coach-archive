@@ -5,20 +5,24 @@ S1.4X는 S1.4 production NumPy 11개 함수와 S1.4R NumPy/JAX 9개 함수의 �
 production `RiskEngine`, 공개 API, root `contracts/` 또는 다른 팀 workspace와 연결되지
 않는다.
 
-## 현재 gate
+## 현재 상태
 
-이 tree는 **Gate 1 neutral fixture freeze**만 담는다.
+Gate 0 governance와 Gate 1 neutral fixture freeze 뒤 Scala/Haskell candidate 구현까지
+완료했다.
 
 - 언어 중립 JSON/binary exchange schema와 20개 함수·32개 stable error registry
-- upstream Python/NumPy/JAX reference hash lock
-- canonical small/invalid/property fixture와 deterministic large-fixture generator
-- Python oracle, contract/provenance/environment validator
-- capability/property/safety/compatibility 정책
-- 6개 family, 89개 case, 3회 반복의 사전 동결 benchmark plan
-- PR과 `main` push에서 모두 실행되는 contract correctness workflow
+- upstream Python/NumPy/JAX reference hash lock과 canonical fixture
+- Scala A/B/C 및 Haskell `baseline-o0-fasm`/`optimized-o2-fasm` correctness
+- Scala profile A와 Haskell `baseline-o0-fasm`의 historical selection evidence
+- 6개 family, 89개 case, 3회 반복의 사전 동결 full benchmark plan
 
-Gate 1이 `main`에 병합되기 전에는 `scala/`, `haskell/`, 언어별 correctness workflow와
-candidate report를 추적하지 않는다. 이 Gate에서는 benchmark timing도 실행하지 않는다.
+2026-07-20 expedited completion은 완료된 historical evidence를 재사용하고, 변경된
+host validator의 focused test와 대표 3개 case의 candidate별 native sample만 새로
+실행한다. 결과와 생략 범위는
+[`reports/EXPEDITED_COMPLETION.md`](reports/EXPEDITED_COMPLETION.md)에 기록한다.
+
+이 경로는 `sample-only`, `native-only`, `non-scoring`이다. full 89-case rotation,
+Docker/OCI 재검증, 언어 순위, production migration 판단을 대신하지 않는다.
 
 ## 경계
 
@@ -81,8 +85,10 @@ closure다. `referenceBaseCommit`은 S1.4X 파일이 생기기 전의 upstream c
 integration report가 immutable GitHub merge event의 Gate 1 SHA와 이 tree의
 byte-identical 상태를 연결한다.
 
-## 다음 승인
+## 운영 경계
 
-Gate 1 PR을 merge하지 않는다. review와 required checks가 끝난 뒤 사용자가 별도 exact
-merge 승인을 보내야 한다. Gate 2 연속 실행은 병합된 `fixtureFreezeMergeSha`와 이
-tree의 immutable SHA를 포함한 별도 readiness packet을 소비한다.
+- 운영 후보는 기존 S1.4 Python/NumPy이며, S1.4R은 고급 리스크 수학 명세와 연구
+  reference로 유지한다.
+- S1.4X는 독립 parity oracle과 언어 설계·감사성·성능 연구에만 사용한다.
+- S1.4X 결과가 좋아도 별도 migration ADR, 동일 경계 full benchmark, shadow/canary,
+  observability와 rollback 승인이 없으면 Scala/Haskell을 production 경로에 넣지 않는다.
