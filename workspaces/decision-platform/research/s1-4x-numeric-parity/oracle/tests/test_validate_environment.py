@@ -14,6 +14,7 @@ from validate_environment import (
     LocalEnvironmentAdapter,
     ProcessSample,
     ProcessSnapshot,
+    RunningContainer,
     _parse_proc_stat,
     _sample_quiet_load,
     validate_environment,
@@ -31,7 +32,9 @@ class FakeEnvironment:
         self.affinity = frozenset({0, 1})
         self.logical_cpus = 2
         self.loads = [0.2, 0.2, 0.2]
-        self.containers = [f"container-{index}" for index in range(1, 5)]
+        self.containers = [
+            RunningContainer(f"container-{index}", None) for index in range(1, 5)
+        ]
         self.now = 0.0
         self.external_delta_ticks = 149
         self.reuse_pid = False
@@ -56,7 +59,7 @@ class FakeEnvironment:
     def load1(self) -> float:
         return self.loads.pop(0)
 
-    def running_containers(self) -> list[str]:
+    def running_containers(self) -> list[RunningContainer]:
         return self.containers
 
     def process_snapshot(self) -> ProcessSnapshot:
@@ -221,7 +224,7 @@ def test_each_frozen_negative_boundary_fails(mutation: str) -> None:
     elif mutation == "load":
         adapter.loads = [0.200001, 0.200001, 0.200001]
     elif mutation == "container":
-        adapter.containers.append("container-5")
+        adapter.containers.append(RunningContainer("container-5", None))
     elif mutation == "affinity":
         adapter.affinity = frozenset({0})
     elif mutation == "external-threshold":
@@ -245,7 +248,7 @@ def test_container_count_policy_accepts_four_and_rejects_five() -> None:
     )
 
     rejected = FakeEnvironment()
-    rejected.containers.append("container-5")
+    rejected.containers.append(RunningContainer("container-5", None))
     rejected_report = validate_environment(
         Path("/unused"),
         policy=_policy(),
@@ -260,13 +263,19 @@ def test_container_check_retries_timeout_and_transient_fifth_container() -> None
     class RecoveringDockerEnvironment(FakeEnvironment):
         def __init__(self) -> None:
             super().__init__()
-            self.container_attempts: list[list[str] | BaseException] = [
+            self.container_attempts: list[list[RunningContainer] | BaseException] = [
                 OracleContractError("docker ps timed out after 10 seconds"),
-                [f"container-{index}" for index in range(1, 6)],
-                [f"container-{index}" for index in range(1, 5)],
+                [
+                    RunningContainer(f"container-{index}", None)
+                    for index in range(1, 6)
+                ],
+                [
+                    RunningContainer(f"container-{index}", None)
+                    for index in range(1, 5)
+                ],
             ]
 
-        def running_containers(self) -> list[str]:
+        def running_containers(self) -> list[RunningContainer]:
             result = self.container_attempts.pop(0)
             if isinstance(result, BaseException):
                 raise result
@@ -288,6 +297,72 @@ def test_container_check_retries_timeout_and_transient_fifth_container() -> None
     assert adapter.container_attempts == []
 
 
+def test_container_check_excludes_mcp_infrastructure_and_records_typed_evidence() -> None:
+    adapter = FakeEnvironment()
+    adapter.containers.extend(
+        [
+            RunningContainer("mcp-1", "github"),
+            RunningContainer("mcp-2", "github"),
+            RunningContainer("mcp-3", "github"),
+            RunningContainer("mcp-4", "github"),
+            RunningContainer("mcp-5", "github"),
+        ]
+    )
+
+    report = validate_environment(Path("/unused"), policy=_policy(), adapter=adapter)
+    check = _checks(report)["docker.running-containers"]
+    attempt = check["evidence"]["attempts"][0]
+
+    assert check["status"] == "PASS"
+    assert check["actual"] == 4
+    assert attempt["totalCount"] == 9
+    assert attempt["excludedContainerCount"] == 5
+    assert attempt["excludedContainerIds"] == [
+        "mcp-1",
+        "mcp-2",
+        "mcp-3",
+        "mcp-4",
+        "mcp-5",
+    ]
+    assert (
+        attempt["exclusionReason"]
+        == "MCP_INFRASTRUCTURE_LABEL:io.modelcontextprotocol.server.name"
+    )
+
+
+def test_user_approved_ambient_override_skips_container_limit_and_cpu_wait() -> None:
+    adapter = FakeEnvironment()
+    adapter.containers.extend(
+        RunningContainer(f"user-container-{index}", None) for index in range(5)
+    )
+    adapter.external_delta_ticks = 10_000
+
+    report = validate_environment(
+        Path("/unused"),
+        policy=_policy(),
+        adapter=adapter,
+        ignore_ambient_host_activity=True,
+    )
+    checks = _checks(report)
+    container = checks["docker.running-containers"]
+    external_cpu = checks["process.external-cpu"]
+
+    assert report["status"] == "PASS"
+    assert container["status"] == "PASS"
+    assert container["actual"] == 9
+    assert container["evidence"]["limitEnforced"] is False
+    assert container["evidence"]["attempts"][0]["totalCount"] == 9
+    assert external_cpu["status"] == "PASS"
+    assert external_cpu["actual"]["externalCount"] == "NOT_MEASURED"
+    assert external_cpu["evidence"] == {
+        "limitEnforced": False,
+        "overrideReason": "USER_APPROVED_OBSERVE_ONLY",
+    }
+    # load quiet window만 60초이며 external CPU용 30초 sleep은 생략한다.
+    assert adapter.now == 60.0
+    assert adapter.snapshot_index == 0
+
+
 def test_local_adapter_uses_the_injected_docker_identity_not_path(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -296,8 +371,9 @@ def test_local_adapter_uses_the_injected_docker_identity_not_path(
     trusted.write_text(
         "#!/usr/bin/bash\n"
         "test \"$1\" = ps\n"
-        "test \"$2\" = -q\n"
-        "printf 'container-a\\ncontainer-b\\n'\n",
+        "test \"$2\" = --format\n"
+        "test \"$3\" = '{{.ID}}\\t{{.Label \"io.modelcontextprotocol.server.name\"}}'\n"
+        "printf 'container-a\\t\\ncontainer-b\\tgithub\\n'\n",
         encoding="utf-8",
     )
     trusted.chmod(0o700)
@@ -320,7 +396,10 @@ def test_local_adapter_uses_the_injected_docker_identity_not_path(
         docker_sha256=trusted_sha256,
     )
 
-    assert adapter.running_containers() == ["container-a", "container-b"]
+    assert adapter.running_containers() == [
+        RunningContainer("container-a", None),
+        RunningContainer("container-b", "github"),
+    ]
     assert not sentinel.exists()
 
 

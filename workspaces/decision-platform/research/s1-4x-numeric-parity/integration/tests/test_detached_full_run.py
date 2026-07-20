@@ -18,6 +18,10 @@ import detached_full_run as supervisor  # noqa: E402, I001
 
 
 SUBJECT = "a" * 40
+PARENT_SUBJECT = "c" * 40
+SCALA_SOURCE_COMMIT = "d" * 40
+HASKELL_SOURCE_COMMIT = "e" * 40
+PARENT_RUN_ID = "20260720t1527z-e2d0a443"
 CONTROL_BYTES = b"# sealed supervisor\n"
 CONTROL_SHA256 = hashlib.sha256(CONTROL_BYTES).hexdigest()
 RUNTIME_PATHS = {
@@ -39,11 +43,70 @@ RUNTIME_PATHS = {
 }
 
 
-def _plan(root: Path) -> dict[str, object]:
+def _continuation_manifest() -> dict[str, object]:
+    source_trees = []
+    artifacts = []
+    for index, source_id in enumerate(
+        (
+            "failedCorrectnessPrefix",
+            "scalaQualification",
+            "haskellStatic",
+            "haskellProfile",
+        ),
+        start=1,
+    ):
+        source_trees.append(
+            {
+                "sourceId": source_id,
+                "sourceRoot": f"/sources/{source_id}",
+                "sourceRelativePath": ".",
+                "destinationRelativePath": source_id,
+                "excludedSubtrees": [],
+                "bindings": {},
+                "artifactCount": 1,
+                "totalSizeBytes": index,
+                "treeSha256": f"{index:x}" * 64,
+            }
+        )
+        artifacts.append(
+            {
+                "sourceId": source_id,
+                "sourceRelativePath": "artifact.json",
+                "destinationPath": f"{source_id}/artifact.json",
+                "sha256": f"{index + 4:x}" * 64,
+                "sizeBytes": index,
+            }
+        )
+    return {
+        "schemaVersion": supervisor.CONTINUATION_MANIFEST_SCHEMA,
+        "parentRunId": PARENT_RUN_ID,
+        "parentSubject": PARENT_SUBJECT,
+        "targetSubject": SUBJECT,
+        "failedStage": "correctness-oci-regression",
+        "currentDiffPaths": [],
+        "sourceCommits": {
+            "scalaQualification": SCALA_SOURCE_COMMIT,
+            "haskellProfile": HASKELL_SOURCE_COMMIT,
+        },
+        "sourceTrees": source_trees,
+        "artifactCount": len(artifacts),
+        "artifacts": artifacts,
+        "status": "SEALED",
+    }
+
+
+def _json_bytes(value: object) -> bytes:
+    return (
+        json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+        + "\n"
+    ).encode()
+
+
+def _plan(root: Path, *, reuse: bool = False) -> dict[str, object]:
     bindings = {
         role: {"path": path, "sha256": "b" * 64} for role, path in RUNTIME_PATHS.items()
     }
-    return {
+    plan: dict[str, object] = {
         "schemaVersion": "s1.4x-detached-full-run-plan-v1",
         "preparedAt": "2026-01-01T00:00:00.000Z",
         "runId": "s1-4x-full-test",
@@ -72,8 +135,29 @@ def _plan(root: Path) -> dict[str, object]:
             "frozen-timing",
             "typed-finalization",
         ],
-        "retryPolicy": "NONE_FRESH_RUN_REQUIRED",
+        "retryPolicy": supervisor.FRESH_RETRY_POLICY,
     }
+    if reuse:
+        manifest_bytes = _json_bytes(_continuation_manifest())
+        plan["retryPolicy"] = supervisor.REUSE_RETRY_POLICY
+        plan["evidenceReuse"] = {
+            "mode": supervisor.REUSE_MODE,
+            "parentRunId": PARENT_RUN_ID,
+            "parentSubject": PARENT_SUBJECT,
+            "targetSubject": SUBJECT,
+            "sourceCommits": {
+                "scalaQualification": SCALA_SOURCE_COMMIT,
+                "haskellProfile": HASKELL_SOURCE_COMMIT,
+            },
+            "controlManifest": {
+                "relativePath": (
+                    f"control/{supervisor.CONTINUATION_MANIFEST_NAME}"
+                ),
+                "sha256": hashlib.sha256(manifest_bytes).hexdigest(),
+                "sizeBytes": len(manifest_bytes),
+            },
+        }
+    return plan
 
 
 def _write_json(path: Path, value: object) -> None:
@@ -276,14 +360,51 @@ class DetachedFullRunCommandTest(unittest.TestCase):
             "final-candidate-audit.json",
             " ".join(commands[3].argv),
         )
+        self.assertNotIn(
+            "--sealed-continuation-manifest",
+            commands[0].argv,
+        )
+
+    def test_reuse_plan_adds_only_the_sealed_manifest_to_first_stage(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            plan = _plan(root, reuse=True)
+            commands = supervisor.build_stage_commands(plan)
+
+        self.assertEqual(
+            commands[0].argv[-2:],
+            (
+                "--sealed-continuation-manifest",
+                str(
+                    root
+                    / "run/control"
+                    / supervisor.CONTINUATION_MANIFEST_NAME
+                ),
+            ),
+        )
+        self.assertEqual(
+            [command.name for command in commands],
+            list(supervisor.STAGE_ORDER),
+        )
 
     def test_execution_environment_does_not_leak_ambient_stack_root(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            environment = supervisor._execution_environment(_plan(Path(temporary)))
+            root = Path(temporary)
+            environment = supervisor._execution_environment(_plan(root))
+            reuse_environment = supervisor._execution_environment(
+                _plan(root, reuse=True)
+            )
 
         self.assertNotIn("STACK_ROOT", environment)
+        self.assertNotIn("S1_4X_IGNORE_AMBIENT_HOST_ACTIVITY", environment)
+        self.assertEqual(
+            reuse_environment["S1_4X_IGNORE_AMBIENT_HOST_ACTIVITY"],
+            "1",
+        )
         self.assertEqual(
             environment["GHCUP_INSTALL_BASE_PREFIX"],
             str(Path(temporary) / "home"),
@@ -391,6 +512,117 @@ class DetachedFullRunAtomicWriteTest(unittest.TestCase):
                 list(Path(temporary).glob(".PASS.json.*.tmp")),
                 [],
             )
+
+
+class DetachedFullRunContinuationContractTest(unittest.TestCase):
+    def test_source_paths_are_all_or_none(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            sources = tuple(root / name for name in ("failed", "scala", "static", "profile"))
+            for source in sources:
+                source.mkdir()
+
+            self.assertIsNone(
+                supervisor._continuation_source_paths(
+                    failed_run_root=None,
+                    scala_qualification_source=None,
+                    haskell_static_source=None,
+                    haskell_profile_source=None,
+                )
+            )
+            with self.assertRaisesRegex(
+                supervisor.FullRunError,
+                "CONTINUATION_SOURCE_SET_INCOMPLETE",
+            ):
+                supervisor._continuation_source_paths(
+                    failed_run_root=sources[0],
+                    scala_qualification_source=None,
+                    haskell_static_source=None,
+                    haskell_profile_source=None,
+                )
+            self.assertEqual(
+                supervisor._continuation_source_paths(
+                    failed_run_root=sources[0],
+                    scala_qualification_source=sources[1],
+                    haskell_static_source=sources[2],
+                    haskell_profile_source=sources[3],
+                ),
+                sources,
+            )
+
+    def test_strict_plan_accepts_reuse_and_rejects_plan_subject_drift(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            plan_path = root / "run-plan.v1.json"
+            plan = _plan(root, reuse=True)
+            _write_json(plan_path, plan)
+
+            loaded = supervisor._load_run_plan(plan_path, strict=True)
+            self.assertEqual(loaded["retryPolicy"], supervisor.REUSE_RETRY_POLICY)
+
+            plan["evidenceReuse"]["targetSubject"] = "f" * 40
+            plan_path.unlink()
+            _write_json(plan_path, plan)
+            with self.assertRaisesRegex(
+                supervisor.FullRunError,
+                "RUN_PLAN_EVIDENCE_REUSE_INVALID",
+            ):
+                supervisor._load_run_plan(plan_path, strict=True)
+
+    def test_control_manifest_hash_drift_is_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paths = supervisor.RunPaths.from_run_root(root / "run")
+            manifest_path = paths.control / supervisor.CONTINUATION_MANIFEST_NAME
+            _write_json(manifest_path, _continuation_manifest())
+            plan = _plan(root, reuse=True)
+
+            self.assertEqual(
+                supervisor._validate_evidence_reuse(paths, plan),
+                manifest_path,
+            )
+            manifest_path.write_bytes(b"{}\n")
+            with self.assertRaisesRegex(
+                supervisor.FullRunError,
+                "CONTINUATION_CONTROL_MANIFEST_DRIFT",
+            ):
+                supervisor._validate_evidence_reuse(paths, plan)
+
+    def test_control_manifest_subject_is_revalidated_after_copy(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paths = supervisor.RunPaths.from_run_root(root / "run")
+            manifest = _continuation_manifest()
+            manifest["targetSubject"] = "f" * 40
+            manifest_path = paths.control / supervisor.CONTINUATION_MANIFEST_NAME
+            _write_json(manifest_path, manifest)
+            plan = _plan(root, reuse=True)
+            control = plan["evidenceReuse"]["controlManifest"]
+            control["sha256"] = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+            control["sizeBytes"] = manifest_path.stat().st_size
+
+            with self.assertRaisesRegex(
+                supervisor.FullRunError,
+                "CONTINUATION_SOURCE_MANIFEST_INVALID",
+            ):
+                supervisor._validate_evidence_reuse(paths, plan)
+
+    def test_control_manifest_must_match_plan_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paths = supervisor.RunPaths.from_run_root(root / "run")
+            manifest_path = paths.control / supervisor.CONTINUATION_MANIFEST_NAME
+            _write_json(manifest_path, _continuation_manifest())
+            plan = _plan(root, reuse=True)
+            plan["evidenceReuse"]["parentSubject"] = "f" * 40
+
+            with self.assertRaisesRegex(
+                supervisor.FullRunError,
+                "CONTINUATION_CONTROL_MANIFEST_PLAN_MISMATCH",
+            ):
+                supervisor._validate_evidence_reuse(paths, plan)
 
 
 class DetachedFullRunFinalReportTest(unittest.TestCase):
@@ -635,6 +867,14 @@ class DetachedFullRunLauncherTest(unittest.TestCase):
         self.assertIn("CONTROL_SUPERVISOR=", launcher)
         self.assertIn("ActiveState", launcher)
         self.assertIn("[[:space:]%]", launcher)
+        for flag in (
+            "--failed-run-root",
+            "--scala-qualification-source",
+            "--haskell-static-source",
+            "--haskell-profile-source",
+        ):
+            self.assertIn(flag, launcher)
+        self.assertIn("parentRun=%s", launcher)
         self.assertNotIn("nohup", launcher)
         self.assertNotIn("--collect", launcher)
         self.assertNotIn("Restart=on-", launcher)
