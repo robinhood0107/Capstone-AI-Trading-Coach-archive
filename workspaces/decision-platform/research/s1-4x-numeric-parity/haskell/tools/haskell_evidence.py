@@ -1244,7 +1244,7 @@ def parse_show_iface_home_imports(
     *,
     candidate_modules: set[str],
 ) -> tuple[str, ...]:
-    """`ghc --show-iface`의 direct module dependencies에서 candidate home edge만 읽는다."""
+    """`ghc --show-iface`에서 같은 component와 internal-library candidate edge를 읽는다."""
 
     section = re.search(
         r"(?ms)^direct module dependencies:(.*?)^boot module dependencies:",
@@ -1252,14 +1252,31 @@ def parse_show_iface_home_imports(
     )
     if section is None:
         raise EvidenceError("GHC interface direct dependency section is missing")
-    imports: list[str] = []
+    home_imports: list[str] = []
     for token in section.group(1).split():
         module_name = token.rsplit(":", 1)[-1]
         if module_name in candidate_modules:
-            imports.append(module_name)
-    if len(imports) != len(set(imports)):
-        raise EvidenceError("GHC interface repeats a direct home dependency")
-    return tuple(sorted(imports, key=str.encode))
+            home_imports.append(module_name)
+    # GHC는 internal library를 별도 package로 컴파일하므로 그 edge는 home section이
+    # 아니라 interface import record에만 남는다. Candidate 이름만 읽어 외부 edge는 배제한다.
+    interface_imports: list[str] = []
+    for line in output.splitlines():
+        if not line.startswith("import "):
+            continue
+        tokens = line.split()
+        if len(tokens) < 4:
+            raise EvidenceError("GHC interface import record is malformed")
+        module_name = tokens[2].rsplit(":", 1)[-1]
+        if module_name in candidate_modules:
+            interface_imports.append(module_name)
+    if (
+        len(home_imports) != len(set(home_imports))
+        or len(interface_imports) != len(set(interface_imports))
+    ):
+        raise EvidenceError("GHC interface repeats a direct candidate dependency")
+    if not set(home_imports).issubset(interface_imports):
+        raise EvidenceError("GHC home dependency is missing its import record")
+    return tuple(sorted(interface_imports, key=str.encode))
 
 
 def _shortest_module_path(
