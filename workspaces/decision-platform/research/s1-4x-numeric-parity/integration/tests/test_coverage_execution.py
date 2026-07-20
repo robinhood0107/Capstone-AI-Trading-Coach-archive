@@ -375,6 +375,20 @@ class CandidateCoverageExecutionTests(TestCase):
                 runner=runner,
             )
 
+        failure = json.loads(
+            (temporary / "receipt.failure.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(failure["failureCode"], "COVERAGE_PROCESS_FAILED")
+        self.assertEqual(failure["process"]["exitCode"], 69)
+        self.assertEqual(
+            (temporary / "receipt.process.stderr").read_bytes(),
+            b"benchmark Python pinned FD identity is unsafe\n",
+        )
+        self.assertEqual(
+            (temporary / "receipt.process.stdout").read_bytes(),
+            b"",
+        )
+
     def test_haskell_stack_root_id_is_bound_to_output_directory(self) -> None:
         temporary = Path(self.enterContext(tempfile.TemporaryDirectory()))
         output = temporary / "haskell-output"
