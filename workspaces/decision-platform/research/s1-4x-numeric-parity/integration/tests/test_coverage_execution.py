@@ -329,6 +329,52 @@ class CandidateCoverageExecutionTests(TestCase):
             execution["outerCommandArgvSha256"],
         )
 
+    def test_haskell_runner_inherits_pinned_benchmark_python_fd(self) -> None:
+        temporary = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        runner_path = temporary / "runner"
+        runner_path.write_bytes(b"runner")
+        runner_path.chmod(0o700)
+        pinned_fd = os.open(REAL_WRAPPER_FIXTURE, os.O_RDONLY)
+        self.addCleanup(os.close, pinned_fd)
+
+        def runner(
+            command: list[str],
+            **kwargs: Any,
+        ) -> subprocess.CompletedProcess[bytes]:
+            self.assertEqual(kwargs.get("pass_fds"), (pinned_fd,))
+            return subprocess.CompletedProcess(
+                command,
+                69,
+                b"",
+                b"benchmark Python pinned FD identity is unsafe\n",
+            )
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH": (
+                        f"/proc/self/fd/{pinned_fd}"
+                    ),
+                },
+            ),
+            self.assertRaisesRegex(
+                CoverageExecutionError,
+                "COVERAGE_PROCESS_FAILED:exit=69",
+            ),
+        ):
+            run_candidate_coverage(
+                candidate="haskell",
+                candidate_profile=None,
+                runner_path=runner_path,
+                output_directory=temporary / "output",
+                receipt_path=temporary / "receipt.json",
+                property_plan_path=CONTRACT / "property-plan.v1.json",
+                function_registry_path=CONTRACT / "function-registry.v1.json",
+                error_registry_path=CONTRACT / "error-registry.v1.json",
+                runner=runner,
+            )
+
     def test_haskell_stack_root_id_is_bound_to_output_directory(self) -> None:
         temporary = Path(self.enterContext(tempfile.TemporaryDirectory()))
         output = temporary / "haskell-output"
