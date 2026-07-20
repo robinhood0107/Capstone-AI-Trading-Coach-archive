@@ -26,8 +26,10 @@ validity에서 실패해 terminal FAIL로 봉인됐다. 이 run 자체를 수정
 않는다. Candidate·frozen plan이 바뀌지 않았고 source commit·tree·artifact SHA-256을
 모두 다시 검증할 수 있는 경우에만, 새 run ID의 `SEALED_PREFIX_REUSE_V1` 경로가 완료된
 correctness/qualification prefix를 새 correctness root에 O_EXCL 복사한다. 새 run은 현재
-contract manifest 검증과 Scala/Haskell selector를 다시 수행한 뒤 GHC compatibility,
-coverage, cross-language, OCI, regression과 full timing을 이어간다.
+contract manifest와 Scala selector를 다시 검증한다. Haskell은 historical host argv
+drift 때문에 selector command를 재실행하지 않고, 현재 tracked selected-profile과
+qualification/correctness SHA binding을 sealed import receipt에서 다시 대조한 뒤 GHC
+compatibility, coverage, cross-language, OCI, regression과 full timing을 이어간다.
 
 이 continuation run에서는 사용자 승인에 따라 ambient 실행 컨테이너 수와 다른 Codex
 process CPU 비율을 eligibility에서 제외한다. Docker API 가용성, disk/memory, CPU

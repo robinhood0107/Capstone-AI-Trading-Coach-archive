@@ -99,7 +99,9 @@ Terminal FAIL run은 immutable source evidence로만 보존한다. `SEALED_PREFI
 SHA256SUMS, source commit ancestry, unchanged candidate/plan diff allowlist와 각 artifact
 hash를 모두 통과한 완료 prefix만 import하며 failed partial qualification, 이전 selector
 결과와 stale contract validation은 가져오지 않는다. Import 뒤 현재 contract를 새로
-검증하고 selector를 재계산한 다음 공통 tail을 실행한다.
+검증하고 Scala selector를 재계산한다. Haskell selector는 historical host argv drift로
+재실행하지 않고 tracked selected-profile과 qualification/correctness SHA binding을
+sealed import receipt에서 재검증한 다음 공통 tail을 실행한다.
 
 실행 전에는 다음 계약을 모두 만족해야 한다.
 
