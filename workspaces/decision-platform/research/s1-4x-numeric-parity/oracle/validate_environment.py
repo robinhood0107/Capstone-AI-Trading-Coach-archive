@@ -21,6 +21,7 @@ from oracle_common import OracleContractError, atomic_write_json, sha256_bytes
 
 SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 SELF_FD_PATTERN = re.compile(r"^/proc/self/fd/([3-9]|[1-9][0-9]+)$")
+DOCKER_PS_TIMEOUT_SECONDS = 10
 
 
 @dataclasses.dataclass(frozen=True)
@@ -225,14 +226,19 @@ class LocalEnvironmentAdapter:
         return os.getloadavg()[0]
 
     def running_containers(self) -> list[str]:
-        completed = subprocess.run(
-            [self._docker_command, "ps", "-q"],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=10,
-            pass_fds=self._docker_pass_fds,
-        )
+        try:
+            completed = subprocess.run(
+                [self._docker_command, "ps", "-q"],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=DOCKER_PS_TIMEOUT_SECONDS,
+                pass_fds=self._docker_pass_fds,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise OracleContractError(
+                f"docker ps timed out after {DOCKER_PS_TIMEOUT_SECONDS} seconds"
+            ) from exc
         if completed.returncode != 0:
             raise OracleContractError(
                 f"docker ps failed with exit {completed.returncode}"
@@ -467,6 +473,57 @@ def _sample_quiet_load(
             }
 
 
+def _sample_running_containers(
+    adapter: EnvironmentAdapter,
+    *,
+    policy: EnvironmentPolicy,
+) -> dict[str, Any]:
+    """Docker 조회 실패와 일시적 초과를 기존 quiet-window 안에서만 재시도한다."""
+
+    started = adapter.monotonic()
+    deadline = started + policy.max_quiet_wait_seconds
+    attempts: list[dict[str, Any]] = []
+    while True:
+        try:
+            containers = adapter.running_containers()
+        except (OSError, OracleContractError) as exc:
+            actual: int | str = f"UNAVAILABLE:{type(exc).__name__}"
+            attempt_status = "UNAVAILABLE"
+            container_ids: list[str] = []
+        else:
+            actual = len(containers)
+            container_ids = containers
+            attempt_status = (
+                "PASS"
+                if actual <= policy.max_running_containers
+                else "TOO_MANY"
+            )
+        attempts.append(
+            {
+                "elapsedSeconds": adapter.monotonic() - started,
+                "actual": actual,
+                "containerIds": container_ids,
+                "status": attempt_status,
+            }
+        )
+        if attempt_status == "PASS":
+            return {
+                "passed": True,
+                "actual": actual,
+                "attempts": attempts,
+                "elapsedSeconds": adapter.monotonic() - started,
+            }
+        now = adapter.monotonic()
+        if now >= deadline:
+            return {
+                "passed": False,
+                "actual": actual,
+                "attempts": attempts,
+                "elapsedSeconds": now - started,
+            }
+        adapter.sleep(min(policy.sample_interval_seconds, deadline - now))
+
+
 def validate_environment(
     home: Path,
     *,
@@ -552,24 +609,22 @@ def validate_environment(
             passed=False,
         )
 
-    try:
-        containers = source.running_containers()
-        _record(
-            checks,
-            check_id="docker.running-containers",
-            expected=f"<={policy.max_running_containers}",
-            actual=len(containers),
-            passed=len(containers) <= policy.max_running_containers,
-            evidence={"containerIds": containers},
-        )
-    except (OSError, OracleContractError) as exc:
-        _record(
-            checks,
-            check_id="docker.running-containers",
-            expected=f"<={policy.max_running_containers}",
-            actual=f"UNAVAILABLE:{type(exc).__name__}",
-            passed=False,
-        )
+    container_result = _sample_running_containers(source, policy=policy)
+    _record(
+        checks,
+        check_id="docker.running-containers",
+        expected={
+            "max": policy.max_running_containers,
+            "retryIntervalSeconds": policy.sample_interval_seconds,
+            "maxQuietWaitSeconds": policy.max_quiet_wait_seconds,
+        },
+        actual=container_result["actual"],
+        passed=bool(container_result["passed"]),
+        evidence={
+            "attempts": container_result["attempts"],
+            "elapsedSeconds": container_result["elapsedSeconds"],
+        },
+    )
 
     load_result = _sample_quiet_load(
         source,
