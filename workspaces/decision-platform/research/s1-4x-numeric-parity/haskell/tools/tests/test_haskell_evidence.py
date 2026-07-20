@@ -353,14 +353,15 @@ test-suite s1-4x-haskell-test
 """
         haskell_evidence.validate_cabal_projection(generated)
 
-    def test_show_iface_parser_uses_direct_home_dependency_section_only(self) -> None:
+    def test_show_iface_parser_combines_home_and_internal_library_edges(self) -> None:
         output = """
 interface S14X.Core.AdvancedRisk 9103
 direct module dependencies: pkg:S14X.Core.Error
                             pkg:S14X.Core.Models
 boot module dependencies:
-direct package dependencies: base-4.20.2.0
+direct package dependencies: base-4.20.2.0 pkg-s1-4x-core
 import  -/  Data.Vector.Unboxed deadbeef
+import  -/  S14X.Core.Validation cafebabe
 """
         self.assertEqual(
             haskell_evidence.parse_show_iface_home_imports(
@@ -369,9 +370,14 @@ import  -/  Data.Vector.Unboxed deadbeef
                     "S14X.Core.AdvancedRisk",
                     "S14X.Core.Error",
                     "S14X.Core.Models",
+                    "S14X.Core.Validation",
                 },
             ),
-            ("S14X.Core.Error", "S14X.Core.Models"),
+            (
+                "S14X.Core.Error",
+                "S14X.Core.Models",
+                "S14X.Core.Validation",
+            ),
         )
 
     def test_module_safety_policy_requires_the_exact_frozen_field_set(self) -> None:
