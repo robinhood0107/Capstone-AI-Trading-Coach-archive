@@ -361,6 +361,8 @@ direct module dependencies: pkg:S14X.Core.Error
 boot module dependencies:
 direct package dependencies: base-4.20.2.0 pkg-s1-4x-core
 import  -/  Data.Vector.Unboxed deadbeef
+import  -/  S14X.Core.Error 01234567
+import  -/  S14X.Core.Models 89abcdef
 import  -/  S14X.Core.Validation cafebabe
 """
         self.assertEqual(
