@@ -14,7 +14,7 @@ INTEGRATION = Path(__file__).resolve().parents[1]
 if str(INTEGRATION) not in sys.path:
     sys.path.insert(0, str(INTEGRATION))
 
-import detached_full_run as supervisor  # noqa: E402
+import detached_full_run as supervisor  # noqa: E402, I001
 
 
 SUBJECT = "a" * 40
@@ -357,18 +357,20 @@ class DetachedFullRunCommandTest(unittest.TestCase):
         previous = supervisor._INTERRUPTED_SIGNAL
         supervisor._INTERRUPTED_SIGNAL = signal.SIGTERM
         try:
-            with tempfile.TemporaryDirectory() as temporary:
-                with self.assertRaisesRegex(
+            with (
+                tempfile.TemporaryDirectory() as temporary,
+                self.assertRaisesRegex(
                     supervisor.StageFailure,
                     "INTERRUPTED",
-                ):
-                    supervisor.execute_stage_sequence(
-                        commands,
-                        paths=supervisor.RunPaths.from_run_root(Path(temporary)),
-                        environment={},
-                        deadline=100.0,
-                        stage_runner=fake_run,
-                    )
+                ),
+            ):
+                supervisor.execute_stage_sequence(
+                    commands,
+                    paths=supervisor.RunPaths.from_run_root(Path(temporary)),
+                    environment={},
+                    deadline=100.0,
+                    stage_runner=fake_run,
+                )
         finally:
             supervisor._INTERRUPTED_SIGNAL = previous
 
