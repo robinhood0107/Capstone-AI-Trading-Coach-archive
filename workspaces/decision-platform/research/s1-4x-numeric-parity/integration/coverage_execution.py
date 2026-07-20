@@ -8,6 +8,7 @@ import datetime as dt
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 from collections.abc import Callable, Sequence
@@ -55,6 +56,28 @@ def _utc_now() -> str:
         .isoformat(timespec="microseconds")
         .replace("+00:00", "Z")
     )
+
+
+def _runner_pass_fds(candidate: str) -> tuple[int, ...]:
+    if candidate != "haskell":
+        return ()
+    pinned_path = os.environ.get("S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH")
+    if pinned_path is None:
+        return ()
+    matched = re.fullmatch(r"/proc/self/fd/([1-9][0-9]*)", pinned_path)
+    if matched is None:
+        raise CoverageExecutionError("BENCHMARK_PYTHON_PINNED_FD_INVALID")
+    descriptor = int(matched.group(1))
+    if descriptor < 3:
+        raise CoverageExecutionError("BENCHMARK_PYTHON_PINNED_FD_INVALID")
+    try:
+        os.fstat(descriptor)
+    except OSError as exc:
+        raise CoverageExecutionError(
+            "BENCHMARK_PYTHON_PINNED_FD_UNAVAILABLE"
+        ) from exc
+    # 상위 gate가 봉인한 Python 실행 FD를 Haskell wrapper까지 유지한다.
+    return (descriptor,)
 
 
 def _report_paths(candidate: str, output_directory: Path) -> dict[str, Path]:
@@ -115,6 +138,7 @@ def run_candidate_coverage(
             cwd=output.parent,
             capture_output=True,
             check=False,
+            pass_fds=_runner_pass_fds(candidate),
             timeout=timeout_seconds,
         )
     except subprocess.TimeoutExpired as exc:
