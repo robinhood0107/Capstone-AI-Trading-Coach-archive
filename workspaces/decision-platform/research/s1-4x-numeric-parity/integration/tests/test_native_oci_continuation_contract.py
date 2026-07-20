@@ -40,6 +40,17 @@ def test_sealed_continuation_imports_only_then_resumes_common_tail() -> None:
     ):
         assert prohibited not in continuation
     assert continuation.count('"$SCALA/tools/select-proven-profile.sh"') == 2
+    assert "SCALA_QUALIFICATION_SOURCE_ROOT" in continuation
+    assert 'select(.sourceId == "scala-qualification")' in continuation
+    assert 'select(.sourceId == "scala-jmh-smoke")' in continuation
+    assert (
+        '"$SCALA_QUALIFICATION_SOURCE_ROOT/qualification/'
+        'scala-profile-qualification.v1.json"'
+    ) in continuation
+    assert (
+        '"$SCALA_QUALIFICATION_SOURCE_ROOT/jmh-smoke/'
+        'scala-jvm-argument-allowlist.v1.json"'
+    ) in continuation
     assert '"$HASKELL/tools/select-proven-profile.sh" --check' in continuation
     ghc_tail = (
         'fi\nrun_result_command '
