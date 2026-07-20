@@ -94,6 +94,13 @@ Official timing으로 진행하려면 Python 네 boundary와 Scala/Haskell의 fr
 launcher는 이 process를 transient user-systemd cgroup에 분리한다. Supervisor와 launcher는
 benchmark를 재시작하거나 부분 결과를 이어 붙이지 않는다.
 
+Terminal FAIL run은 immutable source evidence로만 보존한다. `SEALED_PREFIX_REUSE_V1`은
+같은 run의 resume가 아니라 새 run root를 만드는 별도 실행 모드다. Parent terminal
+SHA256SUMS, source commit ancestry, unchanged candidate/plan diff allowlist와 각 artifact
+hash를 모두 통과한 완료 prefix만 import하며 failed partial qualification, 이전 selector
+결과와 stale contract validation은 가져오지 않는다. Import 뒤 현재 contract를 새로
+검증하고 selector를 재계산한 다음 공통 tail을 실행한다.
+
 실행 전에는 다음 계약을 모두 만족해야 한다.
 
 - 현재 branch는 `experiment/s1-4x-numeric-parity*`이며 clean `HEAD`가 같은 origin remote
@@ -126,6 +133,30 @@ mkdir -p "$(dirname "$RUN_ROOT")"
   --run-id "$RUN_ID" \
   --subject "$SUBJECT"
 ```
+
+봉인된 `20260720t1527z-e2d0a443` 실패 run에서 완료 prefix를 재사용하는 새 run은 네 source
+인자를 모두 함께 명시한다.
+
+```bash
+"$S1_4X/integration/tools/launch-detached-full-run.sh" \
+  --repo-root "$ROOT" \
+  --run-root "$RUN_ROOT" \
+  --run-id "$RUN_ID" \
+  --subject "$SUBJECT" \
+  --failed-run-root \
+    "$HOME/.cache/s1-4x/detached-runs/20260720t1527z-e2d0a443" \
+  --scala-qualification-source \
+    "$HOME/.cache/s1-4x/codex-runs/native-oci-01bfbaa-final1/scala" \
+  --haskell-static-source \
+    "$HOME/.cache/s1-4x/codex-runs/native-oci-01bfbaa-final1/haskell" \
+  --haskell-profile-source \
+    "$HOME/.cache/s1-4x/codex-runs/haskell-p-a30bbca-final1"
+```
+
+이 sealed continuation에만 `S1_4X_IGNORE_AMBIENT_HOST_ACTIVITY=1`이 supervisor 내부에서
+설정된다. 실행 컨테이너 수와 외부 Codex CPU 기준은 observe-only가 되고, Docker API,
+disk/memory, affinity, normalized load gate는 그대로다. 일반 fresh run은 기존 정책을
+그대로 적용한다.
 
 실행 순서는 native/OCI/regression aggregate gate, exact command manifest 봉인, 87개 rotated
 block, typed finalizer다. `run-plan.v1.json`과 sidecar, `events.jsonl`, 단계별

@@ -21,6 +21,19 @@ Gate 0 governance와 Gate 1 neutral fixture freeze 뒤 Scala/Haskell candidate �
 partial resume는 하지 않으며, 종료 후 봉인된 full evidence를 사람이 검토하기 전에는
 공식 실험 순위나 `FINAL_PR_READY`를 주장하지 않는다.
 
+`20260720t1527z-e2d0a443` run은 Scala profile C qualification 시작 전 ambient host
+validity에서 실패해 terminal FAIL로 봉인됐다. 이 run 자체를 수정하거나 resume하지
+않는다. Candidate·frozen plan이 바뀌지 않았고 source commit·tree·artifact SHA-256을
+모두 다시 검증할 수 있는 경우에만, 새 run ID의 `SEALED_PREFIX_REUSE_V1` 경로가 완료된
+correctness/qualification prefix를 새 correctness root에 O_EXCL 복사한다. 새 run은 현재
+contract manifest 검증과 Scala/Haskell selector를 다시 수행한 뒤 GHC compatibility,
+coverage, cross-language, OCI, regression과 full timing을 이어간다.
+
+이 continuation run에서는 사용자 승인에 따라 ambient 실행 컨테이너 수와 다른 Codex
+process CPU 비율을 eligibility에서 제외한다. Docker API 가용성, disk/memory, CPU
+affinity와 normalized load 기준은 유지하며, override 적용 여부와 관측된 컨테이너 정보는
+host-validity evidence에 남긴다. 기본 fresh-run 경로에는 이 override가 적용되지 않는다.
+
 [`reports/EXPEDITED_COMPLETION.md`](reports/EXPEDITED_COMPLETION.md)는 commit
 `d91764ec7cafde75eb0cc5e140c9ff67046c5c88`의 historical 6/10 snapshot이다. 이
 snapshot의 `sample-only`, `native-only`, `non-scoring` 결과는 현재 HEAD의 full
