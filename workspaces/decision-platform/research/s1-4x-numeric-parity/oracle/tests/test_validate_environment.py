@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -255,6 +256,38 @@ def test_container_count_policy_accepts_four_and_rejects_five() -> None:
     assert _checks(rejected_report)["docker.running-containers"]["status"] == "FAIL"
 
 
+def test_container_check_retries_timeout_and_transient_fifth_container() -> None:
+    class RecoveringDockerEnvironment(FakeEnvironment):
+        def __init__(self) -> None:
+            super().__init__()
+            self.container_attempts: list[list[str] | BaseException] = [
+                OracleContractError("docker ps timed out after 10 seconds"),
+                [f"container-{index}" for index in range(1, 6)],
+                [f"container-{index}" for index in range(1, 5)],
+            ]
+
+        def running_containers(self) -> list[str]:
+            result = self.container_attempts.pop(0)
+            if isinstance(result, BaseException):
+                raise result
+            return result
+
+    adapter = RecoveringDockerEnvironment()
+
+    report = validate_environment(Path("/unused"), policy=_policy(), adapter=adapter)
+    check = _checks(report)["docker.running-containers"]
+
+    assert check["status"] == "PASS"
+    assert check["actual"] == 4
+    assert check["evidence"]["elapsedSeconds"] == 60.0
+    assert [attempt["status"] for attempt in check["evidence"]["attempts"]] == [
+        "UNAVAILABLE",
+        "TOO_MANY",
+        "PASS",
+    ]
+    assert adapter.container_attempts == []
+
+
 def test_local_adapter_uses_the_injected_docker_identity_not_path(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -289,6 +322,32 @@ def test_local_adapter_uses_the_injected_docker_identity_not_path(
 
     assert adapter.running_containers() == ["container-a", "container-b"]
     assert not sentinel.exists()
+
+
+def test_local_adapter_maps_docker_timeout_to_typed_contract_error(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    trusted = tmp_path / "trusted-docker"
+    trusted.write_text("#!/usr/bin/bash\nexit 0\n", encoding="utf-8")
+    trusted.chmod(0o700)
+    trusted_sha256 = hashlib.sha256(trusted.read_bytes()).hexdigest()
+    adapter = LocalEnvironmentAdapter(
+        docker_bin=trusted,
+        docker_sha256=trusted_sha256,
+    )
+
+    def timeout(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        del args, kwargs
+        raise subprocess.TimeoutExpired(["docker", "ps", "-q"], timeout=10)
+
+    monkeypatch.setattr(subprocess, "run", timeout)
+
+    with pytest.raises(
+        OracleContractError,
+        match="docker ps timed out after 10 seconds",
+    ):
+        adapter.running_containers()
 
 
 @pytest.mark.parametrize("mutation", ["sha", "symlink", "non-executable"])
