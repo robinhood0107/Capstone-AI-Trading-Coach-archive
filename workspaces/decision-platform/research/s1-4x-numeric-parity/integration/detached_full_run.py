@@ -205,6 +205,10 @@ StageRunner = Callable[
     StageReceipt,
 ]
 OutputValidator = Callable[[StageCommand, RunPaths], None]
+AuditRevalidator = Callable[
+    [RunPaths, Mapping[str, Any]],
+    dict[str, Any],
+]
 
 
 def _utc_now() -> str:
@@ -1442,6 +1446,140 @@ def _validate_benchmark_raw_closure(
         raise FullRunError("BENCHMARK_RAW_HASH_CLOSURE_INVALID")
 
 
+def _validate_correctness_raw_closure(
+    paths: RunPaths,
+    plan: Mapping[str, Any],
+) -> None:
+    """Correctness manifest를 manifest 자신을 제외한 exact raw tree에 재대조한다."""
+
+    manifest_path = paths.correctness / "correctness-run-manifest.v1.json"
+    manifest = _strict_json_load(manifest_path)
+    artifacts = manifest.get("artifacts") if isinstance(manifest, dict) else None
+    if (
+        not isinstance(manifest, dict)
+        or manifest.get("schemaVersion") != "s1.4x-correctness-run-manifest-v1"
+        or manifest.get("benchmarkSubjectCommit") != plan["benchmarkSubjectCommit"]
+        or manifest.get("status") != "PASS"
+        or not isinstance(artifacts, list)
+        or manifest.get("artifactCount") != len(artifacts)
+        or not artifacts
+    ):
+        raise FullRunError("CORRECTNESS_RAW_MANIFEST_INVALID")
+    expected: dict[str, tuple[str, int]] = {}
+    for item in artifacts:
+        if (
+            not isinstance(item, dict)
+            or set(item) != {"path", "sha256", "sizeBytes"}
+            or not isinstance(item.get("path"), str)
+            or not item["path"]
+            or item["path"].startswith("/")
+            or "\\" in item["path"]
+            or any(part in {"", ".", ".."} for part in item["path"].split("/"))
+            or SHA256.fullmatch(str(item.get("sha256"))) is None
+            or isinstance(item.get("sizeBytes"), bool)
+            or not isinstance(item.get("sizeBytes"), int)
+            or item["sizeBytes"] < 0
+            or item["path"] in expected
+        ):
+            raise FullRunError("CORRECTNESS_RAW_MANIFEST_INVALID")
+        expected[item["path"]] = (
+            item["sha256"],
+            item["sizeBytes"],
+        )
+    actual: dict[str, tuple[str, int]] = {}
+    for path in sorted(
+        paths.correctness.rglob("*"),
+        key=lambda item: item.relative_to(paths.correctness).as_posix().encode("utf-8"),
+    ):
+        if path.is_symlink():
+            raise FullRunError("CORRECTNESS_RAW_SYMLINK_FORBIDDEN")
+        if path.is_file() and path != manifest_path:
+            actual[path.relative_to(paths.correctness).as_posix()] = (
+                _sha256(path),
+                path.stat().st_size,
+            )
+    if actual != expected:
+        raise FullRunError("CORRECTNESS_RAW_HASH_CLOSURE_INVALID")
+
+
+def _validate_audit_scorecard_binding(paths: RunPaths) -> str:
+    """Scorecard가 현재 typed audit ledger bytes를 가리키는지 검증한다."""
+
+    ledger = paths.correctness_audit / "final-candidate-audit.json"
+    scorecard = _strict_json_load(paths.final_reports / "scorecard.v1.json")
+    ledger_sha256 = _sha256(ledger)
+    if (
+        not isinstance(scorecard, dict)
+        or scorecard.get("auditLedgerSha256") != ledger_sha256
+    ):
+        raise FullRunError("FINAL_AUDIT_SCORECARD_BINDING_INVALID")
+    return ledger_sha256
+
+
+def _revalidate_final_candidate_audit(
+    paths: RunPaths,
+    plan: Mapping[str, Any],
+) -> dict[str, Any]:
+    """기존 typed validator로 final-audit evidence와 scorecard hash를 재검증한다."""
+
+    _validate_runtime_bindings(plan)
+    ledger = paths.correctness_audit / "final-candidate-audit.json"
+    ledger_sha256 = _validate_audit_scorecard_binding(paths)
+    repo = Path(str(plan["repositoryRoot"]))
+    integration = (
+        repo
+        / "workspaces/decision-platform/research/s1-4x-numeric-parity"
+        / "integration"
+    )
+    oracle = integration.parent / "oracle"
+    command = [
+        _binding_path(plan, "uv"),
+        "run",
+        "--frozen",
+        "--no-config",
+        "--project",
+        str(oracle),
+        "python",
+        str(integration / "final_candidate_audit.py"),
+        "validate",
+        "--repository-root",
+        str(repo),
+        "--benchmark-subject-commit",
+        str(plan["benchmarkSubjectCommit"]),
+        "--ledger",
+        str(ledger),
+    ]
+    completed = subprocess.run(
+        command,
+        cwd=repo,
+        env=_execution_environment(plan),
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        check=False,
+        timeout=300,
+    )
+    stdout_path = paths.terminal / "final-audit-revalidation.stdout.log"
+    stderr_path = paths.terminal / "final-audit-revalidation.stderr.log"
+    _exclusive_bytes(stdout_path, completed.stdout)
+    _exclusive_bytes(stderr_path, completed.stderr)
+    if completed.returncode != 0:
+        raise FullRunError("FINAL_AUDIT_REVALIDATION_FAILED")
+    result = _strict_json_load(stdout_path)
+    if (
+        not isinstance(result, dict)
+        or result.get("candidateCount") != 2
+        or result.get("sha256") != ledger_sha256
+        or result.get("status") != "PASS"
+    ):
+        raise FullRunError("FINAL_AUDIT_REVALIDATION_INVALID")
+    return {
+        "ledgerSha256": ledger_sha256,
+        "validatorStdoutSha256": _sha256(stdout_path),
+        "validatorStderrSha256": _sha256(stderr_path),
+        "status": "PASS",
+    }
+
+
 def _last_completed_stage(paths: RunPaths) -> str | None:
     completed = [
         stage for stage in STAGE_ORDER if any(paths.checkpoints.glob(f"*-{stage}.json"))
@@ -1631,6 +1769,8 @@ def _selected_evidence_files(paths: RunPaths) -> list[Path]:
         paths.correctness_audit / "final-candidate-audit.json",
         paths.benchmark / "commands.json",
         paths.benchmark / "commands.sha256",
+        paths.terminal / "final-audit-revalidation.stdout.log",
+        paths.terminal / "final-audit-revalidation.stderr.log",
     ]
     for directory in (
         paths.stages,
@@ -1690,6 +1830,7 @@ def service_finalize(
     service_result: str,
     exit_code: str,
     exit_status: str,
+    audit_revalidator: AuditRevalidator = (_revalidate_final_candidate_audit),
 ) -> dict[str, Any]:
     """ExecStopPost에서 service 결과와 candidate marker를 terminal marker로 승격한다."""
 
@@ -1718,6 +1859,7 @@ def service_finalize(
     )
     failure_code: str | None = None
     final_validation: dict[str, Any] | None = None
+    audit_validation: dict[str, Any] | None = None
     if not candidate_xor:
         failure_code = "CANDIDATE_MARKER_XOR_INVALID"
     elif not service_success:
@@ -1743,7 +1885,10 @@ def service_finalize(
                     paths.final_reports,
                     str(plan["benchmarkSubjectCommit"]),
                 )
+                _validate_correctness_raw_closure(paths, plan)
                 _validate_benchmark_raw_closure(paths, plan)
+                _validate_audit_scorecard_binding(paths)
+                audit_validation = audit_revalidator(paths, plan)
             except (FullRunError, OSError, ValueError):
                 failure_code = "FINAL_REPORT_REVALIDATION_FAILED"
     evidence = _write_evidence_index(
@@ -1761,6 +1906,7 @@ def service_finalize(
             "serviceExitCode": exit_code,
             "serviceExitStatus": exit_status,
             "finalReportValidation": final_validation,
+            "finalAuditRevalidation": audit_validation,
             **evidence,
             "nextAction": "AGENT_REVIEW_AND_RANKING",
             "status": "PASS",
