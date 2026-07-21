@@ -62,6 +62,7 @@ CONTINUATION_DIFF_ALLOWLIST = frozenset(
         str(S1_ROOT / "integration/run_full_correctness.py"),
         str(S1_ROOT / "integration/tools/launch-detached-full-run.sh"),
         str(S1_ROOT / "integration/tools/run-haskell-candidate.sh"),
+        str(S1_ROOT / "integration/tools/run-scala-replay-candidate.sh"),
         str(S1_ROOT / "integration/tools/run-integration-correctness.sh"),
         str(S1_ROOT / "integration/tools/run-native-oci-regression-gates.sh"),
         str(S1_ROOT / "integration/tests/test_continuation_prefix.py"),

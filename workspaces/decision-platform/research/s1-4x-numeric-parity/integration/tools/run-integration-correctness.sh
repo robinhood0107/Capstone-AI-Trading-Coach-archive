@@ -21,10 +21,12 @@ mkdir -p "$OUTPUT_DIRECTORY"
 
 UV_BIN="${S1_4X_UV_BIN:?set the verified absolute uv executable path}"
 SCALA_RUNNER="$S1_4X/scala/tools/run-candidate.sh"
+SCALA_REPLAY_RUNNER="$INTEGRATION/tools/run-scala-replay-candidate.sh"
 HASKELL_RUNNER="$INTEGRATION/tools/run-haskell-candidate.sh"
 for required in \
   "$UV_BIN" \
   "$SCALA_RUNNER" \
+  "$SCALA_REPLAY_RUNNER" \
   "$HASKELL_RUNNER"; do
   test -x "$required" || {
     echo "required integration executable is unavailable: $required" >&2
@@ -80,7 +82,7 @@ export UV_PYTHON=3.12.13
 
 "$UV_BIN" run --frozen --project "$ORACLE" \
   python "$INTEGRATION/replay_transport_contract.py" \
-  --candidate "$SCALA_RUNNER" \
+  --candidate "$SCALA_REPLAY_RUNNER" \
   --fixture-root "$S1_4X/contract/fixtures" \
   --invalid-root "$S1_4X/contract/fixtures/invalid" \
   --output-directory "$OUTPUT_DIRECTORY/scala-transport" \
@@ -95,7 +97,7 @@ export UV_PYTHON=3.12.13
 
 "$UV_BIN" run --frozen --project "$ORACLE" \
   python "$INTEGRATION/replay_binary_contract.py" \
-  --candidate "$SCALA_RUNNER" \
+  --candidate "$SCALA_REPLAY_RUNNER" \
   --invalid-root "$S1_4X/contract/fixtures/invalid" \
   --output-directory "$OUTPUT_DIRECTORY/scala-binary" \
   --report "$OUTPUT_DIRECTORY/scala-binary-report.json"
