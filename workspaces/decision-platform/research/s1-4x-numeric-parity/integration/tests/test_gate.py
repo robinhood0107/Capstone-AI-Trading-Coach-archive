@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 import sys
@@ -507,6 +508,31 @@ class ComparatorTests(TestCase):
 
 
 class FullCorrectnessWiringTests(TestCase):
+    def test_integration_haskell_runner_preserves_qualified_source_closure(
+        self,
+    ) -> None:
+        """Integration argv 수정은 qualification에 결속된 Haskell tree 밖에 둔다."""
+
+        s1_4x = INTEGRATION.parent
+        qualified_runner = s1_4x / "haskell/tools/run-candidate.sh"
+        integration_runner = INTEGRATION / "tools/run-haskell-candidate.sh"
+        aggregate = (
+            INTEGRATION / "tools/run-integration-correctness.sh"
+        ).read_text(encoding="utf-8")
+        self.assertEqual(
+            hashlib.sha256(qualified_runner.read_bytes()).hexdigest(),
+            "0bcf11840951d0e31ed5cf476b225a2fb39d46570dd0dabb6dae14cc30530a19",
+        )
+        self.assertTrue(integration_runner.is_file())
+        self.assertTrue(integration_runner.stat().st_mode & 0o111)
+        runner_source = integration_runner.read_text(encoding="utf-8")
+        self.assertIn('"${STACK_COMMAND[@]}" build \\', runner_source)
+        self.assertIn('"${STACK_COMMAND[@]}" exec s1-4x-haskell -- \\', runner_source)
+        self.assertIn(
+            'HASKELL_RUNNER="$INTEGRATION/tools/run-haskell-candidate.sh"',
+            aggregate,
+        )
+
     def test_scala_runner_receives_required_run_subcommand(self) -> None:
         """Scala와 Haskell의 서로 다른 CLI contract를 orchestration에 고정한다."""
 
