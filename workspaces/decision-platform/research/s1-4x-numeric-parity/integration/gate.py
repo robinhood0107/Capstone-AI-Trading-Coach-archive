@@ -8,6 +8,7 @@ import json
 import math
 import os
 import re
+import stat
 import subprocess
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
@@ -102,6 +103,37 @@ def _validated_python_route(python_executable: Path) -> str:
         raise GateError("PYTHON_EXECUTABLE_UNAVAILABLE")
     # resolve한 target을 실행하면 pyvenv.cfg 기반 site-packages 결속이 사라진다.
     return str(python_executable)
+
+
+def _candidate_pass_fds(command: Sequence[str]) -> tuple[int, ...]:
+    """봉인된 benchmark Python FD를 Haskell wrapper에만 상속한다."""
+
+    if not command:
+        return ()
+    expected_runner = (
+        Path(__file__).resolve().parent / "tools" / "run-haskell-candidate.sh"
+    ).resolve(strict=True)
+    try:
+        candidate_runner = Path(command[0]).resolve(strict=True)
+    except OSError:
+        return ()
+    if candidate_runner != expected_runner:
+        return ()
+    pinned_path = os.environ.get("S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH")
+    if pinned_path is None:
+        return ()
+    matched = re.fullmatch(r"/proc/self/fd/([1-9][0-9]*)", pinned_path)
+    if matched is None or int(matched.group(1)) < 3:
+        raise GateError("BENCHMARK_PYTHON_PINNED_FD_INVALID")
+    descriptor = int(matched.group(1))
+    try:
+        identity = os.fstat(descriptor)
+    except OSError as exc:
+        raise GateError("BENCHMARK_PYTHON_PINNED_FD_UNAVAILABLE") from exc
+    if not stat.S_ISREG(identity.st_mode) or identity.st_mode & 0o111 == 0:
+        raise GateError("BENCHMARK_PYTHON_PINNED_FD_UNSAFE")
+    # source path를 다시 열면 검증과 실행 사이 identity 교체를 허용하게 된다.
+    return (descriptor,)
 
 
 def _failure_leaf(stdout: bytes, stderr: bytes) -> str:
@@ -452,6 +484,7 @@ def run_candidate(
             cwd=output_path.parent,
             capture_output=True,
             check=False,
+            pass_fds=_candidate_pass_fds(command),
             timeout=timeout_seconds,
         )
     except subprocess.TimeoutExpired as exc:
@@ -516,6 +549,7 @@ def run_transport_case(
             cwd=output_path.parent,
             capture_output=True,
             check=False,
+            pass_fds=_candidate_pass_fds(command),
             timeout=timeout_seconds,
         )
     except subprocess.TimeoutExpired as exc:
