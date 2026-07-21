@@ -24,7 +24,9 @@ def test_sealed_continuation_imports_only_then_resumes_common_tail() -> None:
 
     continuation = source.split(
         "  # Import는 sealed ancestor closure만 복원한다.", maxsplit=1
-    )[1].split('fi\nrun_result_command "$HASKELL/tools/run-ghc-9.14.1-compatibility.sh"', 1)[0]
+    )[1].split(
+        'fi\nrun_result_command "$HASKELL/tools/run-ghc-9.14.1-compatibility.sh"', 1
+    )[0]
     for prohibited in (
         "materialize_large_fixtures.py",
         "run-hard-compiler-profile.sh",
@@ -54,10 +56,20 @@ def test_sealed_continuation_imports_only_then_resumes_common_tail() -> None:
     assert '"$HASKELL/tools/select-proven-profile.sh" --check' not in continuation
     assert '"$RESULT_ROOT/continuation-import.v1.json"' in continuation
     assert "selectedProfileSha256" in continuation
-    ghc_tail = (
-        'fi\nrun_result_command '
-        '"$HASKELL/tools/run-ghc-9.14.1-compatibility.sh"'
-    )
+    ghc_tail = 'fi\nrun_result_command "$HASKELL/tools/run-ghc-9.14.1-compatibility.sh"'
     assert source.index(ghc_tail) < source.index(
         'python "$INTEGRATION/coverage_execution.py"'
     )
+
+
+def test_haskell_coverage_explicitly_prewarms_pantry_once() -> None:
+    source = AGGREGATE.read_text(encoding="utf-8")
+    scala = source.index("--candidate scala")
+    haskell = source.index("--candidate haskell")
+    coverage_gate = source.index(
+        'python "$INTEGRATION/coverage_gate.py"',
+        haskell,
+    )
+
+    assert "--prewarm-haskell-pantry" not in source[scala:haskell]
+    assert source[haskell:coverage_gate].count("--prewarm-haskell-pantry") == 1

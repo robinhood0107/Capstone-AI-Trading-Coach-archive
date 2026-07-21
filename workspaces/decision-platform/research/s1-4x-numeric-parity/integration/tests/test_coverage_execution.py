@@ -17,9 +17,7 @@ INTEGRATION = Path(__file__).resolve().parents[1]
 S1_4X = INTEGRATION.parent
 CONTRACT = S1_4X / "contract"
 SEED_CORPUS = CONTRACT / "fixtures/property/property-seeds.v1.json"
-REAL_WRAPPER_FIXTURE = (
-    INTEGRATION / "tests/fixtures/coverage_wrapper.py"
-)
+REAL_WRAPPER_FIXTURE = INTEGRATION / "tests/fixtures/coverage_wrapper.py"
 sys.path.insert(0, str(INTEGRATION))
 
 from coverage_execution import CoverageExecutionError, run_candidate_coverage  # noqa: E402
@@ -99,9 +97,7 @@ class CandidateCoverageExecutionTests(TestCase):
             successful_tests = len(seed_corpus["seeds"]) * successes_per_seed
             implementation = "scala-3.8.4-jvm25"
             toolchain = json.loads(
-                (S1_4X / "scala/toolchain-lock.v1.json").read_text(
-                    encoding="utf-8"
-                )
+                (S1_4X / "scala/toolchain-lock.v1.json").read_text(encoding="utf-8")
             )
             properties = [
                 {
@@ -124,15 +120,11 @@ class CandidateCoverageExecutionTests(TestCase):
                             "successfulTests": successes_per_seed,
                             "discardedTests": 0,
                             "attemptedTests": successes_per_seed,
-                            "replayToken": (
-                                f"scalacheck:{index}:{seed_index}"
-                            ),
+                            "replayToken": (f"scalacheck:{index}:{seed_index}"),
                             "shrinks": 0,
                             "status": "PASS",
                         }
-                        for seed_index, seed in enumerate(
-                            seed_corpus["seeds"]
-                        )
+                        for seed_index, seed in enumerate(seed_corpus["seeds"])
                     ],
                     "shrinks": 0,
                 }
@@ -174,11 +166,11 @@ class CandidateCoverageExecutionTests(TestCase):
                     "maximumDiscardRatio": plan["maximumDiscardRatio"],
                     "framework": "scala-check-1.19.0",
                     "toolchainProfile": "B",
-                    "scalaCliBinarySha256": toolchain["scalaCli"][
-                        "binarySha256"
-                    ],
+                    "scalaCliBinarySha256": toolchain["scalaCli"]["binarySha256"],
                     "commandArgvSha256": _canonical_sha256(command),
-                    "runnerSha256": hashlib.sha256(runner_path.read_bytes()).hexdigest(),
+                    "runnerSha256": hashlib.sha256(
+                        runner_path.read_bytes()
+                    ).hexdigest(),
                     "sourceClosureSha256": "c" * 64,
                     "startedAt": "2026-07-18T12:00:00.000000Z",
                     "finishedAt": "2026-07-18T12:00:01.000000Z",
@@ -226,7 +218,9 @@ class CandidateCoverageExecutionTests(TestCase):
                     {
                         "schemaVersion": "s1.4x-candidate-property-execution-v1",
                         "outerCommandArgvSha256": "0" * 64,
-                        "runnerSha256": hashlib.sha256(runner_path.read_bytes()).hexdigest(),
+                        "runnerSha256": hashlib.sha256(
+                            runner_path.read_bytes()
+                        ).hexdigest(),
                     }
                 ),
                 encoding="utf-8",
@@ -314,10 +308,9 @@ class CandidateCoverageExecutionTests(TestCase):
             ]
         )
         execution = json.loads(
-            (
-                output
-                / "haskell-property-execution-evidence.v1.json"
-            ).read_text(encoding="utf-8")
+            (output / "haskell-property-execution-evidence.v1.json").read_text(
+                encoding="utf-8"
+            )
         )
         self.assertEqual(
             result["runner"]["commandArgvSha256"],
@@ -327,6 +320,162 @@ class CandidateCoverageExecutionTests(TestCase):
         self.assertNotEqual(
             execution["commandArgvSha256"],
             execution["outerCommandArgvSha256"],
+        )
+
+    def test_haskell_pantry_is_updated_before_the_fresh_stack_root_build(
+        self,
+    ) -> None:
+        temporary = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        home = temporary / "home"
+        home.mkdir()
+        stack_bin = temporary / "stack"
+        stack_bin.write_bytes(b"pinned-stack")
+        stack_bin.chmod(0o700)
+        output = temporary / "haskell-output"
+        receipt = temporary / "haskell-receipt.json"
+        calls: list[str] = []
+
+        def prewarm_runner(
+            command: list[str],
+            **kwargs: Any,
+        ) -> subprocess.CompletedProcess[bytes]:
+            calls.append("prewarm")
+            self.assertEqual(command[0], str(stack_bin.resolve()))
+            self.assertIn("update", command)
+            self.assertNotIn("PANTRY_ROOT", kwargs["env"])
+            pantry = home / ".stack/pantry"
+            (pantry / "hackage").mkdir(parents=True)
+            (pantry / "pantry.sqlite3").write_bytes(b"sqlite")
+            (pantry / "hackage/00-index.tar").write_bytes(b"index")
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                b"index updated\n",
+                b"",
+            )
+
+        def runner(
+            command: list[str],
+            **kwargs: Any,
+        ) -> subprocess.CompletedProcess[bytes]:
+            calls.append("runner")
+            environment = dict(kwargs["env"])
+            self.assertEqual(
+                environment["PANTRY_ROOT"],
+                str((home / ".stack/pantry").resolve()),
+            )
+            environment["S1_4X_TEST_COVERAGE_CANDIDATE"] = "haskell"
+            return subprocess.run(
+                command,
+                **{**kwargs, "env": environment},
+            )
+
+        with patch.dict(
+            os.environ,
+            {
+                "HOME": str(home),
+                "S1_4X_STACK_BIN": str(stack_bin),
+            },
+            clear=False,
+        ):
+            os.environ.pop("PANTRY_ROOT", None)
+            result = run_candidate_coverage(
+                candidate="haskell",
+                candidate_profile=None,
+                runner_path=REAL_WRAPPER_FIXTURE,
+                output_directory=output,
+                receipt_path=receipt,
+                property_plan_path=CONTRACT / "property-plan.v1.json",
+                function_registry_path=CONTRACT / "function-registry.v1.json",
+                error_registry_path=CONTRACT / "error-registry.v1.json",
+                prewarm_haskell_pantry=True,
+                runner=runner,
+                prewarm_runner=prewarm_runner,
+            )
+
+        self.assertEqual(calls, ["prewarm", "runner"])
+        self.assertEqual(result["status"], "PASS")
+        prewarm = json.loads(
+            receipt.with_name(f"{receipt.stem}.pantry-prewarm.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(prewarm["status"], "PASS")
+        self.assertEqual(prewarm["process"]["exitCode"], 0)
+        self.assertEqual(
+            receipt.with_name(f"{receipt.stem}.pantry-prewarm.stdout").read_bytes(),
+            b"index updated\n",
+        )
+
+    def test_haskell_pantry_update_failure_stops_before_the_runner(self) -> None:
+        temporary = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        home = temporary / "home"
+        home.mkdir()
+        stack_bin = temporary / "stack"
+        stack_bin.write_bytes(b"pinned-stack")
+        stack_bin.chmod(0o700)
+        receipt = temporary / "haskell-receipt.json"
+        runner_called = False
+
+        def prewarm_runner(
+            command: list[str],
+            **_: Any,
+        ) -> subprocess.CompletedProcess[bytes]:
+            return subprocess.CompletedProcess(
+                command,
+                17,
+                b"partial\n",
+                b"update failed\n",
+            )
+
+        def runner(
+            command: list[str],
+            **_: Any,
+        ) -> subprocess.CompletedProcess[bytes]:
+            nonlocal runner_called
+            runner_called = True
+            return subprocess.CompletedProcess(command, 0, b"", b"")
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "HOME": str(home),
+                    "S1_4X_STACK_BIN": str(stack_bin),
+                },
+                clear=False,
+            ),
+            self.assertRaisesRegex(
+                CoverageExecutionError,
+                "HASKELL_PANTRY_PREWARM_FAILED:exit=17",
+            ),
+        ):
+            os.environ.pop("PANTRY_ROOT", None)
+            run_candidate_coverage(
+                candidate="haskell",
+                candidate_profile=None,
+                runner_path=REAL_WRAPPER_FIXTURE,
+                output_directory=temporary / "haskell-output",
+                receipt_path=receipt,
+                property_plan_path=CONTRACT / "property-plan.v1.json",
+                function_registry_path=CONTRACT / "function-registry.v1.json",
+                error_registry_path=CONTRACT / "error-registry.v1.json",
+                prewarm_haskell_pantry=True,
+                runner=runner,
+                prewarm_runner=prewarm_runner,
+            )
+
+        self.assertFalse(runner_called)
+        prewarm = json.loads(
+            receipt.with_name(f"{receipt.stem}.pantry-prewarm.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(prewarm["status"], "FAIL")
+        self.assertEqual(prewarm["process"]["exitCode"], 17)
+        self.assertEqual(
+            receipt.with_name(f"{receipt.stem}.pantry-prewarm.stderr").read_bytes(),
+            b"update failed\n",
         )
 
     def test_haskell_runner_inherits_pinned_benchmark_python_fd(self) -> None:
@@ -405,13 +554,8 @@ class CandidateCoverageExecutionTests(TestCase):
                 capture_output=True,
                 env=environment,
             )
-            execution_path = (
-                output
-                / "haskell-property-execution-evidence.v1.json"
-            )
-            execution = json.loads(
-                execution_path.read_text(encoding="utf-8")
-            )
+            execution_path = output / "haskell-property-execution-evidence.v1.json"
+            execution = json.loads(execution_path.read_text(encoding="utf-8"))
             execution["stackRootPathId"] = (
                 "S1_4X_CACHE_ROOT/stack-root-property-" + "2" * 24
             )
