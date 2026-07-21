@@ -35,6 +35,10 @@ class BinaryTransportReplayTests(TestCase):
             manifest_path = fixture_root / "large" / manifest_name
             self.assertTrue(manifest_path.is_file())
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                request["cases"][0]["fixtureId"],
+                manifest["fixtureId"],
+            )
             file_name = manifest.get("fileName")
             generator = manifest.get("generator")
             payload_hex = (
