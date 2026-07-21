@@ -28,9 +28,27 @@ class BinaryTransportReplayTests(TestCase):
 
         def runner(command: list[str], **_: Any) -> subprocess.CompletedProcess[bytes]:
             request_path = Path(command[command.index("--request") + 1])
+            fixture_root = Path(command[command.index("--fixture-root") + 1])
             output_path = Path(command[command.index("--output") + 1])
             request = json.loads(request_path.read_text(encoding="utf-8"))
             manifest_name = request["cases"][0]["arguments"]["returns"]["manifestFile"]
+            manifest_path = fixture_root / "large" / manifest_name
+            self.assertTrue(manifest_path.is_file())
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            file_name = manifest.get("fileName")
+            generator = manifest.get("generator")
+            payload_hex = (
+                generator.get("payloadHex") if isinstance(generator, dict) else None
+            )
+            if (
+                isinstance(payload_hex, str)
+                and payload_hex
+                and isinstance(file_name, str)
+                and "/" not in file_name
+                and "\\" not in file_name
+            ):
+                binary_path = fixture_root / "large" / "generated" / file_name
+                self.assertTrue(binary_path.exists() or binary_path.is_symlink())
             if manifest_name == "manifest-non-finite-semantic.json":
                 output_path.write_text(
                     json.dumps(
@@ -87,5 +105,8 @@ class BinaryTransportReplayTests(TestCase):
         self.assertEqual(report["transportFailureCount"], 11)
         self.assertEqual(report["semanticErrorCount"], 1)
         self.assertTrue(
-            (root / "replay/manifest-symlink-escape/fixtures/symlink-escape.f64le").is_symlink()
+            (
+                root
+                / "replay/manifest-symlink-escape/fixtures/large/generated/symlink-escape.f64le"
+            ).is_symlink()
         )
