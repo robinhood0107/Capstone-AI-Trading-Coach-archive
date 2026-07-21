@@ -24,8 +24,8 @@
     "canonicalInputsSha256": "367ca5b8589f9c5b16e8c2e5dd2cfe7cc560a7de19559551c487beeefcf62e63",
     "canonicalResultsSha256": "59619337c415757a612bc923b32e2a174018b15dc67b2357b10ccb602fca1b6a",
     "contractCanonicalRootSha256": "2d5d2aa08355bc47bb3ab6515a2d3e5e03b3d41f500f985d1d92c9791fbc5d14",
-    "contractManifestSha256": "1ead5be102610ebaeb203c0e8c7de8115748048b50bf2c6aab70c3d556eff712",
-    "oracleCanonicalRootSha256": "e32dfd638a4c7c1efc76a35cc5844bc93e1f61a291e745627332f350cec560ca",
+    "contractManifestSha256": "e69a3b507f4d70db9325cda5e3fe015ee04acfb3b3706792addce253dfee8426",
+    "oracleCanonicalRootSha256": "68d70aec348a7bfceea29db47be75a9f47558f5899da18cfeea5628e42d24faa",
     "referenceLockSha256": "b55b81b933ad4749c77e3baa313f900dab18d808bc34285232f7b603993a6cb7",
     "toolchainProvenanceSha256": "cd9e29a22473fba6203daa4f3a0cbaa57b8b6e5c5fc22de05ca0801c404ffa98"
   },
