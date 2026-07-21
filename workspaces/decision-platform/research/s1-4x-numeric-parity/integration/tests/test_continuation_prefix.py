@@ -28,6 +28,11 @@ def test_continuation_diff_allows_completion_and_hash_reseal_files() -> None:
         str(continuation.S1_ROOT / "integration/gate.py"),
         str(continuation.S1_ROOT / "integration/final_candidate_audit.py"),
         str(continuation.S1_ROOT / "integration/run_full_correctness.py"),
+        str(continuation.S1_ROOT / "haskell/tools/run-candidate.sh"),
+        str(
+            continuation.S1_ROOT
+            / "haskell/tools/tests/test_candidate_wrapper_contract.py"
+        ),
         str(
             continuation.S1_ROOT
             / "integration/tests/test_assemble_final_candidate_evidence.py"
