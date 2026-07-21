@@ -50,7 +50,7 @@ S1_ROOT = PurePosixPath(
     "workspaces/decision-platform/research/s1-4x-numeric-parity"
 )
 
-# parent..target에는 continuation orchestration과 host-validity 완화만 허용한다.
+# parent..target에는 continuation orchestration과 승인된 exact failure repair만 허용한다.
 CONTINUATION_DIFF_ALLOWLIST = frozenset(
     {
         str(S1_ROOT / "integration/assemble_final_candidate_evidence.py"),
@@ -80,6 +80,8 @@ CONTINUATION_DIFF_ALLOWLIST = frozenset(
         str(S1_ROOT / "oracle/validate_environment.py"),
         str(S1_ROOT / "oracle/tests/test_validate_environment.py"),
         str(S1_ROOT / "reports/integration-baseline.v1.json"),
+        str(S1_ROOT / "scala/tools/oci_evidence.py"),
+        str(S1_ROOT / "scala/tools/test_oci_evidence.py"),
         str(S1_ROOT / "README.md"),
         str(S1_ROOT / "integration/README.md"),
     }

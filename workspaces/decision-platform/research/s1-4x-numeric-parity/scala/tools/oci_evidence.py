@@ -24,6 +24,15 @@ class OciEvidenceError(ValueError):
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 IMAGE_ID = re.compile(r"^sha256:[0-9a-f]{64}$")
 BASE_REFERENCE = re.compile(r"^[^@\s]+@sha256:[0-9a-f]{64}$")
+SCALA_BASE_REPOSITORY = "docker.io/library/eclipse-temurin"
+SCALA_BASE_REPOSITORY_ALIASES = frozenset(
+    {
+        "eclipse-temurin",
+        "library/eclipse-temurin",
+        SCALA_BASE_REPOSITORY,
+        "index.docker.io/library/eclipse-temurin",
+    }
+)
 CANDIDATE_LABEL = "org.opencontainers.image.s1-4x.candidate-sha256"
 BASE_REFERENCE_LABEL = "org.opencontainers.image.s1-4x.base-reference"
 BASE_IMAGE_ID_LABEL = "org.opencontainers.image.s1-4x.base-image-id"
@@ -256,6 +265,30 @@ def inspect_image(
     return value[0]
 
 
+def local_base_digest_is_bound(
+    base_reference: str,
+    repo_digests: object,
+) -> bool:
+    """공식 Docker Hub의 제한된 이름 별칭만 caller의 exact digest에 결속한다."""
+
+    if BASE_REFERENCE.fullmatch(base_reference) is None:
+        return False
+    repository, _, expected_digest = base_reference.rpartition("@")
+    if repository != SCALA_BASE_REPOSITORY:
+        return False
+    if (
+        not isinstance(repo_digests, list)
+        or not repo_digests
+        or any(type(value) is not str for value in repo_digests)
+    ):
+        return False
+    return any(
+        value.rpartition("@")[0] in SCALA_BASE_REPOSITORY_ALIASES
+        and value.rpartition("@")[2] == expected_digest
+        for value in repo_digests
+    )
+
+
 def selected_labels(image: dict[str, Any]) -> dict[str, str]:
     config = image.get("Config")
     labels = config.get("Labels") if isinstance(config, dict) else None
@@ -425,10 +458,7 @@ def execute_build(arguments: argparse.Namespace) -> dict[str, Any]:
         raise OciEvidenceError("BASE_IMAGE_DIGEST_REFERENCE_REQUIRED")
     base = inspect_image(docker, arguments.base_image)
     repo_digests = base.get("RepoDigests")
-    if (
-        not isinstance(repo_digests, list)
-        or arguments.base_image not in repo_digests
-    ):
+    if not local_base_digest_is_bound(arguments.base_image, repo_digests):
         raise OciEvidenceError("BASE_IMAGE_SOURCE_DIGEST_NOT_LOCAL")
     base_id = str(base["Id"])
     candidate_bytes = single_regular_bytes(
