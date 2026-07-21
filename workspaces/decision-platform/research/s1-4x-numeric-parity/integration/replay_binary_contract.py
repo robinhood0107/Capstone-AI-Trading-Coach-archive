@@ -59,6 +59,9 @@ def _materialize_case(
     manifest = strict_json_load(source_manifest)
     if not isinstance(manifest, dict):
         raise GateError(f"INVALID_MANIFEST_DOCUMENT:{entry['file']}")
+    manifest_fixture_id = manifest.get("fixtureId")
+    if not isinstance(manifest_fixture_id, str) or not manifest_fixture_id:
+        raise GateError(f"INVALID_MANIFEST_FIXTURE_ID:{entry['file']}")
     # Candidate와 동일하게 manifest는 large/, payload는 large/generated/에 둔다.
     shutil.copyfile(source_manifest, large / entry["file"])
     generator = manifest.get("generator")
@@ -82,13 +85,12 @@ def _materialize_case(
         else:
             binary_path.write_bytes(payload)
     expected_semantic = manifest.get("expectedSemanticError")
-    fixture_id = entry["fixtureId"]
     request = {
         "schemaVersion": "s1.4x-request-v1",
         "requestId": f"binary-replay-{index:02d}",
         "cases": [
             {
-                "fixtureId": fixture_id,
+                "fixtureId": manifest_fixture_id,
                 "functionId": "cumulative_return",
                 "arguments": {
                     "returns": {
