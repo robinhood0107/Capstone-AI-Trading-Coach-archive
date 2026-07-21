@@ -450,6 +450,7 @@ run_result_command "$UV_BIN" run --frozen --project "$ORACLE" \
 run_result_command "$UV_BIN" run --frozen --project "$ORACLE" \
   python "$INTEGRATION/coverage_execution.py" \
   --candidate haskell \
+  --prewarm-haskell-pantry \
   --runner "$HASKELL/tools/run-property-evidence.sh" \
   --output-directory "$RESULT_ROOT/coverage/haskell" \
   --receipt "$RESULT_ROOT/coverage/haskell-coverage-receipt.json" \
