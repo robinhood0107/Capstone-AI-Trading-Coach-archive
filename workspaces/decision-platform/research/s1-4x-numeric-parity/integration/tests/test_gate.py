@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 from typing import Any
 from unittest import TestCase
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 INTEGRATION = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(INTEGRATION))
@@ -23,6 +23,7 @@ from gate import (  # noqa: E402
     validate_result_batch,
     validate_transport_failure,
 )
+import run_full_correctness as full_correctness  # noqa: E402
 
 
 def _request() -> dict[str, Any]:
@@ -330,6 +331,44 @@ arguments.output.write_text(json.dumps({
                     runner=noisy_runner,
                 )
 
+    def test_untyped_candidate_failure_preserves_raw_streams(self) -> None:
+        """Wrapper usage 오류도 transport parse 예외에 가리지 않고 보존한다."""
+
+        temp = self.enterContext(__import__("tempfile").TemporaryDirectory())
+        root = Path(temp)
+        request_path = root / "request.json"
+        request_path.write_text(json.dumps(_request()), encoding="utf-8")
+        fixture_root = root / "fixtures"
+        fixture_root.mkdir()
+        output = root / "result.json"
+        stderr = b"usage: scala-runner run --request ...\n"
+        failed = Mock(
+            return_value=subprocess.CompletedProcess(
+                ["scala-runner"],
+                64,
+                b"",
+                stderr,
+            )
+        )
+
+        with self.assertRaisesRegex(
+            GateError,
+            "CANDIDATE_PROCESS_FAILED:scala:exit=64:.*"
+            "leaf=usage: scala-runner run --request",
+        ):
+            run_candidate(
+                label="scala",
+                command_template=["/candidate", "{protocol_args}"],
+                request_path=request_path,
+                fixture_root=fixture_root,
+                output_path=output,
+                runner=failed,
+            )
+        self.assertEqual(
+            (root / "result.json.failure.stderr.log").read_bytes(),
+            stderr,
+        )
+
     def test_transport_failure_is_single_sanitized_json_and_has_no_output(self) -> None:
         transport = {
             "schemaVersion": "s1.4x-transport-error-v1",
@@ -464,4 +503,114 @@ class ComparatorTests(TestCase):
         self.assertEqual(
             (root / "failed.json.failure.stderr.log").read_bytes(),
             comparator_stderr,
+        )
+
+
+class FullCorrectnessWiringTests(TestCase):
+    def test_scala_runner_receives_required_run_subcommand(self) -> None:
+        """Scala와 Haskell의 서로 다른 CLI contract를 orchestration에 고정한다."""
+
+        temp = self.enterContext(__import__("tempfile").TemporaryDirectory())
+        root = Path(temp)
+        request = root / "request.json"
+        expected = root / "expected.json"
+        request.write_text(json.dumps(_request()), encoding="utf-8")
+        expected.write_text(json.dumps(_result()), encoding="utf-8")
+        fixture_root = root / "fixtures"
+        production = root / "production"
+        research = root / "research"
+        for directory in (fixture_root, production, research):
+            directory.mkdir()
+        scala_runner = root / "scala-runner"
+        haskell_runner = root / "haskell-runner"
+        capture_script = root / "capture.py"
+        comparator = root / "compare.py"
+        for path in (scala_runner, haskell_runner, capture_script, comparator):
+            path.write_text("placeholder\n", encoding="utf-8")
+        output = root / "output"
+
+        def capture(**arguments: Any) -> dict[str, Any]:
+            arguments["capture_report"].write_text("{}", encoding="utf-8")
+            return {"status": "PASS"}
+
+        def candidate(**arguments: Any) -> dict[str, Any]:
+            payload = _result()
+            payload["implementation"] = (
+                "scala-3.8.4-jvm25"
+                if arguments["label"] == "scala"
+                else "haskell-ghc-9.10.3"
+            )
+            arguments["output_path"].write_text(
+                json.dumps(payload),
+                encoding="utf-8",
+            )
+            return payload
+
+        def compare(**arguments: Any) -> dict[str, Any]:
+            report = {
+                "schemaVersion": "s1.4x-comparison-report-v1",
+                "requestId": "full-correctness-v1",
+                "implementationCount": 2,
+                "mismatchCount": 0,
+                "mismatches": [],
+                "status": "PASS",
+            }
+            arguments["output"].write_text(json.dumps(report), encoding="utf-8")
+            return report
+
+        with (
+            patch.object(
+                full_correctness,
+                "run_reference_capture",
+                side_effect=capture,
+            ),
+            patch.object(
+                full_correctness,
+                "run_candidate",
+                side_effect=candidate,
+            ) as candidate_mock,
+            patch.object(
+                full_correctness,
+                "compare_candidate_results",
+                side_effect=compare,
+            ),
+        ):
+            status = full_correctness.main(
+                [
+                    "--request",
+                    str(request),
+                    "--fixture-root",
+                    str(fixture_root),
+                    "--expected",
+                    str(expected),
+                    "--output-directory",
+                    str(output),
+                    "--scala-runner",
+                    str(scala_runner),
+                    "--haskell-runner",
+                    str(haskell_runner),
+                    "--capture-script",
+                    str(capture_script),
+                    "--comparator",
+                    str(comparator),
+                    "--production-project",
+                    str(production),
+                    "--research-project",
+                    str(research),
+                    "--uv-executable",
+                    sys.executable,
+                    "--scratch-root",
+                    str(root / "scratch"),
+                ]
+            )
+
+        self.assertEqual(status, 0)
+        scala_call, haskell_call = candidate_mock.call_args_list
+        self.assertEqual(
+            scala_call.kwargs["command_template"],
+            [str(scala_runner.resolve()), "run", "{protocol_args}"],
+        )
+        self.assertEqual(
+            haskell_call.kwargs["command_template"],
+            [str(haskell_runner.resolve()), "{protocol_args}"],
         )
