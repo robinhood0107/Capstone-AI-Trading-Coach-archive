@@ -63,7 +63,13 @@ def _materialize_case(
     if not isinstance(manifest_fixture_id, str) or not manifest_fixture_id:
         raise GateError(f"INVALID_MANIFEST_FIXTURE_ID:{entry['file']}")
     # Candidate와 동일하게 manifest는 large/, payload는 large/generated/에 둔다.
-    shutil.copyfile(source_manifest, large / entry["file"])
+    manifest_path = large / entry["file"]
+    if entry.get("binaryPlacement") == "symlink-escape":
+        outside_manifest = case_root / "outside-manifest.json"
+        shutil.copyfile(source_manifest, outside_manifest)
+        manifest_path.symlink_to(outside_manifest)
+    else:
+        shutil.copyfile(source_manifest, manifest_path)
     generator = manifest.get("generator")
     payload_hex = generator.get("payloadHex") if isinstance(generator, dict) else None
     file_name = manifest.get("fileName")
@@ -78,12 +84,7 @@ def _materialize_case(
         except ValueError as exc:
             raise GateError(f"INVALID_LITERAL_PAYLOAD:{entry['file']}") from exc
         binary_path = generated / file_name
-        if entry.get("binaryPlacement") == "symlink-escape":
-            outside = case_root / "outside.f64le"
-            outside.write_bytes(payload)
-            binary_path.symlink_to(outside)
-        else:
-            binary_path.write_bytes(payload)
+        binary_path.write_bytes(payload)
     expected_semantic = manifest.get("expectedSemanticError")
     request = {
         "schemaVersion": "s1.4x-request-v1",
