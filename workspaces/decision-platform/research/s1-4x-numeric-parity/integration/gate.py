@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
@@ -83,6 +84,84 @@ TRANSPORT_EXIT_BY_CODE = {
 
 class GateError(ValueError):
     """교차 언어 gate가 수락할 수 없는 계약 위반을 나타낸다."""
+
+
+def _validated_python_route(python_executable: Path) -> str:
+    """Venv argv0 route는 보존하되 실행 대상의 존재와 권한은 먼저 검증한다."""
+
+    if (
+        not python_executable.is_absolute()
+        or Path(os.path.abspath(python_executable)) != python_executable
+    ):
+        raise GateError("PYTHON_EXECUTABLE_ROUTE_INVALID")
+    try:
+        python_executable.resolve(strict=True)
+    except OSError as exc:
+        raise GateError("PYTHON_EXECUTABLE_UNAVAILABLE") from exc
+    if not python_executable.is_file() or not os.access(python_executable, os.X_OK):
+        raise GateError("PYTHON_EXECUTABLE_UNAVAILABLE")
+    # resolve한 target을 실행하면 pyvenv.cfg 기반 site-packages 결속이 사라진다.
+    return str(python_executable)
+
+
+def _failure_leaf(stdout: bytes, stderr: bytes) -> str:
+    """Raw stream은 파일에 보존하고 gate 메시지에는 마지막 한 줄만 싣는다."""
+
+    payload = stderr if stderr.strip() else stdout
+    text = payload.decode("utf-8", errors="replace").strip()
+    if not text:
+        return "<empty>"
+    return re.sub(r"\s+", " ", text.splitlines()[-1]).strip()[:256]
+
+
+def _persist_failure_streams(
+    anchor: Path,
+    *,
+    stdout: bytes,
+    stderr: bytes,
+) -> tuple[str, str]:
+    """실패 stream 원문을 exclusive 파일로 남기고 byte hash를 반환한다."""
+
+    artifacts = (
+        (anchor.with_name(f"{anchor.name}.failure.stdout.log"), stdout),
+        (anchor.with_name(f"{anchor.name}.failure.stderr.log"), stderr),
+    )
+    written: list[Path] = []
+    try:
+        for path, payload in artifacts:
+            descriptor = os.open(
+                path,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o600,
+            )
+            try:
+                with os.fdopen(descriptor, "wb") as stream:
+                    stream.write(payload)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+            except BaseException:
+                path.unlink(missing_ok=True)
+                raise
+            written.append(path)
+    except BaseException:
+        for path in written:
+            path.unlink(missing_ok=True)
+        raise
+    return hashlib.sha256(stdout).hexdigest(), hashlib.sha256(stderr).hexdigest()
+
+
+def _failure_details(anchor: Path, completed: subprocess.CompletedProcess[bytes]) -> str:
+    """Nonzero child의 raw evidence와 portable first leaf를 함께 결속한다."""
+
+    stdout_sha256, stderr_sha256 = _persist_failure_streams(
+        anchor,
+        stdout=completed.stdout,
+        stderr=completed.stderr,
+    )
+    return (
+        f"stdoutSha256={stdout_sha256}:stderrSha256={stderr_sha256}:"
+        f"leaf={_failure_leaf(completed.stdout, completed.stderr)}"
+    )
 
 
 def _reject_constant(token: str) -> Any:
@@ -469,7 +548,7 @@ def run_reference_capture(
         raise GateError("REFERENCE_CAPTURE_REPORT_ALREADY_EXISTS")
     capture_report.parent.mkdir(parents=True, exist_ok=True)
     command = [
-        str(python_executable.resolve(strict=True)),
+        _validated_python_route(python_executable),
         str(capture_script.resolve(strict=True)),
         "--request",
         str(request_path.resolve(strict=True)),
@@ -499,7 +578,7 @@ def run_reference_capture(
     if completed.returncode != 0:
         raise GateError(
             f"REFERENCE_CAPTURE_FAILED:exit={completed.returncode}:"
-            f"stdout={completed.stdout.decode('utf-8', errors='replace')[:256]}"
+            f"{_failure_details(capture_report, completed)}"
         )
     if completed.stderr or not completed.stdout.startswith(b"REFERENCE_CAPTURE_PASS "):
         raise GateError("REFERENCE_CAPTURE_STREAM_INVALID")
@@ -531,7 +610,7 @@ def compare_candidate_results(
     if output.exists():
         raise GateError("COMPARISON_OUTPUT_ALREADY_EXISTS")
     command = [
-        str(python_executable.resolve(strict=True)),
+        _validated_python_route(python_executable),
         str(comparator),
         "--expected",
         str(expected.resolve(strict=True)),
@@ -549,7 +628,10 @@ def compare_candidate_results(
         timeout=120,
     )
     if completed.returncode != 0:
-        raise GateError(f"COMPARISON_FAILED:exit={completed.returncode}")
+        raise GateError(
+            f"COMPARISON_FAILED:exit={completed.returncode}:"
+            f"{_failure_details(output, completed)}"
+        )
     if completed.stderr:
         raise GateError("COMPARISON_STDERR_NOT_EMPTY")
     report = strict_json_load(output)

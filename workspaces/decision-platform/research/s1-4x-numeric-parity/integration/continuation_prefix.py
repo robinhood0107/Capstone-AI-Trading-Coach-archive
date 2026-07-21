@@ -58,6 +58,7 @@ CONTINUATION_DIFF_ALLOWLIST = frozenset(
         str(S1_ROOT / "integration/continuation_prefix.py"),
         str(S1_ROOT / "integration/detached_full_run.py"),
         str(S1_ROOT / "integration/final_candidate_audit.py"),
+        str(S1_ROOT / "integration/gate.py"),
         str(S1_ROOT / "integration/tools/launch-detached-full-run.sh"),
         str(S1_ROOT / "integration/tools/run-native-oci-regression-gates.sh"),
         str(S1_ROOT / "integration/tests/test_continuation_prefix.py"),
@@ -67,6 +68,7 @@ CONTINUATION_DIFF_ALLOWLIST = frozenset(
             / "integration/tests/test_assemble_final_candidate_evidence.py"
         ),
         str(S1_ROOT / "integration/tests/test_detached_full_run.py"),
+        str(S1_ROOT / "integration/tests/test_gate.py"),
         str(S1_ROOT / "integration/tests/test_native_oci_continuation_contract.py"),
         str(S1_ROOT / "contract/contract-manifest.v1.json"),
         str(S1_ROOT / "oracle/validate_environment.py"),
