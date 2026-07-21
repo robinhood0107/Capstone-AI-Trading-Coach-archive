@@ -578,6 +578,11 @@ def main() -> int:
     ):
         assert marker in containerfile
     assert "USER 65532:65532" in containerfile
+    assert (
+        'ENTRYPOINT ["/opt/java/openjdk/bin/java", "-cp", '
+        '"/opt/s1-4x/candidate.jar", "ai.trading.coach.s14x.shell.Main"]'
+        in containerfile
+    )
     build_oci = script("build-oci-image.sh")
     oci = script("run-oci-correctness.sh")
     oci_evidence = (TOOLS_ROOT / "oci_evidence.py").read_text(encoding="utf-8")
@@ -587,6 +592,8 @@ def main() -> int:
     assert "runtime-binding" in oci
     assert "S1_4X_DOCKER_SHA256:?" in oci
     assert '"$IMAGE_ID"' in oci
+    assert '"$IMAGE_ID" \\\n    --request "$request" \\\n' in oci
+    assert '"$IMAGE_ID" \\\n    run \\\n' not in oci
     assert "/workspace" not in oci
     assert "$HOME:" not in oci
     assert "S1_4X_SCALA_BASE_IMAGE_REF:?" in build_oci

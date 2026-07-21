@@ -55,7 +55,9 @@ def test_continuation_diff_allows_completion_and_hash_reseal_files() -> None:
             continuation.S1_ROOT / "reports/integration-baseline.v1.json"
         ),
         str(continuation.S1_ROOT / "scala/tools/oci_evidence.py"),
+        str(continuation.S1_ROOT / "scala/tools/run-oci-correctness.sh"),
         str(continuation.S1_ROOT / "scala/tools/test_oci_evidence.py"),
+        str(continuation.S1_ROOT / "scala/tools/test_t3_tooling_contract.py"),
     }
 
     assert expected <= continuation.CONTINUATION_DIFF_ALLOWLIST
