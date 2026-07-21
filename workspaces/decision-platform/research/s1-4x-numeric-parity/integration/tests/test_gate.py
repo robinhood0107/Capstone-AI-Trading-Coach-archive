@@ -531,6 +531,14 @@ class FullCorrectnessWiringTests(TestCase):
         self.assertIn("SELECTED_PROFILE_SHA256", runner_source)
         self.assertIn("stack-root-integration-candidate-", runner_source)
         self.assertIn("/usr/bin/flock -x", runner_source)
+        self.assertIn("STACK_BUILD_STDOUT", runner_source)
+        self.assertIn("STACK_BUILD_STDERR", runner_source)
+        self.assertIn('if [[ "$build_status" -ne 0 ]]', runner_source)
+        self.assertIn('if [[ -s "$STACK_STDERR"', runner_source)
+        self.assertNotIn(
+            '>"$STACK_STDOUT" \\\n+  2>"$STACK_STDERR"\n)\n',
+            runner_source,
+        )
         self.assertNotIn("candidate-stack-root", runner_source)
         self.assertIn(
             'HASKELL_RUNNER="$INTEGRATION/tools/run-haskell-candidate.sh"',
