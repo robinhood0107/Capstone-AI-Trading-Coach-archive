@@ -52,12 +52,15 @@ def _materialize_case(
     index: int,
 ) -> tuple[Path, Path, str | None]:
     fixtures = case_root / "fixtures"
-    fixtures.mkdir(parents=True)
+    large = fixtures / "large"
+    generated = large / "generated"
+    generated.mkdir(parents=True)
     source_manifest = invalid_root / entry["file"]
     manifest = strict_json_load(source_manifest)
     if not isinstance(manifest, dict):
         raise GateError(f"INVALID_MANIFEST_DOCUMENT:{entry['file']}")
-    shutil.copyfile(source_manifest, fixtures / entry["file"])
+    # Candidate와 동일하게 manifest는 large/, payload는 large/generated/에 둔다.
+    shutil.copyfile(source_manifest, large / entry["file"])
     generator = manifest.get("generator")
     payload_hex = generator.get("payloadHex") if isinstance(generator, dict) else None
     file_name = manifest.get("fileName")
@@ -71,7 +74,7 @@ def _materialize_case(
             payload = bytes.fromhex(payload_hex)
         except ValueError as exc:
             raise GateError(f"INVALID_LITERAL_PAYLOAD:{entry['file']}") from exc
-        binary_path = fixtures / file_name
+        binary_path = generated / file_name
         if entry.get("binaryPlacement") == "symlink-escape":
             outside = case_root / "outside.f64le"
             outside.write_bytes(payload)
