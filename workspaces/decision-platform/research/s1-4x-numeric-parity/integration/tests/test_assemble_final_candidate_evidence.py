@@ -796,6 +796,94 @@ class AssembleFinalCandidateEvidenceTests(TestCase):
             },
         )
 
+    def _rebind_haskell_coverage_as_composite_v2(self) -> Path:
+        receipt_path = self.raw / "coverage/haskell-coverage-receipt.json"
+        receipt = _object(receipt_path)
+        execution = _object(
+            self.raw
+            / "coverage/haskell/haskell-property-execution-evidence.v1.json"
+        )
+        provenance_path = self.raw / assembler.HASKELL_CABAL_PROVENANCE
+        provenance = _object(provenance_path)
+        process_stdout = receipt_path.with_name(
+            "haskell-coverage-receipt.process.stdout"
+        )
+        process_stderr = receipt_path.with_name(
+            "haskell-coverage-receipt.process.stderr"
+        )
+        completion_stdout = receipt_path.with_name(
+            "haskell-coverage-receipt.generated-cabal-completion.stdout"
+        )
+        completion_stderr = receipt_path.with_name(
+            "haskell-coverage-receipt.generated-cabal-completion.stderr"
+        )
+        process_stdout.write_bytes(b"")
+        process_stderr.write_bytes(
+            b"usage: haskell_evidence.py generated-cabal-provenance\n"
+            + assembler.HASKELL_GHC_OPTION_ARGPARSE_FAILURE
+        )
+        completion_stdout.write_bytes(
+            (json.dumps(provenance, allow_nan=False, sort_keys=True) + "\n").encode()
+        )
+        completion_stderr.write_bytes(b"")
+        portable_argv = assembler._haskell_completion_portable_argv(  # noqa: SLF001
+            subject=self.commit,
+            cabal_sha256=_hash_bytes(self.generated_cabal),
+            profile_options=execution["profileGhcOptions"],
+            stack_root_path_id=execution["stackRootPathId"],
+            build_argv_sha256=execution["buildArgvSha256"],
+        )
+        receipt.update(
+            {
+                "schemaVersion": "s1.4x-property-execution-receipt-v2",
+                "process": {
+                    "startedAt": "2026-07-19T00:00:00.000000Z",
+                    "finishedAt": "2026-07-19T00:00:03.000000Z",
+                    "exitCode": 2,
+                    "stdout": {
+                        "path": process_stdout.name,
+                        "sha256": _sha256(process_stdout),
+                        "sizeBytes": process_stdout.stat().st_size,
+                    },
+                    "stderr": {
+                        "path": process_stderr.name,
+                        "sha256": _sha256(process_stderr),
+                        "sizeBytes": process_stderr.stat().st_size,
+                    },
+                },
+                "completion": {
+                    "reason": "ARGPARSE_DASH_PREFIXED_GHC_OPTION",
+                    "process": {
+                        "commandArgvSha256": "d" * 64,
+                        "portableArgv": portable_argv,
+                        "portableArgvSha256": _canonical_hash(portable_argv),
+                        "startedAt": "2026-07-19T00:00:04.000000Z",
+                        "finishedAt": "2026-07-19T00:00:05.000000Z",
+                        "exitCode": 0,
+                        "stdout": {
+                            "path": completion_stdout.name,
+                            "sha256": _sha256(completion_stdout),
+                            "sizeBytes": completion_stdout.stat().st_size,
+                        },
+                        "stderr": {
+                            "path": completion_stderr.name,
+                            "sha256": _sha256(completion_stderr),
+                            "sizeBytes": completion_stderr.stat().st_size,
+                        },
+                    },
+                    "artifact": {
+                        "path": provenance_path.name,
+                        "sha256": _sha256(provenance_path),
+                        "sizeBytes": provenance_path.stat().st_size,
+                    },
+                    "status": "PASS",
+                },
+            }
+        )
+        _write_json(receipt_path, receipt)
+        self._write_run_manifest()
+        return process_stderr
+
     def _materialize_cross_language(
         self,
         scala: dict[str, Any],
@@ -1957,6 +2045,35 @@ class AssembleFinalCandidateEvidenceTests(TestCase):
         )
         self.assertEqual(document["status"], "PASS")
         self.assertEqual(set(derived), set(CANDIDATES))
+
+    def test_haskell_composite_receipt_is_accepted_and_tamper_rejected(
+        self,
+    ) -> None:
+        process_stderr = self._rebind_haskell_coverage_as_composite_v2()
+        summary = self._assemble(self.temporary / "composite-v2")
+        self.assertEqual(summary["status"], "PASS")
+
+        process_stderr.write_bytes(
+            process_stderr.read_bytes().replace(
+                b"expected one argument\n",
+                b"expected one argument!\n",
+            )
+        )
+        receipt_path = self.raw / "coverage/haskell-coverage-receipt.json"
+        receipt = _object(receipt_path)
+        receipt["process"]["stderr"].update(
+            {
+                "sha256": _sha256(process_stderr),
+                "sizeBytes": process_stderr.stat().st_size,
+            }
+        )
+        _write_json(receipt_path, receipt)
+        self._write_run_manifest()
+        with self.assertRaisesRegex(
+            assembler.EvidenceAssemblyError,
+            "HASKELL_COVERAGE_RECEIPT_INVALID",
+        ):
+            self._assemble(self.temporary / "composite-v2-tampered")
 
     def test_rejects_coverage_runner_source_profile_and_receipt_drift(
         self,

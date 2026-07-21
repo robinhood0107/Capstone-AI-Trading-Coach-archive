@@ -17,13 +17,25 @@ PARENT = "1" * 40
 TARGET = "2" * 40
 
 
-def test_continuation_diff_allows_coverage_fd_recovery_files() -> None:
-    """봉인 run 재개에 필요한 FD 수정과 그 회귀 테스트만 허용한다."""
+def test_continuation_diff_allows_completion_and_hash_reseal_files() -> None:
+    """봉인 run 재개에 필요한 completion과 stale hash 재봉인만 허용한다."""
     expected = {
+        str(
+            continuation.S1_ROOT
+            / "integration/assemble_final_candidate_evidence.py"
+        ),
         str(continuation.S1_ROOT / "integration/coverage_execution.py"),
+        str(continuation.S1_ROOT / "integration/final_candidate_audit.py"),
+        str(
+            continuation.S1_ROOT
+            / "integration/tests/test_assemble_final_candidate_evidence.py"
+        ),
         str(
             continuation.S1_ROOT
             / "integration/tests/test_coverage_execution.py"
+        ),
+        str(
+            continuation.S1_ROOT / "reports/integration-baseline.v1.json"
         ),
     }
 

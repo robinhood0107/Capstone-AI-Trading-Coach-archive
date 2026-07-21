@@ -20,7 +20,11 @@ SEED_CORPUS = CONTRACT / "fixtures/property/property-seeds.v1.json"
 REAL_WRAPPER_FIXTURE = INTEGRATION / "tests/fixtures/coverage_wrapper.py"
 sys.path.insert(0, str(INTEGRATION))
 
-from coverage_execution import CoverageExecutionError, run_candidate_coverage  # noqa: E402
+from coverage_execution import (  # noqa: E402
+    CoverageExecutionError,
+    _validate_completed_generated_cabal_provenance,
+    run_candidate_coverage,
+)
 
 
 def _canonical_sha256(value: Any) -> str:
@@ -33,6 +37,55 @@ def _canonical_sha256(value: Any) -> str:
             sort_keys=True,
         ).encode("utf-8")
     ).hexdigest()
+
+
+def _materialize_haskell_completion_tree(
+    root: Path,
+    *,
+    stack_bin: Path,
+) -> tuple[Path, Path, bytes]:
+    """Ignored Hpack output에 의존하지 않는 최소 completion source tree를 만든다."""
+
+    numeric = root / "numeric"
+    contract = numeric / "contract"
+    haskell = numeric / "haskell"
+    tools = haskell / "tools"
+    contract.mkdir(parents=True)
+    tools.mkdir(parents=True)
+    (contract / "property-plan.v1.json").write_bytes(
+        (CONTRACT / "property-plan.v1.json").read_bytes()
+    )
+    seed_target = numeric / "contract/fixtures/property/property-seeds.v1.json"
+    seed_target.parent.mkdir(parents=True)
+    seed_target.write_bytes(SEED_CORPUS.read_bytes())
+    for name in (
+        "package.yaml",
+        "selected-profile.v1.json",
+        "source-inputs.v1.json",
+    ):
+        (haskell / name).write_bytes((S1_4X / "haskell" / name).read_bytes())
+    toolchain = json.loads(
+        (S1_4X / "haskell/toolchain-lock.v1.json").read_text(encoding="utf-8")
+    )
+    toolchain["resolvedTools"]["stack"]["sha256"] = hashlib.sha256(
+        stack_bin.read_bytes()
+    ).hexdigest()
+    (haskell / "toolchain-lock.v1.json").write_text(
+        json.dumps(toolchain, allow_nan=False, sort_keys=True),
+        encoding="utf-8",
+    )
+    for name in (
+        "run-property-evidence.sh",
+        "haskell_evidence.py",
+        "python-runtime.sh",
+    ):
+        target = tools / name
+        target.write_bytes((S1_4X / "haskell/tools" / name).read_bytes())
+        if name.endswith(".sh"):
+            target.chmod(0o700)
+    cabal = b"cabal-version: 2.0\nname: s1-4x-haskell\nversion: 0.1.0.0\n"
+    (haskell / "s1-4x-haskell.cabal").write_bytes(cabal)
+    return numeric, tools / "run-property-evidence.sh", cabal
 
 
 class CandidateCoverageExecutionTests(TestCase):
@@ -320,6 +373,420 @@ class CandidateCoverageExecutionTests(TestCase):
         self.assertNotEqual(
             execution["commandArgvSha256"],
             execution["outerCommandArgvSha256"],
+        )
+
+    def test_haskell_exact_ghc_option_argparse_failure_is_completed_once(
+        self,
+    ) -> None:
+        temporary = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        output = temporary / "haskell-output"
+        receipt = temporary / "haskell-receipt.json"
+        stack_bin = temporary / "stack"
+        stack_bin.write_bytes(b"pinned-stack")
+        stack_bin.chmod(0o700)
+        numeric, haskell_runner, cabal = _materialize_haskell_completion_tree(
+            temporary,
+            stack_bin=stack_bin,
+        )
+        haskell_root = numeric / "haskell"
+        pinned_fd = os.open(REAL_WRAPPER_FIXTURE, os.O_RDONLY)
+        self.addCleanup(os.close, pinned_fd)
+        subject = subprocess.run(
+            ["git", "-C", str(S1_4X), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        completion_calls: list[list[str]] = []
+
+        def runner(
+            command: list[str],
+            **kwargs: Any,
+        ) -> subprocess.CompletedProcess[bytes]:
+            environment = dict(os.environ)
+            environment["S1_4X_TEST_COVERAGE_CANDIDATE"] = "haskell"
+            fixture_command = [str(REAL_WRAPPER_FIXTURE), *command[1:]]
+            completed = subprocess.run(
+                fixture_command,
+                **{**kwargs, "env": environment},
+            )
+            execution_path = output / "haskell-property-execution-evidence.v1.json"
+            execution = json.loads(execution_path.read_text(encoding="utf-8"))
+            execution["outerCommandArgvSha256"] = _canonical_sha256(command)
+            execution["runnerSha256"] = hashlib.sha256(
+                haskell_runner.read_bytes()
+            ).hexdigest()
+            execution_path.write_text(
+                json.dumps(execution, allow_nan=False, sort_keys=True),
+                encoding="utf-8",
+            )
+            return subprocess.CompletedProcess(
+                command,
+                2,
+                completed.stdout,
+                (
+                    b"haskell_evidence.py generated-cabal-provenance: error: "
+                    b"argument --ghc-option: expected one argument\n"
+                ),
+            )
+
+        def provenance_runner(
+            command: list[str],
+            **kwargs: Any,
+        ) -> subprocess.CompletedProcess[bytes]:
+            completion_calls.append(command)
+            self.assertEqual(
+                command[:4],
+                [
+                    "/usr/bin/bash",
+                    "--noprofile",
+                    "--norc",
+                    "-c",
+                ],
+            )
+            self.assertEqual(kwargs["pass_fds"], (pinned_fd,))
+            generated = output / "generated"
+            generated.mkdir()
+            generated_cabal = generated / "s1-4x-haskell.cabal"
+            generated_cabal.write_bytes(cabal)
+            cabal_sha256 = hashlib.sha256(cabal).hexdigest()
+            execution = json.loads(
+                (output / "haskell-property-execution-evidence.v1.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            toolchain_path = haskell_root / "toolchain-lock.v1.json"
+            toolchain = json.loads(toolchain_path.read_text(encoding="utf-8"))
+            profile_options = execution["profileGhcOptions"]
+            build_portable_argv = [
+                "stack",
+                "--stack-root",
+                "<isolated-stack-root>",
+                "--work-dir",
+                "<isolated-stack-work-dir>",
+                "--system-ghc",
+                "--no-install-ghc",
+                "--stack-yaml",
+                "haskell/stack.yaml",
+                "--hpack-force",
+                "build",
+                "--test",
+                "--no-run-tests",
+                "--no-terminal",
+                "--ghc-options",
+                " ".join(profile_options),
+            ]
+            report = {
+                "schemaVersion": (
+                    "s1.4x-haskell-generated-cabal-provenance-v1"
+                ),
+                "benchmarkSubjectCommit": subject,
+                "toolchainLockSha256": hashlib.sha256(
+                    toolchain_path.read_bytes()
+                ).hexdigest(),
+                "packageYaml": {
+                    "path": (
+                        "workspaces/decision-platform/research/"
+                        "s1-4x-numeric-parity/haskell/package.yaml"
+                    ),
+                    "blobSha256": hashlib.sha256(
+                        (haskell_root / "package.yaml").read_bytes()
+                    ).hexdigest(),
+                },
+                "sourceInputManifest": {
+                    "path": (
+                        "workspaces/decision-platform/research/"
+                        "s1-4x-numeric-parity/haskell/source-inputs.v1.json"
+                    ),
+                    "blobSha256": execution["sourceInputManifestSha256"],
+                },
+                "stack": {
+                    "pathId": toolchain["resolvedTools"]["stack"]["pathId"],
+                    "version": toolchain["resolvedTools"]["stack"]["version"],
+                    "binarySha256": toolchain["resolvedTools"]["stack"]["sha256"],
+                },
+                "hpack": {
+                    "version": "0.39.6",
+                    "versionOutputSha256": hashlib.sha256(b"0.39.6\n").hexdigest(),
+                },
+                "build": {
+                    "portableArgv": build_portable_argv,
+                    "portableArgvSha256": _canonical_sha256(build_portable_argv),
+                    "runtimeArgvSha256": execution["buildArgvSha256"],
+                    "stackRootPathId": execution["stackRootPathId"],
+                    "exitCode": 0,
+                },
+                "generatedCabal": {
+                    "repositoryRelativePath": (
+                        "workspaces/decision-platform/research/"
+                        "s1-4x-numeric-parity/haskell/s1-4x-haskell.cabal"
+                    ),
+                    "artifactPath": (
+                        "coverage/haskell/generated/s1-4x-haskell.cabal"
+                    ),
+                    "sha256": cabal_sha256,
+                    "sizeBytes": len(cabal),
+                    "preBuildSha256": cabal_sha256,
+                    "postBuildSha256": cabal_sha256,
+                },
+                "sourceTreeSha256": execution["sourceTreeSha256"],
+                "propertyClosureSha256": execution["propertyClosureSha256"],
+                "status": "PASS",
+            }
+            (output / "haskell-generated-cabal-provenance.v1.json").write_text(
+                json.dumps(report, allow_nan=False, sort_keys=True),
+                encoding="utf-8",
+            )
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                (json.dumps(report, allow_nan=False, sort_keys=True) + "\n").encode(),
+                b"",
+            )
+
+        with patch.dict(
+            os.environ,
+            {
+                "S1_4X_BENCHMARK_SUBJECT_COMMIT": subject,
+                "S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH": (f"/proc/self/fd/{pinned_fd}"),
+                "S1_4X_STACK_BIN": str(stack_bin),
+            },
+            clear=False,
+        ):
+            result = run_candidate_coverage(
+                candidate="haskell",
+                candidate_profile=None,
+                runner_path=haskell_runner,
+                output_directory=output,
+                receipt_path=receipt,
+                property_plan_path=numeric / "contract/property-plan.v1.json",
+                function_registry_path=CONTRACT / "function-registry.v1.json",
+                error_registry_path=CONTRACT / "error-registry.v1.json",
+                runner=runner,
+                provenance_runner=provenance_runner,
+            )
+
+        self.assertEqual(result["status"], "PASS")
+        self.assertEqual(
+            result["schemaVersion"],
+            "s1.4x-property-execution-receipt-v2",
+        )
+        self.assertEqual(result["process"]["exitCode"], 2)
+        self.assertEqual(result["completion"]["process"]["exitCode"], 0)
+        self.assertEqual(
+            result["completion"]["process"]["portableArgvSha256"],
+            _canonical_sha256(result["completion"]["process"]["portableArgv"]),
+        )
+        self.assertEqual(len(completion_calls), 1)
+        self.assertIn("--ghc-option=-O0", completion_calls[0])
+        self.assertIn("--ghc-option=-fasm", completion_calls[0])
+        self.assertEqual(
+            receipt.with_name(f"{receipt.stem}.process.stderr").read_bytes(),
+            (
+                b"haskell_evidence.py generated-cabal-provenance: error: "
+                b"argument --ghc-option: expected one argument\n"
+            ),
+        )
+        provenance_path = output / "haskell-generated-cabal-provenance.v1.json"
+        completion_stdout = receipt.with_name(
+            f"{receipt.stem}.generated-cabal-completion.stdout"
+        ).read_bytes()
+        self.assertEqual(
+            json.loads(completion_stdout),
+            json.loads(provenance_path.read_bytes()),
+        )
+        forged = json.loads(provenance_path.read_text(encoding="utf-8"))
+        forged["sourceTreeSha256"] = "0" * 64
+        provenance_path.write_text(json.dumps(forged), encoding="utf-8")
+        execution = json.loads(
+            (output / "haskell-property-execution-evidence.v1.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        with self.assertRaisesRegex(
+            CoverageExecutionError,
+            "HASKELL_COMPLETION_PROVENANCE_INVALID",
+        ):
+            _validate_completed_generated_cabal_provenance(
+                provenance_path=provenance_path,
+                output=output,
+                haskell_root=haskell_root,
+                stack_bin=stack_bin,
+                execution=execution,
+                subject=subject,
+                cabal_sha256=hashlib.sha256(cabal).hexdigest(),
+                profile_options=execution["profileGhcOptions"],
+                completion_stdout=(
+                    json.dumps(forged, allow_nan=False, sort_keys=True) + "\n"
+                ).encode(),
+            )
+
+    def test_haskell_argparse_near_miss_never_runs_completion(self) -> None:
+        temporary = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        receipt = temporary / "haskell-receipt.json"
+        haskell_runner = S1_4X / "haskell/tools/run-property-evidence.sh"
+        completion_calls = 0
+        stderr = (
+            b"haskell_evidence.py generated-cabal-provenance: error: "
+            b"argument --ghc-option: expected one argument!\n"
+        )
+
+        def runner(
+            command: list[str],
+            **_: Any,
+        ) -> subprocess.CompletedProcess[bytes]:
+            return subprocess.CompletedProcess(command, 2, b"", stderr)
+
+        def provenance_runner(
+            command: list[str],
+            **_: Any,
+        ) -> subprocess.CompletedProcess[bytes]:
+            nonlocal completion_calls
+            completion_calls += 1
+            return subprocess.CompletedProcess(command, 0, b"", b"")
+
+        with self.assertRaisesRegex(
+            CoverageExecutionError,
+            "COVERAGE_PROCESS_FAILED:exit=2",
+        ):
+            run_candidate_coverage(
+                candidate="haskell",
+                candidate_profile=None,
+                runner_path=haskell_runner,
+                output_directory=temporary / "output",
+                receipt_path=receipt,
+                property_plan_path=CONTRACT / "property-plan.v1.json",
+                function_registry_path=CONTRACT / "function-registry.v1.json",
+                error_registry_path=CONTRACT / "error-registry.v1.json",
+                runner=runner,
+                provenance_runner=provenance_runner,
+            )
+
+        self.assertEqual(completion_calls, 0)
+        self.assertFalse(receipt.exists())
+        self.assertEqual(
+            receipt.with_name(f"{receipt.stem}.process.stderr").read_bytes(),
+            stderr,
+        )
+        failure = json.loads(
+            receipt.with_name(f"{receipt.stem}.failure.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(failure["failureCode"], "COVERAGE_PROCESS_FAILED")
+
+    def test_haskell_completion_failure_preserves_both_processes(self) -> None:
+        temporary = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        output = temporary / "haskell-output"
+        receipt = temporary / "haskell-receipt.json"
+        stack_bin = temporary / "stack"
+        stack_bin.write_bytes(b"pinned-stack")
+        stack_bin.chmod(0o700)
+        numeric, haskell_runner, _cabal = _materialize_haskell_completion_tree(
+            temporary,
+            stack_bin=stack_bin,
+        )
+        subject = subprocess.run(
+            ["git", "-C", str(S1_4X), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        original_error = (
+            b"haskell_evidence.py generated-cabal-provenance: error: "
+            b"argument --ghc-option: expected one argument\n"
+        )
+
+        def runner(
+            command: list[str],
+            **kwargs: Any,
+        ) -> subprocess.CompletedProcess[bytes]:
+            environment = dict(os.environ)
+            environment["S1_4X_TEST_COVERAGE_CANDIDATE"] = "haskell"
+            completed = subprocess.run(
+                [str(REAL_WRAPPER_FIXTURE), *command[1:]],
+                **{**kwargs, "env": environment},
+            )
+            execution_path = output / "haskell-property-execution-evidence.v1.json"
+            execution = json.loads(execution_path.read_text(encoding="utf-8"))
+            execution["outerCommandArgvSha256"] = _canonical_sha256(command)
+            execution["runnerSha256"] = hashlib.sha256(
+                haskell_runner.read_bytes()
+            ).hexdigest()
+            execution_path.write_text(
+                json.dumps(execution, allow_nan=False, sort_keys=True),
+                encoding="utf-8",
+            )
+            return subprocess.CompletedProcess(
+                command,
+                2,
+                completed.stdout,
+                original_error,
+            )
+
+        def provenance_runner(
+            command: list[str],
+            **_: Any,
+        ) -> subprocess.CompletedProcess[bytes]:
+            return subprocess.CompletedProcess(
+                command,
+                9,
+                b"completion output\n",
+                b"completion failed\n",
+            )
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "S1_4X_BENCHMARK_SUBJECT_COMMIT": subject,
+                    "S1_4X_STACK_BIN": str(stack_bin),
+                },
+                clear=False,
+            ),
+            self.assertRaisesRegex(
+                CoverageExecutionError,
+                "HASKELL_GENERATED_CABAL_COMPLETION_FAILED",
+            ),
+        ):
+            run_candidate_coverage(
+                candidate="haskell",
+                candidate_profile=None,
+                runner_path=haskell_runner,
+                output_directory=output,
+                receipt_path=receipt,
+                property_plan_path=numeric / "contract/property-plan.v1.json",
+                function_registry_path=CONTRACT / "function-registry.v1.json",
+                error_registry_path=CONTRACT / "error-registry.v1.json",
+                runner=runner,
+                provenance_runner=provenance_runner,
+            )
+
+        self.assertFalse(receipt.exists())
+        self.assertEqual(
+            receipt.with_name(f"{receipt.stem}.process.stderr").read_bytes(),
+            original_error,
+        )
+        attempt_path = receipt.with_name(
+            f"{receipt.stem}.generated-cabal-completion.json"
+        )
+        attempt = json.loads(attempt_path.read_text(encoding="utf-8"))
+        self.assertEqual(attempt["status"], "FAIL")
+        self.assertEqual(attempt["completion"]["exitCode"], 9)
+        self.assertEqual(
+            receipt.with_name(
+                f"{receipt.stem}.generated-cabal-completion.stderr"
+            ).read_bytes(),
+            b"completion failed\n",
+        )
+        failure = json.loads(
+            receipt.with_name(f"{receipt.stem}.failure.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(
+            failure["failureCode"],
+            "HASKELL_GENERATED_CABAL_COMPLETION_FAILED",
         )
 
     def test_haskell_pantry_is_updated_before_the_fresh_stack_root_build(
