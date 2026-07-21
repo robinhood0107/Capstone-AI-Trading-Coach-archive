@@ -516,6 +516,7 @@ class FullCorrectnessWiringTests(TestCase):
         s1_4x = INTEGRATION.parent
         qualified_runner = s1_4x / "haskell/tools/run-candidate.sh"
         integration_runner = INTEGRATION / "tools/run-haskell-candidate.sh"
+        scala_replay_runner = INTEGRATION / "tools/run-scala-replay-candidate.sh"
         aggregate = (
             INTEGRATION / "tools/run-integration-correctness.sh"
         ).read_text(encoding="utf-8")
@@ -544,6 +545,15 @@ class FullCorrectnessWiringTests(TestCase):
             'HASKELL_RUNNER="$INTEGRATION/tools/run-haskell-candidate.sh"',
             aggregate,
         )
+        self.assertTrue(scala_replay_runner.is_file())
+        self.assertTrue(scala_replay_runner.stat().st_mode & 0o111)
+        scala_replay_source = scala_replay_runner.read_text(encoding="utf-8")
+        self.assertIn('exec "$QUALIFIED_RUNNER" run "$@"', scala_replay_source)
+        self.assertIn(
+            'SCALA_REPLAY_RUNNER="$INTEGRATION/tools/run-scala-replay-candidate.sh"',
+            aggregate,
+        )
+        self.assertEqual(aggregate.count('--candidate "$SCALA_REPLAY_RUNNER"'), 2)
 
     def test_scala_runner_receives_required_run_subcommand(self) -> None:
         """Scala와 Haskell의 서로 다른 CLI contract를 orchestration에 고정한다."""

@@ -34,6 +34,10 @@ def test_continuation_diff_allows_completion_and_hash_reseal_files() -> None:
         ),
         str(
             continuation.S1_ROOT
+            / "integration/tools/run-scala-replay-candidate.sh"
+        ),
+        str(
+            continuation.S1_ROOT
             / "integration/tools/run-integration-correctness.sh"
         ),
         str(
