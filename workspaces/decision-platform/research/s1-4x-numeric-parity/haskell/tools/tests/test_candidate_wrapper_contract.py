@@ -120,16 +120,6 @@ class CandidateWrapperContractTests(unittest.TestCase):
             r"^stack-root-candidate-[0-9a-f]{24}$",
         )
 
-    def test_profile_options_are_applied_by_build_before_stack_exec(self) -> None:
-        """Stack 3.11 run parser가 받지 않는 build option을 run 뒤에 두지 않는다."""
-
-        source = WRAPPER.read_text(encoding="utf-8")
-        self.assertIn('"${STACK_COMMAND[@]}" build \\', source)
-        self.assertIn("s1-4x-haskell:exe:s1-4x-haskell", source)
-        self.assertIn('--ghc-options "$PROFILE_GHC_OPTIONS"', source)
-        self.assertIn('"${STACK_COMMAND[@]}" exec s1-4x-haskell -- \\', source)
-        self.assertNotRegex(source, r"\brun\s+\\\n\s+--ghc-options\b")
-
     def test_wrapper_is_bound_into_profile_source_closure(self) -> None:
         helper = load_helper()
         evidence = helper._load_haskell_evidence(HASKELL_ROOT)

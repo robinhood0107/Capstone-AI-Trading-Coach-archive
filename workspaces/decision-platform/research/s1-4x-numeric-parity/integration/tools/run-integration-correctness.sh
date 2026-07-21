@@ -21,7 +21,7 @@ mkdir -p "$OUTPUT_DIRECTORY"
 
 UV_BIN="${S1_4X_UV_BIN:?set the verified absolute uv executable path}"
 SCALA_RUNNER="$S1_4X/scala/tools/run-candidate.sh"
-HASKELL_RUNNER="$S1_4X/haskell/tools/run-candidate.sh"
+HASKELL_RUNNER="$INTEGRATION/tools/run-haskell-candidate.sh"
 for required in \
   "$UV_BIN" \
   "$SCALA_RUNNER" \
