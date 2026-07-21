@@ -90,6 +90,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             request_path=arguments.request,
             fixture_root=arguments.fixture_root,
             output_path=haskell_result,
+            timeout_seconds=600,
         )
         report = compare_candidate_results(
             python_executable=arguments.python_executable,

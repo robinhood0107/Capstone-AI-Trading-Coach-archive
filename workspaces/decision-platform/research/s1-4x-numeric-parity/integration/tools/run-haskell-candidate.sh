@@ -103,21 +103,35 @@ case "$PROFILE_ID" in
     ;;
 esac
 
-STACK_ROOT_PATH="$(
-  s1_4x_run_benchmark_python "$PROFILE_HELPER" candidate-stack-root \
-    --cache-root "$CACHE_ROOT" \
-    --output "$OUTPUT_PATH"
-)"
-if [[ "$STACK_ROOT_PATH" != "$CACHE_ROOT"/stack-root-candidate-* \
-  || -e "$STACK_ROOT_PATH" \
-  || -L "$STACK_ROOT_PATH" ]]; then
-  echo "output-bound candidate Stack root is not new" >&2
+SELECTED_PROFILE_SHA256="$(/usr/bin/sha256sum "$PROFILE_PATH" | /usr/bin/awk '{print $1}')"
+if [[ ! "$SELECTED_PROFILE_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
+  echo "selected profile SHA-256 is invalid" >&2
+  exit 69
+fi
+STACK_ROOT_PATH="$CACHE_ROOT/stack-root-integration-candidate-${SELECTED_PROFILE_SHA256:0:24}"
+if [[ ! -e "$STACK_ROOT_PATH" ]]; then
+  /usr/bin/mkdir -m 700 -- "$STACK_ROOT_PATH"
+fi
+if [[ ! -d "$STACK_ROOT_PATH" \
+  || -L "$STACK_ROOT_PATH" \
+  || "$(/usr/bin/realpath -e -- "$STACK_ROOT_PATH")" != "$STACK_ROOT_PATH" ]]; then
+  echo "profile-bound integration Stack root is unsafe" >&2
   exit 73
 fi
-/usr/bin/mkdir -m 700 -- "$STACK_ROOT_PATH"
-STACK_WORK_DIR=".stack-work-s1-4x-${STACK_ROOT_PATH##*/}"
-STACK_STDOUT="$STACK_ROOT_PATH/candidate.stdout"
-STACK_STDERR="$STACK_ROOT_PATH/candidate.stderr"
+OUTPUT_PATH_SHA256="$(printf '%s' "$OUTPUT_PATH" | /usr/bin/sha256sum | /usr/bin/awk '{print $1}')"
+STACK_WORK_DIR=".stack-work-s1-4x-integration-candidate-$PROFILE_ID"
+STACK_STDOUT="$STACK_ROOT_PATH/candidate-${OUTPUT_PATH_SHA256:0:24}.stdout"
+STACK_STDERR="$STACK_ROOT_PATH/candidate-${OUTPUT_PATH_SHA256:0:24}.stderr"
+if [[ -e "$STACK_STDOUT" || -L "$STACK_STDOUT" \
+  || -e "$STACK_STDERR" || -L "$STACK_STDERR" ]]; then
+  echo "integration candidate stream evidence already exists" >&2
+  exit 73
+fi
+if ! exec {STACK_LOCK_FD}>"$STACK_ROOT_PATH/.candidate.lock"; then
+  echo "integration candidate Stack lock could not be opened" >&2
+  exit 73
+fi
+/usr/bin/flock -x "$STACK_LOCK_FD"
 STACK_COMMAND=(
   "$GHCUP_BIN"
   --offline run --quick
@@ -151,6 +165,7 @@ set +e
   2>"$STACK_STDERR"
 candidate_status="$?"
 set -e
+exec {STACK_LOCK_FD}>&-
 
 if [[ -s "$STACK_STDOUT" ]]; then
   echo "candidate process wrote unexpected stdout" >&2
