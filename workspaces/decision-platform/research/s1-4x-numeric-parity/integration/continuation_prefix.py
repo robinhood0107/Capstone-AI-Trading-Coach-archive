@@ -71,6 +71,8 @@ CONTINUATION_DIFF_ALLOWLIST = frozenset(
         str(S1_ROOT / "integration/tests/test_detached_full_run.py"),
         str(S1_ROOT / "integration/tests/test_gate.py"),
         str(S1_ROOT / "integration/tests/test_native_oci_continuation_contract.py"),
+        str(S1_ROOT / "haskell/tools/run-candidate.sh"),
+        str(S1_ROOT / "haskell/tools/tests/test_candidate_wrapper_contract.py"),
         str(S1_ROOT / "contract/contract-manifest.v1.json"),
         str(S1_ROOT / "oracle/validate_environment.py"),
         str(S1_ROOT / "oracle/tests/test_validate_environment.py"),
