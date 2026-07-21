@@ -17,6 +17,7 @@ from gate import (  # noqa: E402
     GateError,
     compare_candidate_results,
     run_candidate,
+    run_reference_capture,
     run_transport_case,
     strict_json_load,
     validate_result_batch,
@@ -102,6 +103,177 @@ class ResultContractTests(TestCase):
 
 
 class ProcessContractTests(TestCase):
+    def _route_bound_python(self, root: Path) -> Path:
+        """실행 route를 풀면 전용 module이 사라지는 최소 venv를 만든다."""
+
+        base_python = Path(sys._base_executable).resolve(strict=True)
+        venv = root / "route-bound-venv"
+        python = venv / "bin" / "python"
+        python.parent.mkdir(parents=True)
+        python.symlink_to(base_python)
+        (venv / "pyvenv.cfg").write_text(
+            "\n".join(
+                (
+                    f"home = {base_python.parent}",
+                    "include-system-site-packages = false",
+                    "version = "
+                    f"{sys.version_info.major}.{sys.version_info.minor}."
+                    f"{sys.version_info.micro}",
+                    f"executable = {base_python}",
+                    "",
+                )
+            ),
+            encoding="utf-8",
+        )
+        site_packages = (
+            venv
+            / "lib"
+            / f"python{sys.version_info.major}.{sys.version_info.minor}"
+            / "site-packages"
+        )
+        site_packages.mkdir(parents=True)
+        (site_packages / "route_bound_dependency.py").write_text(
+            "ROUTE_BOUND = True\n",
+            encoding="utf-8",
+        )
+        return python
+
+    def test_reference_and_comparator_preserve_venv_python_route(self) -> None:
+        """Venv symlink argv[0]를 base Python으로 dereference하지 않는다."""
+
+        temp = self.enterContext(__import__("tempfile").TemporaryDirectory())
+        root = Path(temp)
+        python = self._route_bound_python(root)
+        request = root / "request.json"
+        expected = root / "expected.json"
+        candidate_a = root / "candidate-a.json"
+        candidate_b = root / "candidate-b.json"
+        for path in (request, expected, candidate_a, candidate_b):
+            path.write_text("{}", encoding="utf-8")
+        fixture_root = root / "fixtures"
+        production = root / "production"
+        research = root / "research"
+        for directory in (fixture_root, production, research):
+            directory.mkdir()
+
+        capture_script = root / "capture.py"
+        capture_script.write_text(
+            """import argparse
+import json
+from pathlib import Path
+import route_bound_dependency
+
+parser = argparse.ArgumentParser()
+parser.add_argument('--capture-report', type=Path, required=True)
+arguments, _ = parser.parse_known_args()
+arguments.capture_report.write_text(json.dumps({
+    'schemaVersion': 's1.4x-reference-capture-report-v1',
+    'status': 'PASS',
+    'processCount': 2,
+}), encoding='utf-8')
+print('REFERENCE_CAPTURE_PASS route-bound')
+""",
+            encoding="utf-8",
+        )
+        capture_report = root / "capture-report.json"
+        capture = run_reference_capture(
+            python_executable=python,
+            capture_script=capture_script,
+            request_path=request,
+            expected_path=expected,
+            fixture_root=fixture_root,
+            production_project=production,
+            research_project=research,
+            uv_executable=Path(sys.executable),
+            scratch_root=root / "scratch",
+            capture_report=capture_report,
+        )
+        self.assertEqual(capture["status"], "PASS")
+
+        comparator = root / "compare.py"
+        comparator.write_text(
+            """import argparse
+import json
+from pathlib import Path
+import route_bound_dependency
+
+parser = argparse.ArgumentParser()
+parser.add_argument('--output', type=Path, required=True)
+arguments, _ = parser.parse_known_args()
+arguments.output.write_text(json.dumps({
+    'schemaVersion': 's1.4x-comparison-report-v1',
+    'status': 'PASS',
+    'mismatchCount': 0,
+    'implementationCount': 2,
+}), encoding='utf-8')
+""",
+            encoding="utf-8",
+        )
+        comparison = compare_candidate_results(
+            python_executable=python,
+            comparator=comparator,
+            expected=expected,
+            request=request,
+            candidates=[candidate_a, candidate_b],
+            output=root / "comparison.json",
+        )
+        self.assertEqual(comparison["status"], "PASS")
+        self.assertEqual(comparison["mismatchCount"], 0)
+
+    def test_reference_failure_preserves_raw_streams_and_exact_leaf(self) -> None:
+        """실패 원인의 원문과 hash를 다음 run 진단용으로 남긴다."""
+
+        temp = self.enterContext(__import__("tempfile").TemporaryDirectory())
+        root = Path(temp)
+        inputs = [
+            root / name
+            for name in ("capture.py", "request.json", "expected.json")
+        ]
+        for path in inputs:
+            path.write_text("{}", encoding="utf-8")
+        fixture_root = root / "fixtures"
+        production = root / "production"
+        research = root / "research"
+        for directory in (fixture_root, production, research):
+            directory.mkdir()
+        report = root / "reference-capture.json"
+        stdout = b"diagnostic stdout\n"
+        stderr = b"Traceback (most recent call last):\nModuleNotFoundError: exact-leaf\n"
+
+        failed = Mock(
+            return_value=subprocess.CompletedProcess(
+                ["capture"],
+                1,
+                stdout,
+                stderr,
+            )
+        )
+        with self.assertRaisesRegex(
+            GateError,
+            "REFERENCE_CAPTURE_FAILED:exit=1:.*leaf=ModuleNotFoundError: exact-leaf",
+        ):
+            run_reference_capture(
+                python_executable=Path(sys.executable),
+                capture_script=inputs[0],
+                request_path=inputs[1],
+                expected_path=inputs[2],
+                fixture_root=fixture_root,
+                production_project=production,
+                research_project=research,
+                uv_executable=Path(sys.executable),
+                scratch_root=root / "scratch",
+                capture_report=report,
+                runner=failed,
+            )
+        self.assertEqual(
+            (root / "reference-capture.json.failure.stdout.log").read_bytes(),
+            stdout,
+        )
+        self.assertEqual(
+            (root / "reference-capture.json.failure.stderr.log").read_bytes(),
+            stderr,
+        )
+
     def test_candidate_success_requires_empty_streams_and_atomic_result(self) -> None:
         request = _request()
         with self.subTest("success"):
@@ -267,15 +439,19 @@ class ComparatorTests(TestCase):
         )
         self.assertEqual(result["mismatchCount"], 0)
 
+        comparator_stderr = b"RuntimeError: comparator-leaf\n"
         failed = Mock(
             return_value=subprocess.CompletedProcess(
                 ["compare"],
                 1,
                 b'{"status":"FAIL"}',
-                b"",
+                comparator_stderr,
             )
         )
-        with self.assertRaisesRegex(GateError, "COMPARISON_FAILED"):
+        with self.assertRaisesRegex(
+            GateError,
+            "COMPARISON_FAILED:exit=1:.*leaf=RuntimeError: comparator-leaf",
+        ):
             compare_candidate_results(
                 python_executable=Path(sys.executable),
                 comparator=Path("/repo/oracle/compare_results.py"),
@@ -285,3 +461,7 @@ class ComparatorTests(TestCase):
                 output=root / "failed.json",
                 runner=failed,
             )
+        self.assertEqual(
+            (root / "failed.json.failure.stderr.log").read_bytes(),
+            comparator_stderr,
+        )
