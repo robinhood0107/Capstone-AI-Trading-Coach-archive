@@ -120,9 +120,13 @@ if [[ ! -d "$STACK_ROOT_PATH" \
 fi
 OUTPUT_PATH_SHA256="$(printf '%s' "$OUTPUT_PATH" | /usr/bin/sha256sum | /usr/bin/awk '{print $1}')"
 STACK_WORK_DIR=".stack-work-s1-4x-integration-candidate-$PROFILE_ID"
+STACK_BUILD_STDOUT="$STACK_ROOT_PATH/candidate-${OUTPUT_PATH_SHA256:0:24}.build.stdout"
+STACK_BUILD_STDERR="$STACK_ROOT_PATH/candidate-${OUTPUT_PATH_SHA256:0:24}.build.stderr"
 STACK_STDOUT="$STACK_ROOT_PATH/candidate-${OUTPUT_PATH_SHA256:0:24}.stdout"
 STACK_STDERR="$STACK_ROOT_PATH/candidate-${OUTPUT_PATH_SHA256:0:24}.stderr"
-if [[ -e "$STACK_STDOUT" || -L "$STACK_STDOUT" \
+if [[ -e "$STACK_BUILD_STDOUT" || -L "$STACK_BUILD_STDOUT" \
+  || -e "$STACK_BUILD_STDERR" || -L "$STACK_BUILD_STDERR" \
+  || -e "$STACK_STDOUT" || -L "$STACK_STDOUT" \
   || -e "$STACK_STDERR" || -L "$STACK_STDERR" ]]; then
   echo "integration candidate stream evidence already exists" >&2
   exit 73
@@ -151,16 +155,29 @@ STACK_COMMAND=(
 )
 
 set +e
-(
-  set -e
-  "${STACK_COMMAND[@]}" build \
-    s1-4x-haskell:exe:s1-4x-haskell \
-    --ghc-options "$PROFILE_GHC_OPTIONS"
-  "${STACK_COMMAND[@]}" exec s1-4x-haskell -- \
-    --request "$REQUEST_PATH" \
-    --fixture-root "$FIXTURE_ROOT" \
-    --output "$OUTPUT_PATH"
-) \
+"${STACK_COMMAND[@]}" build \
+  s1-4x-haskell:exe:s1-4x-haskell \
+  --ghc-options "$PROFILE_GHC_OPTIONS" \
+  >"$STACK_BUILD_STDOUT" \
+  2>"$STACK_BUILD_STDERR"
+build_status="$?"
+set -e
+if [[ "$build_status" -ne 0 ]]; then
+  if [[ -s "$STACK_BUILD_STDOUT" ]]; then
+    /usr/bin/cat -- "$STACK_BUILD_STDOUT" >&2
+  fi
+  if [[ -s "$STACK_BUILD_STDERR" ]]; then
+    /usr/bin/cat -- "$STACK_BUILD_STDERR" >&2
+  fi
+  exec {STACK_LOCK_FD}>&-
+  exit "$build_status"
+fi
+
+set +e
+"${STACK_COMMAND[@]}" exec s1-4x-haskell -- \
+  --request "$REQUEST_PATH" \
+  --fixture-root "$FIXTURE_ROOT" \
+  --output "$OUTPUT_PATH" \
   >"$STACK_STDOUT" \
   2>"$STACK_STDERR"
 candidate_status="$?"
