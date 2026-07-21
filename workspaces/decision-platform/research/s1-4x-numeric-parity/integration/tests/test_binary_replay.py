@@ -34,6 +34,8 @@ class BinaryTransportReplayTests(TestCase):
             manifest_name = request["cases"][0]["arguments"]["returns"]["manifestFile"]
             manifest_path = fixture_root / "large" / manifest_name
             self.assertTrue(manifest_path.is_file())
+            if manifest_name == "manifest-symlink-escape.json":
+                self.assertTrue(manifest_path.is_symlink())
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             self.assertEqual(
                 request["cases"][0]["fixtureId"],
@@ -111,6 +113,6 @@ class BinaryTransportReplayTests(TestCase):
         self.assertTrue(
             (
                 root
-                / "replay/manifest-symlink-escape/fixtures/large/generated/symlink-escape.f64le"
+                / "replay/manifest-symlink-escape/fixtures/large/manifest-symlink-escape.json"
             ).is_symlink()
         )
