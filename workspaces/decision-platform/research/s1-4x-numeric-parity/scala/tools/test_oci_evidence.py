@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import copy
 import importlib.util
 import json
@@ -14,6 +15,10 @@ from pathlib import Path
 SCALA_ROOT = Path(__file__).resolve().parents[1]
 TOOLS_ROOT = SCALA_ROOT / "tools"
 SHA = "1" * 64
+
+
+class DigestGatePassed(RuntimeError):
+    """RepoDigest 검증 뒤의 candidate read까지 도달했음을 표시한다."""
 
 
 def load_module():
@@ -35,8 +40,96 @@ def expect_error(module, operation, message: str) -> None:
         raise AssertionError(message)
 
 
+def assert_repo_digest_gate(
+    module,
+    repo_digests: object,
+    *,
+    accepted: bool,
+) -> None:
+    """Docker Hub canonical alias만 exact digest로 통과하는지 실행 경계에서 검증한다."""
+
+    digest = "2" * 64
+    arguments = argparse.Namespace(
+        base_image=f"docker.io/library/eclipse-temurin@sha256:{digest}",
+        candidate=Path("/candidate.jar"),
+        docker=Path("/docker"),
+        docker_sha256="3" * 64,
+    )
+    originals = (
+        module.docker_identity,
+        module.inspect_image,
+        module.single_regular_bytes,
+    )
+    module.docker_identity = lambda *_args, **_kwargs: {"daemonId": "test"}
+    module.inspect_image = lambda *_args, **_kwargs: {
+        "Id": f"sha256:{'4' * 64}",
+        "RepoDigests": repo_digests,
+    }
+
+    def stop_after_digest_gate(*_args, **_kwargs):
+        raise DigestGatePassed
+
+    module.single_regular_bytes = stop_after_digest_gate
+    try:
+        module.execute_build(arguments)
+    except DigestGatePassed:
+        if not accepted:
+            raise AssertionError(
+                f"unsafe RepoDigests passed the source digest gate: {repo_digests!r}"
+            )
+    except module.OciEvidenceError as error:
+        if accepted or str(error) != "BASE_IMAGE_SOURCE_DIGEST_NOT_LOCAL":
+            raise AssertionError(
+                f"unexpected RepoDigests gate result: {repo_digests!r}: {error}"
+            ) from error
+    else:
+        raise AssertionError("candidate read sentinel was not reached")
+    finally:
+        (
+            module.docker_identity,
+            module.inspect_image,
+            module.single_regular_bytes,
+        ) = originals
+
+
 def main() -> int:
     module = load_module()
+    digest = "2" * 64
+    for repository in (
+        "eclipse-temurin",
+        "library/eclipse-temurin",
+        "docker.io/library/eclipse-temurin",
+        "index.docker.io/library/eclipse-temurin",
+    ):
+        assert_repo_digest_gate(
+            module,
+            [f"{repository}@sha256:{digest}"],
+            accepted=True,
+        )
+    assert_repo_digest_gate(
+        module,
+        [
+            f"unrelated/example@sha256:{'8' * 64}",
+            f"eclipse-temurin@sha256:{digest}",
+        ],
+        accepted=True,
+    )
+    for repo_digests in (
+        None,
+        f"eclipse-temurin@sha256:{digest}",
+        [42],
+        [
+            f"docker.io/library/eclipse-temurin@sha256:{digest}",
+            42,
+        ],
+        [f"docker.io/library/eclipse-temurin@sha256:{'9' * 64}"],
+        [f"docker.io/library/not-temurin@sha256:{digest}"],
+        [f"registry.example/library/eclipse-temurin@sha256:{digest}"],
+        [f"ECLIPSE-TEMURIN@sha256:{digest}"],
+        [f"eclipse-temurin@sha256:{digest} "],
+    ):
+        assert_repo_digest_gate(module, repo_digests, accepted=False)
+
     base_ref = f"eclipse-temurin@sha256:{'2' * 64}"
     base_id = f"sha256:{'3' * 64}"
     image_id = f"sha256:{'4' * 64}"
