@@ -188,6 +188,10 @@ HASKELL_CABAL_PROVENANCE = Path(
 HASKELL_GENERATED_CABAL = Path(
     "coverage/haskell/generated/s1-4x-haskell.cabal"
 )
+HASKELL_GHC_OPTION_ARGPARSE_FAILURE = (
+    b"haskell_evidence.py generated-cabal-provenance: error: argument "
+    b"--ghc-option: expected one argument\n"
+)
 PROPERTY_FROZEN_INPUTS = {
     "property-plan": S1_4X_RELATIVE / "contract/property-plan.v1.json",
     "property-seeds": S1_4X_RELATIVE
@@ -2572,6 +2576,66 @@ def _utc_timestamp(value: Any, *, label: str) -> dt.datetime:
     return parsed
 
 
+def _coverage_stream_snapshot(
+    closure: RawClosure,
+    *,
+    receipt_path: Path,
+    reference: Any,
+    expected_name: str,
+    label: str,
+) -> Snapshot:
+    stream = _require_object(
+        reference,
+        required={"path", "sha256", "sizeBytes"},
+        label=label,
+        exact=True,
+    )
+    snapshot = closure.snapshot(receipt_path.parent / expected_name, label=label)
+    if (
+        stream.get("path") != expected_name
+        or stream.get("sha256") != snapshot.sha256
+        or stream.get("sizeBytes") != snapshot.size_bytes
+    ):
+        raise EvidenceAssemblyError(f"{label}_INVALID")
+    return snapshot
+
+
+def _haskell_completion_portable_argv(
+    *,
+    subject: str,
+    cabal_sha256: str,
+    profile_options: list[str],
+    stack_root_path_id: str,
+    build_argv_sha256: str,
+) -> list[str]:
+    return [
+        "bash",
+        "--noprofile",
+        "--norc",
+        "-c",
+        'source "$1"; shift; s1_4x_run_benchmark_python "$@"',
+        "s1-4x-generated-cabal-completion",
+        "haskell/tools/python-runtime.sh",
+        "haskell/tools/haskell_evidence.py",
+        "generated-cabal-provenance",
+        "--haskell-root",
+        "haskell",
+        "--output-directory",
+        "coverage/haskell",
+        "--benchmark-subject-commit",
+        subject,
+        "--stack-bin",
+        "<pinned-stack-bin>",
+        "--pre-build-sha256",
+        cabal_sha256,
+        *[f"--ghc-option={option}" for option in profile_options],
+        "--stack-root-path-id",
+        stack_root_path_id,
+        "--runtime-build-argv-sha256",
+        build_argv_sha256,
+    ]
+
+
 def _validate_coverage(
     closure: RawClosure,
     *,
@@ -2758,18 +2822,6 @@ def _validate_coverage(
             label=f"{candidate.upper()}_COVERAGE_RECEIPT_RUNNER",
             exact=True,
         )
-        process = _require_object(
-            receipt.get("process"),
-            required={
-                "startedAt",
-                "finishedAt",
-                "exitCode",
-                "stdoutSha256",
-                "stderrSha256",
-            },
-            label=f"{candidate.upper()}_COVERAGE_RECEIPT_PROCESS",
-            exact=True,
-        )
         artifacts = receipt.get("artifacts")
         expected_artifacts = [
             {
@@ -2783,14 +2835,6 @@ def _validate_coverage(
                 execution_snapshot,
             )
         ]
-        receipt_started = _utc_timestamp(
-            process.get("startedAt"),
-            label=f"{candidate.upper()}_COVERAGE_RECEIPT_TIMESTAMP",
-        )
-        receipt_finished = _utc_timestamp(
-            process.get("finishedAt"),
-            label=f"{candidate.upper()}_COVERAGE_RECEIPT_TIMESTAMP",
-        )
         execution_started = _utc_timestamp(
             execution_document.get("startedAt"),
             label=f"{candidate.upper()}_COVERAGE_EXECUTION_TIMESTAMP",
@@ -2799,9 +2843,30 @@ def _validate_coverage(
             execution_document.get("finishedAt"),
             label=f"{candidate.upper()}_COVERAGE_EXECUTION_TIMESTAMP",
         )
-        if (
-            set(receipt)
-            != {
+        receipt_schema = receipt.get("schemaVersion")
+        extra_receipt_snapshots: list[Snapshot] = []
+        if receipt_schema == "s1.4x-property-execution-receipt-v1":
+            process = _require_object(
+                receipt.get("process"),
+                required={
+                    "startedAt",
+                    "finishedAt",
+                    "exitCode",
+                    "stdoutSha256",
+                    "stderrSha256",
+                },
+                label=f"{candidate.upper()}_COVERAGE_RECEIPT_PROCESS",
+                exact=True,
+            )
+            receipt_started = _utc_timestamp(
+                process.get("startedAt"),
+                label=f"{candidate.upper()}_COVERAGE_RECEIPT_TIMESTAMP",
+            )
+            receipt_finished = _utc_timestamp(
+                process.get("finishedAt"),
+                label=f"{candidate.upper()}_COVERAGE_RECEIPT_TIMESTAMP",
+            )
+            expected_receipt_fields = {
                 "schemaVersion",
                 "candidate",
                 "runner",
@@ -2810,8 +2875,206 @@ def _validate_coverage(
                 "coverage",
                 "status",
             }
-            or receipt.get("schemaVersion")
-            != "s1.4x-property-execution-receipt-v1"
+            receipt_process_valid = (
+                process.get("exitCode") == 0
+                and _is_sha256(process.get("stdoutSha256"))
+                and _is_sha256(process.get("stderrSha256"))
+            )
+            receipt_timeline_valid = (
+                receipt_started
+                <= execution_started
+                <= execution_finished
+                <= receipt_finished
+            )
+        elif (
+            candidate == "haskell"
+            and receipt_schema == "s1.4x-property-execution-receipt-v2"
+        ):
+            process = _require_object(
+                receipt.get("process"),
+                required={
+                    "startedAt",
+                    "finishedAt",
+                    "exitCode",
+                    "stdout",
+                    "stderr",
+                },
+                label="HASKELL_COVERAGE_RECEIPT_PROCESS",
+                exact=True,
+            )
+            completion = _require_object(
+                receipt.get("completion"),
+                required={"reason", "process", "artifact", "status"},
+                label="HASKELL_COVERAGE_COMPLETION",
+                exact=True,
+            )
+            completion_process = _require_object(
+                completion.get("process"),
+                required={
+                    "commandArgvSha256",
+                    "portableArgv",
+                    "portableArgvSha256",
+                    "startedAt",
+                    "finishedAt",
+                    "exitCode",
+                    "stdout",
+                    "stderr",
+                },
+                label="HASKELL_COVERAGE_COMPLETION_PROCESS",
+                exact=True,
+            )
+            completion_artifact = _require_object(
+                completion.get("artifact"),
+                required={"path", "sha256", "sizeBytes"},
+                label="HASKELL_COVERAGE_COMPLETION_ARTIFACT",
+                exact=True,
+            )
+            process_stdout = _coverage_stream_snapshot(
+                closure,
+                receipt_path=receipt_path,
+                reference=process.get("stdout"),
+                expected_name="haskell-coverage-receipt.process.stdout",
+                label="HASKELL_COVERAGE_PROCESS_STDOUT",
+            )
+            process_stderr = _coverage_stream_snapshot(
+                closure,
+                receipt_path=receipt_path,
+                reference=process.get("stderr"),
+                expected_name="haskell-coverage-receipt.process.stderr",
+                label="HASKELL_COVERAGE_PROCESS_STDERR",
+            )
+            completion_stdout = _coverage_stream_snapshot(
+                closure,
+                receipt_path=receipt_path,
+                reference=completion_process.get("stdout"),
+                expected_name=(
+                    "haskell-coverage-receipt."
+                    "generated-cabal-completion.stdout"
+                ),
+                label="HASKELL_COVERAGE_COMPLETION_STDOUT",
+            )
+            completion_stderr = _coverage_stream_snapshot(
+                closure,
+                receipt_path=receipt_path,
+                reference=completion_process.get("stderr"),
+                expected_name=(
+                    "haskell-coverage-receipt."
+                    "generated-cabal-completion.stderr"
+                ),
+                label="HASKELL_COVERAGE_COMPLETION_STDERR",
+            )
+            extra_receipt_snapshots.extend(
+                (
+                    process_stdout,
+                    process_stderr,
+                    completion_stdout,
+                    completion_stderr,
+                )
+            )
+            receipt_started = _utc_timestamp(
+                process.get("startedAt"),
+                label="HASKELL_COVERAGE_RECEIPT_TIMESTAMP",
+            )
+            receipt_finished = _utc_timestamp(
+                process.get("finishedAt"),
+                label="HASKELL_COVERAGE_RECEIPT_TIMESTAMP",
+            )
+            completion_started = _utc_timestamp(
+                completion_process.get("startedAt"),
+                label="HASKELL_COVERAGE_COMPLETION_TIMESTAMP",
+            )
+            completion_finished = _utc_timestamp(
+                completion_process.get("finishedAt"),
+                label="HASKELL_COVERAGE_COMPLETION_TIMESTAMP",
+            )
+            generated_cabal = toolchains["haskell"]["generatedCabal"]
+            generated_receipt = generated_cabal["receipt"]
+            generated_document = generated_cabal["document"]
+            profile_options = execution_document.get("profileGhcOptions")
+            stack_root_path_id = execution_document.get("stackRootPathId")
+            build_argv_sha256 = execution_document.get("buildArgvSha256")
+            if (
+                profile_options not in (["-O0", "-fasm"], ["-O2", "-fasm"])
+                or not isinstance(stack_root_path_id, str)
+                or not isinstance(build_argv_sha256, str)
+            ):
+                raise EvidenceAssemblyError(
+                    "HASKELL_COVERAGE_RECEIPT_INVALID"
+                )
+            expected_portable_argv = _haskell_completion_portable_argv(
+                subject=subject,
+                cabal_sha256=str(generated_cabal["sha256"]),
+                profile_options=profile_options,
+                stack_root_path_id=stack_root_path_id,
+                build_argv_sha256=build_argv_sha256,
+            )
+            try:
+                completion_stdout_document = strict_json_load(
+                    completion_stdout.payload
+                )
+            except (UnicodeError, ValueError) as exc:
+                raise EvidenceAssemblyError(
+                    "HASKELL_COVERAGE_COMPLETION_STDOUT_INVALID"
+                ) from exc
+            expected_receipt_fields = {
+                "schemaVersion",
+                "candidate",
+                "runner",
+                "process",
+                "completion",
+                "artifacts",
+                "coverage",
+                "status",
+            }
+            receipt_process_valid = (
+                process.get("exitCode") == 2
+                and process_stdout.payload == b""
+                and process_stderr.payload.endswith(
+                    HASKELL_GHC_OPTION_ARGPARSE_FAILURE
+                )
+                and completion.get("reason")
+                == "ARGPARSE_DASH_PREFIXED_GHC_OPTION"
+                and completion.get("status") == "PASS"
+                and completion_process.get("exitCode") == 0
+                and _is_sha256(completion_process.get("commandArgvSha256"))
+                and completion_process.get("portableArgv")
+                == expected_portable_argv
+                and completion_process.get("portableArgvSha256")
+                == _sha256_bytes(
+                    _canonical_json_bytes(expected_portable_argv)[:-1]
+                )
+                and completion_stdout_document == generated_document
+                and completion_stdout.payload
+                == (
+                    json.dumps(
+                        generated_document,
+                        allow_nan=False,
+                        sort_keys=True,
+                    )
+                    + "\n"
+                ).encode("utf-8")
+                and completion_stderr.payload == b""
+                and completion_artifact
+                == {
+                    "path": generated_receipt.relative_path.name,
+                    "sha256": generated_receipt.sha256,
+                    "sizeBytes": generated_receipt.size_bytes,
+                }
+            )
+            receipt_timeline_valid = (
+                receipt_started
+                <= execution_started
+                <= execution_finished
+                <= receipt_finished
+                <= completion_started
+                <= completion_finished
+            )
+        else:
+            raise EvidenceAssemblyError(
+                f"{candidate.upper()}_COVERAGE_RECEIPT_INVALID"
+            )
+        if (
+            set(receipt) != expected_receipt_fields
             or receipt.get("candidate") != candidate
             or receipt.get("status") != "PASS"
             or receipt_runner["sha256"] != runner.sha256
@@ -2822,15 +3085,8 @@ def _validate_coverage(
                 else "outerCommandArgvSha256"
             )
             or not _is_sha256(receipt_runner["commandArgvSha256"])
-            or process["exitCode"] != 0
-            or not _is_sha256(process["stdoutSha256"])
-            or not _is_sha256(process["stderrSha256"])
-            or not (
-                receipt_started
-                <= execution_started
-                <= execution_finished
-                <= receipt_finished
-            )
+            or not receipt_process_valid
+            or not receipt_timeline_valid
             or artifacts != expected_artifacts
             or receipt.get("coverage") != derived
             or coverage_document["candidates"][index] != derived
@@ -2874,6 +3130,7 @@ def _validate_coverage(
                 execution_snapshot,
                 receipt_snapshot,
                 runner,
+                *extra_receipt_snapshots,
                 *frozen_snapshots.values(),
             )
         )

@@ -53,18 +53,25 @@ S1_ROOT = PurePosixPath(
 # parent..target에는 continuation orchestration과 host-validity 완화만 허용한다.
 CONTINUATION_DIFF_ALLOWLIST = frozenset(
     {
+        str(S1_ROOT / "integration/assemble_final_candidate_evidence.py"),
         str(S1_ROOT / "integration/coverage_execution.py"),
         str(S1_ROOT / "integration/continuation_prefix.py"),
         str(S1_ROOT / "integration/detached_full_run.py"),
+        str(S1_ROOT / "integration/final_candidate_audit.py"),
         str(S1_ROOT / "integration/tools/launch-detached-full-run.sh"),
         str(S1_ROOT / "integration/tools/run-native-oci-regression-gates.sh"),
         str(S1_ROOT / "integration/tests/test_continuation_prefix.py"),
         str(S1_ROOT / "integration/tests/test_coverage_execution.py"),
+        str(
+            S1_ROOT
+            / "integration/tests/test_assemble_final_candidate_evidence.py"
+        ),
         str(S1_ROOT / "integration/tests/test_detached_full_run.py"),
         str(S1_ROOT / "integration/tests/test_native_oci_continuation_contract.py"),
         str(S1_ROOT / "contract/contract-manifest.v1.json"),
         str(S1_ROOT / "oracle/validate_environment.py"),
         str(S1_ROOT / "oracle/tests/test_validate_environment.py"),
+        str(S1_ROOT / "reports/integration-baseline.v1.json"),
         str(S1_ROOT / "README.md"),
         str(S1_ROOT / "integration/README.md"),
     }
