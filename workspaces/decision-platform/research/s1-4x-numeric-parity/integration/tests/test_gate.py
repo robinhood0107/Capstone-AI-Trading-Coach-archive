@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -12,6 +13,8 @@ from unittest import TestCase
 from unittest.mock import Mock, patch
 
 INTEGRATION = Path(__file__).resolve().parents[1]
+HASKELL_RUNNER = INTEGRATION / "tools" / "run-haskell-candidate.sh"
+SCALA_REPLAY_RUNNER = INTEGRATION / "tools" / "run-scala-replay-candidate.sh"
 sys.path.insert(0, str(INTEGRATION))
 
 from gate import (  # noqa: E402
@@ -332,6 +335,132 @@ arguments.output.write_text(json.dumps({
                     runner=noisy_runner,
                 )
 
+    def test_haskell_candidate_and_transport_forward_pinned_python_fd(self) -> None:
+        """상위 gate가 봉인한 Python FD 하나만 Haskell child에 상속한다."""
+
+        temp = self.enterContext(__import__("tempfile").TemporaryDirectory())
+        root = Path(temp)
+        request_path = root / "request.json"
+        request_path.write_text(json.dumps(_request()), encoding="utf-8")
+        invalid_request = root / "invalid-request.json"
+        invalid_request.write_text('{"schemaVersion":"wrong"}', encoding="utf-8")
+        fixture_root = root / "fixtures"
+        fixture_root.mkdir()
+        candidate_output = root / "candidate-result.json"
+        scala_output = root / "scala-result.json"
+        transport_output = root / "transport-result.json"
+        pinned_fd = os.open(sys.executable, os.O_RDONLY)
+        self.addCleanup(os.close, pinned_fd)
+        pinned_environment = {
+            "S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH": (
+                f"/proc/self/fd/{pinned_fd}"
+            )
+        }
+
+        def candidate_runner(
+            command: list[str], **kwargs: Any
+        ) -> subprocess.CompletedProcess[bytes]:
+            self.assertEqual(kwargs.get("pass_fds"), (pinned_fd,))
+            candidate_output.write_text(json.dumps(_result()), encoding="utf-8")
+            return subprocess.CompletedProcess(command, 0, b"", b"")
+
+        def transport_runner(
+            command: list[str], **kwargs: Any
+        ) -> subprocess.CompletedProcess[bytes]:
+            self.assertEqual(kwargs.get("pass_fds"), (pinned_fd,))
+            return subprocess.CompletedProcess(
+                command,
+                64,
+                b"",
+                json.dumps(
+                    {
+                        "schemaVersion": "s1.4x-transport-error-v1",
+                        "code": "request_invalid",
+                    }
+                ).encode("utf-8"),
+            )
+
+        def scala_runner(
+            command: list[str], **kwargs: Any
+        ) -> subprocess.CompletedProcess[bytes]:
+            self.assertEqual(kwargs.get("pass_fds"), ())
+            scala_output.write_text(json.dumps(_result()), encoding="utf-8")
+            return subprocess.CompletedProcess(command, 0, b"", b"")
+
+        with patch.dict(os.environ, pinned_environment, clear=False):
+            run_candidate(
+                label="haskell",
+                command_template=[
+                    str(HASKELL_RUNNER),
+                    "{protocol_args}",
+                ],
+                request_path=request_path,
+                fixture_root=fixture_root,
+                output_path=candidate_output,
+                runner=candidate_runner,
+            )
+            run_transport_case(
+                label="run-haskell-candidate.sh/request-wrong-version.json",
+                command_template=[
+                    str(HASKELL_RUNNER),
+                    "{protocol_args}",
+                ],
+                request_path=invalid_request,
+                fixture_root=fixture_root,
+                output_path=transport_output,
+                expected_exit=64,
+                expected_code="request_invalid",
+                runner=transport_runner,
+            )
+            run_candidate(
+                label="scala",
+                command_template=[str(SCALA_REPLAY_RUNNER), "{protocol_args}"],
+                request_path=request_path,
+                fixture_root=fixture_root,
+                output_path=scala_output,
+                runner=scala_runner,
+            )
+
+    def test_haskell_invalid_pinned_python_fd_fails_before_launch(self) -> None:
+        """잘못됐거나 닫힌 FD는 source path 재개방 없이 거부한다."""
+
+        temp = self.enterContext(__import__("tempfile").TemporaryDirectory())
+        root = Path(temp)
+        request_path = root / "request.json"
+        request_path.write_text(json.dumps(_request()), encoding="utf-8")
+        fixture_root = root / "fixtures"
+        fixture_root.mkdir()
+        output = root / "result.json"
+        runner = Mock()
+
+        for pinned_path, failure_code in (
+            ("/proc/self/fd/2", "BENCHMARK_PYTHON_PINNED_FD_INVALID"),
+            ("/proc/self/fd/999999", "BENCHMARK_PYTHON_PINNED_FD_UNAVAILABLE"),
+        ):
+            with (
+                self.subTest(pinned_path=pinned_path),
+                patch.dict(
+                    os.environ,
+                    {
+                        "S1_4X_BENCHMARK_PYTHON_PINNED_FD_PATH": pinned_path,
+                    },
+                    clear=False,
+                ),
+                self.assertRaisesRegex(GateError, failure_code),
+            ):
+                run_candidate(
+                    label="haskell",
+                    command_template=[
+                        str(HASKELL_RUNNER),
+                        "{protocol_args}",
+                    ],
+                    request_path=request_path,
+                    fixture_root=fixture_root,
+                    output_path=output,
+                    runner=runner,
+                )
+        runner.assert_not_called()
+
     def test_untyped_candidate_failure_preserves_raw_streams(self) -> None:
         """Wrapper usage 오류도 transport parse 예외에 가리지 않고 보존한다."""
 
@@ -545,6 +674,8 @@ class FullCorrectnessWiringTests(TestCase):
             'HASKELL_RUNNER="$INTEGRATION/tools/run-haskell-candidate.sh"',
             aggregate,
         )
+        self.assertEqual(aggregate.count('--haskell-runner "$HASKELL_RUNNER"'), 2)
+        self.assertEqual(aggregate.count('--candidate "$HASKELL_RUNNER"'), 2)
         self.assertTrue(scala_replay_runner.is_file())
         self.assertTrue(scala_replay_runner.stat().st_mode & 0o111)
         scala_replay_source = scala_replay_runner.read_text(encoding="utf-8")
