@@ -17,6 +17,19 @@ PARENT = "1" * 40
 TARGET = "2" * 40
 
 
+def test_continuation_diff_allows_coverage_fd_recovery_files() -> None:
+    """봉인 run 재개에 필요한 FD 수정과 그 회귀 테스트만 허용한다."""
+    expected = {
+        str(continuation.S1_ROOT / "integration/coverage_execution.py"),
+        str(
+            continuation.S1_ROOT
+            / "integration/tests/test_coverage_execution.py"
+        ),
+    }
+
+    assert expected <= continuation.CONTINUATION_DIFF_ALLOWLIST
+
+
 def _sealed_manifest(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
