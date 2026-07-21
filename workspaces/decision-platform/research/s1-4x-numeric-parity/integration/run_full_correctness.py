@@ -74,6 +74,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             label="scala",
             command_template=[
                 str(arguments.scala_runner.resolve(strict=True)),
+                "run",
                 "{protocol_args}",
             ],
             request_path=arguments.request,

@@ -459,12 +459,19 @@ def run_candidate(
             raise GateError(f"CANDIDATE_TIMEOUT_LEFT_OUTPUT:{label}") from exc
         raise GateError(f"CANDIDATE_TIMEOUT:{label}:exit=124") from exc
     if completed.returncode != 0:
-        transport = validate_transport_failure(
-            exit_code=completed.returncode,
-            stdout=completed.stdout,
-            stderr=completed.stderr,
-            output_exists=output_path.exists() or output_path.is_symlink(),
-        )
+        try:
+            transport = validate_transport_failure(
+                exit_code=completed.returncode,
+                stdout=completed.stdout,
+                stderr=completed.stderr,
+                output_exists=output_path.exists() or output_path.is_symlink(),
+            )
+        except GateError as exc:
+            raise GateError(
+                f"CANDIDATE_PROCESS_FAILED:{label}:exit={completed.returncode}:"
+                f"{_failure_details(output_path, completed)}:"
+                f"transportLeaf={exc}"
+            ) from exc
         raise GateError(f"CANDIDATE_TRANSPORT_FAILURE:{label}:{transport['code']}")
     if completed.stdout or completed.stderr:
         raise GateError(f"SUCCESS_STREAM_NOT_EMPTY:{label}")
