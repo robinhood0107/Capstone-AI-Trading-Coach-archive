@@ -528,6 +528,10 @@ class FullCorrectnessWiringTests(TestCase):
         runner_source = integration_runner.read_text(encoding="utf-8")
         self.assertIn('"${STACK_COMMAND[@]}" build \\', runner_source)
         self.assertIn('"${STACK_COMMAND[@]}" exec s1-4x-haskell -- \\', runner_source)
+        self.assertIn("SELECTED_PROFILE_SHA256", runner_source)
+        self.assertIn("stack-root-integration-candidate-", runner_source)
+        self.assertIn("/usr/bin/flock -x", runner_source)
+        self.assertNotIn("candidate-stack-root", runner_source)
         self.assertIn(
             'HASKELL_RUNNER="$INTEGRATION/tools/run-haskell-candidate.sh"',
             aggregate,
@@ -640,3 +644,4 @@ class FullCorrectnessWiringTests(TestCase):
             haskell_call.kwargs["command_template"],
             [str(haskell_runner.resolve()), "{protocol_args}"],
         )
+        self.assertEqual(haskell_call.kwargs["timeout_seconds"], 600)
