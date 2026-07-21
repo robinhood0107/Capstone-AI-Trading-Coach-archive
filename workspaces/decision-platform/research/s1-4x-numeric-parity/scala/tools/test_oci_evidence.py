@@ -116,6 +116,7 @@ def main() -> int:
     )
     for repo_digests in (
         None,
+        [],
         f"eclipse-temurin@sha256:{digest}",
         [42],
         [
@@ -129,6 +130,11 @@ def main() -> int:
         [f"eclipse-temurin@sha256:{digest} "],
     ):
         assert_repo_digest_gate(module, repo_digests, accepted=False)
+    short_reference = f"eclipse-temurin@sha256:{digest}"
+    assert not module.local_base_digest_is_bound(
+        short_reference,
+        [short_reference],
+    )
 
     base_ref = f"eclipse-temurin@sha256:{'2' * 64}"
     base_id = f"sha256:{'3' * 64}"
