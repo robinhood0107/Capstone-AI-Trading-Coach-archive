@@ -30,7 +30,6 @@
 
 ### 근거와 위험을 설명하는 교육용 투자 의사결정
 
-- 금융 개념과 위험 지표를 쉬운 설명과 출처로 제공합니다.
 - 모델이 BUY, HOLD, SELL을 낸 이유와 서로 다른 모델의 결과를 비교합니다.
 - 주문이 허용되거나 차단된 원칙과 RiskEngine 판단을 숨기지 않습니다.
 - 손절, 변동성, MDD, ATR과 포트폴리오 한도가 결과에 미치는 영향을 보여 줍니다.
@@ -48,11 +47,10 @@
 | 투자 원칙 관리 | 프리셋으로 원칙을 만들고 자금 한도, 손절, 익절과 보유 기간을 조정합니다. |
 | 모델 신호 비교 | LSTM과 규칙 기반 모델의 BUY, HOLD, SELL 신호를 같은 기준으로 비교합니다. |
 | 위험 검토 | 주문 전 RiskEngine이 원칙 위반, 포트폴리오 한도와 Kill Switch를 확인합니다. |
-| 근거 있는 AI 설명 | 저장된 자료와 검증된 공개 근거를 바탕으로 설명과 출처를 함께 보여 줍니다. |
 | KIS 투자계좌 연결 | 사용자의 App Key, Secret, 계좌번호로 주문 가능 금액, 잔고와 체결 내역을 조회합니다. |
 | AI 자동매매 봇 | 검증된 후보만 자동 매수하고 손절, 익절, ATR trailing stop과 보유 만기를 관리합니다. |
 | 백테스트 | 거래비용을 포함한 전략 결과와 MDD, Sharpe, 손익 곡선을 확인합니다. |
-| 학습일지 | 판단, 주문, AI 답변과 자동운용 실행 기록을 하나의 일지로 연결합니다. |
+| 학습일지 | 판단, 주문과 자동운용 실행 기록을 하나의 일지로 연결합니다. |
 
 ### 당시 사용 흐름
 
@@ -69,21 +67,19 @@ flowchart LR
     H --> I["학습일지와 리포트"]
 ```
 
-자동운용에서도 순서는 같습니다. AI는 후보의 순위를 조정하거나 근거가 있는 매수를 막을 수 있지만,
-새 종목을 추가하거나 주문 수량을 늘리거나 RiskEngine을 우회할 수 없습니다. 주문 수량과 청산 조건은
-항상 서버의 결정적 규칙이 계산합니다.
+자동운용에서도 순서는 같습니다. 주문 수량과 청산 조건은 항상 서버의 결정적 규칙이 계산합니다.
 
 ## 화면과 시연 영상
 
-당시 대시보드는 투자 원칙, 금융 가이드, 모델 비교, 주문 검토, 자동운용과 학습일지를 연결했습니다. 주문 검토는 원칙과 위험 판정을 표시하고 자동운용 화면은 실행 이력과 차단 사유를 보여 줍니다. 금융 Agent는 답변의 출처를 제공하고 질문과 답변을 학습일지에 남길 수 있도록 했습니다.
+당시 대시보드는 투자 원칙, 모델 비교, 주문 검토, 자동운용과 학습일지를 연결했습니다. 주문 검토는 원칙과 위험 판정을 표시하고 자동운용 화면은 실행 이력과 차단 사유를 보여 줍니다.
 
 원본 README에 실린 모의 시연 화면입니다. 화면에 표시된 잔고와 백테스트 수치는 실제 투자 수익이나 검증된 성과의 근거가 아닙니다.
 
 | 자동운용 | 주문 검토 |
 |---|---|
 | <img src="docs/readme-media/automation.png" width="420" alt="자동운용 화면"> | <img src="docs/readme-media/order-review.png" width="420" alt="주문 검토 화면"> |
-| **백테스트** | **금융 Agent** |
-| <img src="docs/readme-media/backtest.png" width="420" alt="백테스트 화면"> | <img src="docs/readme-media/agent-answers.png" width="420" alt="금융 Agent 답변 화면"> |
+| **백테스트** | |
+| <img src="docs/readme-media/backtest.png" width="420" alt="백테스트 화면"> | |
 
 
 [![MARS 시연 영상 썸네일](https://img.youtube.com/vi/CU7284u1rk0/0.jpg)](https://www.youtube.com/watch?v=CU7284u1rk0)
@@ -107,12 +103,11 @@ flowchart LR
 flowchart TB
     UI["Experience Dashboard\nNext.js · TypeScript"]
     API["Decision Platform\nSpring Boot · Kotlin"]
-    PY["AI·데이터·자동운용 서비스\nPython · gRPC"]
+    PY["데이터·자동운용 서비스\nPython · gRPC"]
     RE["Return Engine\nLSTM · Rule · Backtest"]
-    DB[("PostgreSQL + pgvector")]
+    DB[("PostgreSQL")]
     CACHE[("Redis")]
     KIS["KIS Brokerage API\nMock 또는 Live 단일 모드"]
-    AI["Vertex AI · Voyage AI"]
 
     UI -->|same-origin /api| API
     API --> PY
@@ -121,7 +116,6 @@ flowchart TB
     PY --> CACHE
     RE -->|검증된 artifact| API
     PY --> KIS
-    PY --> AI
 ```
 
 ## 기술 스택
@@ -135,7 +129,7 @@ flowchart TB
 4. Decision Platform
 5. Experience Dashboard
 
-임베딩과 OCR 모델이 필요하면 BGE-M3와 PaddleOCR-VL 컨테이너를 추가할 수 있습니다. 데이터베이스
+OCR 모델이 필요하면 PaddleOCR-VL 컨테이너를 추가할 수 있습니다. 데이터베이스
 마이그레이션, Seed 적재와 초기 계정 생성은 `docker compose run --rm` 형식의 일회성 작업으로 실행됩니다.
 
 ## 빠른 시작
@@ -154,15 +148,11 @@ cd Capstone-AI-Trading-Coach-archive
 
 웹 화면은 `http://127.0.0.1:3000`, API 상태는 `http://127.0.0.1:18080/actuator/health`, API 문서는 `http://127.0.0.1:18080/swagger-ui.html`로 안내했습니다. 기본 환경과 별도로 `P1_DEMO_STACK=true ./capstone up`을 이용한 시연 스택이 있었습니다. 종료는 볼륨을 유지하는 `down`을 사용합니다.
 
-당시 모의계좌 연결에는 `KIS_MOCK_APP_KEY`, `KIS_MOCK_APP_SECRET`, `KIS_MOCK_ACCOUNT_NO`가 필요했습니다. 기본 기동 후 `mock configure`가 세 값을 입력받고 `mock doctor`가 로컬 자격 증명 파일 형식과 권한을 검사했습니다. `mock doctor`는 계좌나 주문 API를 호출하지 않는다고 안내했습니다. RAG 답변 생성에는 Voyage 키와 Google Cloud Vertex 서비스 계정 JSON도 필요했습니다.
+당시 모의계좌 연결에는 `KIS_MOCK_APP_KEY`, `KIS_MOCK_APP_SECRET`, `KIS_MOCK_ACCOUNT_NO`가 필요했습니다. 기본 기동 후 `mock configure`가 세 값을 입력받고 `mock doctor`가 로컬 자격 증명 파일 형식과 권한을 검사했습니다. `mock doctor`는 계좌나 주문 API를 호출하지 않는다고 안내했습니다.
 
 ```bash
 ./capstone mock configure
 ./capstone mock doctor
-printf 'VOYAGE_API_KEY=%s\n' "<발급받은 key>" >> deploy/p1/.state-app/secrets/rag-v2.env
-chmod 640 deploy/p1/.state-app/secrets/rag-v2.env
-install -m 640 <다운로드한 파일>.json \
-  deploy/p1/.state-app/secrets/pre-s5-vertex-service-account.json
 ```
 
 처음 연결할 때 다음 인증은 XKRX 거래일 09:10~15:00 KST에 수행하도록 안내했습니다. `mock certify`는 실제 KIS 모의주문과 취소를 호출하고 체결과 계좌를 대사합니다. 상태 조회만 하는 명령이 아니며 실행하면 모의계좌에 주문과 취소가 발생합니다.
@@ -178,7 +168,7 @@ install -m 640 <다운로드한 파일>.json \
 
 ### 당시 환경 변수와 실행 옵션
 
-기본 화면은 외부 키 없이 둘러보도록 안내했습니다. 자동매매와 RAG를 함께 이용하는 당시 최소 설정에는 KIS 모의투자 값과 `VOYAGE_API_KEY`, Google Cloud Vertex 서비스 계정 JSON이 필요했습니다. 비밀값은 실제 값을 문서에 적지 않고 전용 저장 위치에 두도록 안내했습니다.
+기본 화면은 외부 키 없이 둘러보도록 안내했습니다. 당시 모의투자 자동매매 설정에는 KIS 모의투자 값이 필요했습니다. 비밀값은 실제 값을 문서에 적지 않고 전용 저장 위치에 두도록 안내했습니다.
 
 
 
@@ -189,7 +179,6 @@ install -m 640 <다운로드한 파일>.json \
 | `P1_PROJECT_NAME` | Docker Compose 프로젝트 이름 | `capstone-p1` |
 | `P1_STATE_DIR` | 비밀값과 실행 상태 경로 | `deploy/p1/.state-app` |
 | `P1_SECRETS_DIR` | secret 파일 경로 | `<state>/secrets` |
-| `P1_RAG_RUNTIME_DIR` | RAG 로컬 artifact 루트 | `<state>/rag-v2-root` |
 | `P1_KIS_MOCK_RUNTIME_DIR` | 모의투자 인증 영수증 경로 | `<state>/mock` |
 
 ```bash
@@ -203,14 +192,10 @@ P1_API_PORT=18081 P1_DASHBOARD_PORT=3001 ./capstone up
 
 | 변수 | 값 | 설명 |
 |---|---|---|
-| `P1_RAG_V2_ENABLED` | `true`/`false` | RAG v2 검색 |
-| `P1_RAG_V2_VERTEX_ENABLED` | `true`/`false` | RAG 답변 생성 |
-| `P1_RAG_V2_VERTEX_AUTO_ACTIVATION_ENABLED` | `true`/`false` | Vertex 자동 활성화 정책 |
-| `P1_STRONG_LLM_ENABLED` | `true`/`false` | Strong LLM 판단 |
 | `P1_AUTOMATION_RUNTIME_ENABLED` | `true`/`false` | 자동운용 runtime 프로세스 |
 | `P1_KIS_MOCK_ONLINE_ENABLED` | `true`/`false` | KIS 모의투자 어댑터 |
 
-`--mock` 옵션이 뒤의 세 값을 함께 맞추므로 보통은 직접 지정하지 않습니다.
+`--mock` 옵션이 모의투자와 자동운용 설정을 함께 맞추므로 보통은 직접 지정하지 않습니다.
 
 ### 당시 추가 실행 옵션
 
@@ -230,11 +215,10 @@ Capstone-AI-Trading-Coach/
 ├── capstone.ps1                     # Windows PowerShell 실행 명령
 ├── deploy/p1/                       # Docker Compose와 배포 스크립트
 ├── workspaces/
-│   ├── decision-platform/           # Spring API, Python AI·데이터·자동운용
+│   ├── decision-platform/           # Spring API, Python 데이터·자동운용
 │   ├── return-engine/               # LSTM, 규칙 모델, 백테스트
 │   └── experience-dashboard/        # Next.js Dashboard
 ├── contracts/                       # OpenAPI, JSON Schema, protobuf 계약
-├── capstone-rag/                    # 공개 RAG 자료와 source card
 ├── docs/                            # 설계, API와 운영 문서
 └── artifacts/                       # 검증 가능한 소형 결과와 예시
 ```
@@ -256,7 +240,6 @@ Capstone-AI-Trading-Coach/
 - KIS 장애를 내부 가상계좌로 자동 전환하지 않습니다.
 - Mock과 Live를 동시에 사용하거나 한쪽 실패를 다른 쪽으로 자동 전환하지 않습니다.
 - Live는 이전 모드의 OPEN 주문, 포지션, 미해결 대사가 하나라도 있으면 provider 호출 전에 차단합니다.
-- AI는 주문을 직접 생성하거나 수량을 늘릴 권한이 없습니다.
 
 ### 당시 대표 API
 
@@ -269,7 +252,6 @@ Capstone-AI-Trading-Coach/
 | 인증 | `POST /api/v1/auth/login` |
 | 투자 원칙 | `GET /api/v1/principles`, `POST /api/v1/principles` |
 | 위험 판단 | `POST /api/v1/decisions/evaluate-order` |
-| RAG | `POST /api/v2/rag/ask`, `GET /api/v2/rag/history` |
 | 투자계좌 | `GET /api/v1/brokerage/mock/accounts/{accountId}/balances` |
 | 주문 대사 | `POST /api/v1/brokerage/orders/{orderId}/reconcile` |
 | 체결 조회 | `GET /api/v1/brokerage/mock/accounts/{accountId}/fills` |
@@ -349,7 +331,7 @@ PYTHONPATH=src uv run python -m return_engine --help
 
 <!-- MARS_CAPTURE_GALLERY_BEGIN -->
 <details>
-<summary>실행 화면 전체 갤러리</summary>
+<summary>실행 화면 갤러리</summary>
 
 화면은 각 실행에서 촬영한 UI 기록입니다. 최초 실행은 API 미기동으로 제품 흐름 검증에 실패했습니다. 다른 실행도 화면 촬영만으로 기능 검증을 뜻하지 않습니다. 화면 수치는 모의 시연값이며 실제 수익 성과의 근거가 아닙니다.
 
@@ -424,34 +406,6 @@ PYTHONPATH=src uv run python -m return_engine --help
 **demo / desktop / /model-evaluation / ctl_CAGR**
 
 ![demo / desktop / /model-evaluation / ctl_CAGR](docs/readme-media/capture-959ac9d8fe6213ce83e9.png)
-
-**demo / desktop / /rag / page**
-
-![demo / desktop / /rag / page](docs/readme-media/capture-d64228d1455349b4fcfd.png)
-
-**demo / desktop / /rag / ctl_밝게**
-
-![demo / desktop / /rag / ctl_밝게](docs/readme-media/capture-7ebabc838ae9c0354978.png)
-
-**demo / desktop / /rag / ctl_어둡게**
-
-![demo / desktop / /rag / ctl_어둡게](docs/readme-media/capture-3544b08095f30d983bde.png)
-
-**demo / desktop / /rag / ctl_동의**
-
-![demo / desktop / /rag / ctl_동의](docs/readme-media/capture-7773da7ebad7c19134ef.png)
-
-**demo / desktop / /rag / ctl_짧게**
-
-![demo / desktop / /rag / ctl_짧게](docs/readme-media/capture-76ed693c5d5fa0051f78.png)
-
-**demo / desktop / /rag / ctl_자세히**
-
-![demo / desktop / /rag / ctl_자세히](docs/readme-media/capture-5be01a0ba88a3ccc58b4.png)
-
-**demo / desktop / /rag / ctl_연구근거1개더보기**
-
-![demo / desktop / /rag / ctl_연구근거1개더보기](docs/readme-media/capture-14d8adedac0253b0e40d.png)
 
 **demo / desktop / /automation / page**
 
@@ -756,38 +710,6 @@ PYTHONPATH=src uv run python -m return_engine --help
 **demo / mobile / /model-evaluation / ctl_Sharpe**
 
 ![demo / mobile / /model-evaluation / ctl_Sharpe](docs/readme-media/capture-2b89c75329757b3dbaf5.png)
-
-**demo / mobile / /rag / page**
-
-![demo / mobile / /rag / page](docs/readme-media/capture-18b462d6bd629b4d8a81.png)
-
-**demo / mobile / /rag / ctl_밝게**
-
-![demo / mobile / /rag / ctl_밝게](docs/readme-media/capture-ba66cf62cff30211fd4b.png)
-
-**demo / mobile / /rag / ctl_어둡게**
-
-![demo / mobile / /rag / ctl_어둡게](docs/readme-media/capture-00b27fd4ccbf50f1eb4b.png)
-
-**demo / mobile / /rag / ctl_동의**
-
-![demo / mobile / /rag / ctl_동의](docs/readme-media/capture-0e7819abad3d8c2a6331.png)
-
-**demo / mobile / /rag / ctl_철회**
-
-![demo / mobile / /rag / ctl_철회](docs/readme-media/capture-899a1a2cac690a889c6a.png)
-
-**demo / mobile / /rag / ctl_짧게**
-
-![demo / mobile / /rag / ctl_짧게](docs/readme-media/capture-81e1b8a1a9fd5d985177.png)
-
-**demo / mobile / /rag / ctl_자세히**
-
-![demo / mobile / /rag / ctl_자세히](docs/readme-media/capture-8778375ba5cee384abef.png)
-
-**demo / mobile / /rag / ctl_연구근거1개더보기**
-
-![demo / mobile / /rag / ctl_연구근거1개더보기](docs/readme-media/capture-af90c558f56dd6bf393e.png)
 
 **demo / mobile / /automation / page**
 
@@ -1165,34 +1087,6 @@ PYTHONPATH=src uv run python -m return_engine --help
 
 ![experience-dashboard / desktop / /model-evaluation / ctl_OpenNextjsDevTools](docs/readme-media/capture-adc3efa8d0fc3c726138.png)
 
-**experience-dashboard / desktop / /rag / page**
-
-![experience-dashboard / desktop / /rag / page](docs/readme-media/capture-f81a2affbbfa74681a15.png)
-
-**experience-dashboard / desktop / /rag / ctl_로그인**
-
-![experience-dashboard / desktop / /rag / ctl_로그인](docs/readme-media/capture-123336626cbe4d5c0208.png)
-
-**experience-dashboard / desktop / /rag / ctl_회원가입**
-
-![experience-dashboard / desktop / /rag / ctl_회원가입](docs/readme-media/capture-98de25a3c8b7d41a1e9b.png)
-
-**experience-dashboard / desktop / /rag / ctl_로그인**
-
-![experience-dashboard / desktop / /rag / ctl_로그인](docs/readme-media/capture-643d640476f27c6c6616.png)
-
-**experience-dashboard / desktop / /rag / ctl_테마**
-
-![experience-dashboard / desktop / /rag / ctl_테마](docs/readme-media/capture-65f83d03fc3d2e3c8f8a.png)
-
-**experience-dashboard / desktop / /rag / ctl_시작하기**
-
-![experience-dashboard / desktop / /rag / ctl_시작하기](docs/readme-media/capture-41a5b881958324802c5d.png)
-
-**experience-dashboard / desktop / /rag / ctl_OpenNextjsDevTools**
-
-![experience-dashboard / desktop / /rag / ctl_OpenNextjsDevTools](docs/readme-media/capture-2ee30b1b2c9efacc325b.png)
-
 **experience-dashboard / desktop / /automation / page**
 
 ![experience-dashboard / desktop / /automation / page](docs/readme-media/capture-72fc7f4589d33d460983.png)
@@ -1476,34 +1370,6 @@ PYTHONPATH=src uv run python -m return_engine --help
 **experience-dashboard / mobile / /model-evaluation / ctl_OpenNextjsDevTools**
 
 ![experience-dashboard / mobile / /model-evaluation / ctl_OpenNextjsDevTools](docs/readme-media/capture-7576ad7c7b705088b589.png)
-
-**experience-dashboard / mobile / /rag / page**
-
-![experience-dashboard / mobile / /rag / page](docs/readme-media/capture-7a5e054214daef1aad42.png)
-
-**experience-dashboard / mobile / /rag / ctl_로그인**
-
-![experience-dashboard / mobile / /rag / ctl_로그인](docs/readme-media/capture-2998211a6ef1c08f5593.png)
-
-**experience-dashboard / mobile / /rag / ctl_회원가입**
-
-![experience-dashboard / mobile / /rag / ctl_회원가입](docs/readme-media/capture-c2fbe3b2b42122b3ac5b.png)
-
-**experience-dashboard / mobile / /rag / ctl_로그인**
-
-![experience-dashboard / mobile / /rag / ctl_로그인](docs/readme-media/capture-398e7dddb682ff449318.png)
-
-**experience-dashboard / mobile / /rag / ctl_테마**
-
-![experience-dashboard / mobile / /rag / ctl_테마](docs/readme-media/capture-678f2cdee243d41d89cb.png)
-
-**experience-dashboard / mobile / /rag / ctl_시작하기**
-
-![experience-dashboard / mobile / /rag / ctl_시작하기](docs/readme-media/capture-52f0f88d361f23db5e6c.png)
-
-**experience-dashboard / mobile / /rag / ctl_OpenNextjsDevTools**
-
-![experience-dashboard / mobile / /rag / ctl_OpenNextjsDevTools](docs/readme-media/capture-159b21ab575ad025ab5d.png)
 
 **experience-dashboard / mobile / /automation / page**
 
